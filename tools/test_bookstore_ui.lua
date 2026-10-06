@@ -1,0 +1,330 @@
+-- Exercise navigation and persisted write uncertainty with real controller code.
+package.path='miuread.koplugin/?.lua;'..package.path
+local function copy(value,seen)
+    if type(value)~='table' then return value end
+    seen=seen or {}; if seen[value] then return seen[value] end
+    local out={}; seen[value]=out
+    for k,v in pairs(value) do out[k]=copy(v,seen) end
+    return out
+end
+package.preload['miuread.util']=function() return {
+    copy=copy,utf8_truncate=function(s,n) return s:sub(1,n) end,
+} end
+package.preload['logger']=function() return {warn=function() end} end
+local source_file=assert(io.open('miuread.koplugin/main.lua','rb'))
+local source=source_file:read('*a'); source_file:close()
+local child_factory=assert(source:match('(local function interactive_child_store.-\nend)'))
+local child_method=assert(source:match('function Plugin:_interactive_child_store%(auth,data_dir,temp_dir%).-\nend'))
+local child_methods=assert(loadstring('local U=require("miuread.util"); local Plugin={}\n'
+    ..child_factory..'\n'..child_method..'\nreturn Plugin'))()
+local views={}
+local dialogs={}
+package.preload['ui/widget/buttondialog']=function()
+    local class={}
+    function class:extend(attrs)
+        local subclass=setmetatable(attrs or {},{__index=self})
+        return subclass
+    end
+    function class:new(opts) return setmetatable(opts,{__index=self}) end
+    return class
+end
+package.preload['miuread.shelf_view']=function() return {show=function(opts)
+    local view={opts=opts,page=1,_miu_closed=false}
+    views[#views+1]=view
+    require('ui/uimanager'):show(view)
+    return view
+end} end
+package.preload['miuread.dialog_transition']=function() return {cancel_pending=function() end} end
+package.preload['ui/uimanager']=function() return {_window_stack={},close=function(self,view)
+    view._miu_closed=true
+    for i=#self._window_stack,1,-1 do
+        if self._window_stack[i].widget==view then table.remove(self._window_stack,i) end
+    end
+    if view.opts and view.opts.on_close then view.opts.on_close(view) end
+    if view.close_callback then view.close_callback() end
+end,show=function(self,widget)
+    self._window_stack[#self._window_stack+1]={widget=widget}
+    if widget.buttons then dialogs[#dialogs+1]=widget end
+end,isWidgetShown=function(_,widget) return widget._miu_closed~=true end} end
+local api={page_calls=0,writes=0,reads=0}
+function api:category_books(id,cursor,rank)
+    self.page_calls=self.page_calls+1
+    self.last_category,self.last_cursor,self.last_rank=id,cursor,rank
+    return {books={{bookInfo={bookId='book'..cursor,title='Title '..cursor,author='Writer',newRating=89},
+        searchIdx=cursor+20}},hasMore=cursor<40 and 1 or 0}
+end
+function api:recommend_books(cursor,count)
+    if self.refresh_auth then
+        local auth=self.store:auth(); auth.api_key='renewed'
+        self.store:save_auth(auth)
+    end
+    self.last_count=count
+    return {books={{bookId='recommend',title='Recommended',searchIdx=cursor+1}},hasMore=0}
+end
+function api:similar_books(id,cursor,count,session)
+    self.last_similar={id,cursor,count,session}
+    return {booksimilar={sessionId='next-session',books={{idx=cursor+20,
+        book={bookInfo={bookId='similar',title='Similar'}}}},hasMore=1}}
+end
+function api:store_categories()
+    return {data={{categories={{CategoryId='all',title='All',type=0},
+        {CategoryId='700000',title='Computing',type=0,sublist={{CategoryId='700001',title='Programming',type=0}}}}}}}
+end
+function api:book_on_shelf()
+    self.reads=self.reads+1
+    if self.fail_reads then error('read failed') end
+    return self.present==true
+end
+function api:add_to_shelf()
+    self.writes=self.writes+1
+    if self.effect~=false then self.present=true end
+    if self.lose_reply then error('POST timed out') end
+end
+package.preload['miuread.api']=function() return {new=function(_,http,store,reader)
+    api.store,api.reader=store,reader
+    return api
+end} end
+package.preload['miuread.http']=function() return {new=function() return {} end} end
+package.preload['miuread.reader']=function() return {new=function(_,http,store)
+    return {http=http,store=store}
+end} end
+local M=require('miuread.bookstore')
+
+local function plugin()
+    local p={jobs={},info_messages={},toasts={},refreshes=0,
+        auth={account={vid='alice'},cookies={wr_skey='fake'},login_session_id='one'},settings={}}
+    p.store={data_dir='test',temp_dir='test'}
+    function p.store:auth() return copy(p.auth) end
+    function p.store:get(key,default) return copy(p.settings[key] or default) end
+    function p.store:set(key,value)
+        p.settings[key]=copy(value)
+        return p.fail_save~=true
+    end
+    function p.store:set_deferred(key,value) p.settings[key]=copy(value) end
+    p._interactive_child_store=child_methods._interactive_child_store
+    p.library={cached_cover_path=function() return nil end}
+    p.interactive_network_async={busy=function() return p.job~=nil end}
+    p.cover_async={available=function() return false end}
+    function p:_run_interactive_network(key,label,fn,cb,options)
+        if self.fail_start then return false,'worker unavailable' end
+        if self.job then self:_cancel_interactive_network('superseded') end
+        local job={fn=fn,callback=cb,key=key,on_cancel=options.on_cancel}
+        self.jobs[#self.jobs+1]=job; self.job=job; self._interactive_network_key=key
+        return true
+    end
+    function p:finish(before_callback)
+        local job=assert(self.job)
+        self.job=nil; self._interactive_network_key=nil
+        local value=job.fn()
+        if before_callback then before_callback() end
+        job.callback({ok=true,value=value})
+    end
+    function p:_cancel_interactive_network()
+        self.cancelled=(self.cancelled or 0)+1
+        local job=self.job
+        self.job=nil; self._interactive_network_key=nil
+        if job and job.on_cancel then job.on_cancel() end
+    end
+    function p:list(title,rows)
+        require('miuread.transient_guard').close_all()
+        self.menu={title=title,rows=rows,_miuread_modal_surface=true}
+        require('ui/uimanager'):show(self.menu)
+        return self.menu
+    end
+    function p:require_login() return self.logged_out~=true end
+    function p:is_online() return self.offline~=true end
+    function p:info(message) self.info_messages[#self.info_messages+1]=message end
+    function p:toast(message) self.toasts[#self.toasts+1]=message end
+    function p:_friendly_remote_error(message) return message end
+    function p:_apply_interactive_auth(snapshot) self.auth=copy(snapshot.auth) end
+    function p:_cancel_cover_loading() self.cover_cancels=(self.cover_cancels or 0)+1 end
+    function p:_clear_cover_guard() end
+    function p:_close_current_shelf() end
+    function p:book_menu(book,back) self.book={value=book,back=back} end
+    function p:_refresh_shelf_async(cb) self.refreshes=self.refreshes+1; cb({}, {}, nil) end
+    function p:_home_enabled() return true end
+    function p:_home_apply_remote_cache_snapshot() self.home_updated=true end
+    return p
+end
+
+local p=plugin()
+M.open(p); assert(#p.menu.rows==5,'bookstore root entrances missing')
+local root_menu=p.menu
+M.browse(p,{kind='category',category_id='all',rank=true,title='All'})
+assert(#views==0,'foreground request rendered before worker completed')
+assert(root_menu._miu_closed,'bookstore menu remained under its loading surface')
+p:finish()
+assert(api.reader and api.reader.store==api.store,'bookstore worker omitted login recovery')
+local first=views[#views]
+assert(first.opts.books[1].bookId=='book0' and first.opts.books[1].display_title=='20. Title 0')
+assert(first.opts.books[1].status_text:find('89.0',1,true))
+first.opts.tabs[3].callback(); p:finish()
+assert(api.last_cursor==20 and first._miu_closed)
+local second=views[#views]
+second.opts.tabs[2].callback()
+assert(not p.job and views[#views].opts.books[1].bookId=='book0','back navigation refetched a cached batch')
+views[#views].opts.on_select(views[#views].opts.books[1])
+assert(p.book.value.title=='Title 0' and p.book.back,'display rank polluted original book title')
+p.book.back(); assert(not p.job and views[#views].opts.books[1].bookId=='book0')
+
+-- Cached batches remain browsable offline; an explicit refresh does make a request.
+p.offline=true
+M.browse(p,{kind='category',category_id='all',rank=true,title='All'})
+assert(not p.job)
+p.offline=false
+views[#views].opts.on_refresh(); assert(p.job); p:finish()
+
+M.categories(p,false); p:finish()
+local category=p.menu.rows[2]
+assert(category.sub_item_table_func,'subcategory hierarchy lost')
+local sub=category.sub_item_table_func()
+assert(#sub==2)
+sub[2].callback(); p:finish()
+assert(api.last_category=='700001' and api.last_rank==false)
+
+-- A cached list must retire any old primary menu just like a fetched list.
+p:list('Old menu',{{text='old'}})
+local old_menu=p.menu
+M.browse(p,{kind='category',category_id='all',rank=true,title='All'})
+assert(not p.job and old_menu._miu_closed,'cached page leaked a primary menu underneath')
+
+api.refresh_auth=true
+M.browse(p,{kind='recommend',title='Recommended'}); p:finish()
+assert(p.auth.api_key=='renewed','child credential snapshot was not returned to the parent')
+api.refresh_auth=false
+
+M.similar(p,{bookId='original',title='Original'},function() p.returned=true end); p:finish()
+views[#views].opts.tabs[3].callback(); p:finish()
+assert(api.last_similar[1]=='original' and api.last_similar[2]==20 and api.last_similar[4]=='next-session')
+views[#views].opts.tabs[1].callback(); assert(p.returned)
+
+-- An obsolete page completion cannot replace a later page or cross accounts.
+M.browse(p,{kind='category',category_id='rising',rank=true,title='Rising'})
+local obsolete=p.job
+M.browse(p,{kind='category',category_id='newbook',rank=true,title='New'})
+local view_count=#views
+obsolete.callback({ok=true,value=obsolete.fn()})
+assert(#views==view_count)
+p.auth.account.vid='bob'
+p:finish(); assert(#views==view_count,'old account result displayed')
+assert(dialogs[#dialogs].bookstore_done,'account switch left a loading modal behind')
+M.browse(p,{kind='category',category_id='all',rank=true,title='All'})
+assert(p.job,'account switch retained personalized caches'); p:finish()
+local account_view=views[#views]
+M.reset(p)
+assert(account_view._miu_closed and p._bookstore==nil,'auth transition retained an idle account view/cache')
+
+-- A successful readback refreshes the shelf, while ambiguous writes persist.
+p=plugin(); api.present=false; api.effect=true; api.writes=0; api.reads=0
+assert(M.add_to_shelf(p,{bookId='a',title='A'}))
+assert(p.settings.bookstore_shelf_pending.alice.a,'write uncertainty was not persisted first')
+assert(not M.add_to_shelf(p,{bookId='a',title='A'}),'double-tap spawned duplicate write')
+p:finish()
+assert(api.writes==1 and p.refreshes==1 and p.home_updated)
+assert(not p.settings.bookstore_shelf_pending.alice)
+
+api.present=false; api.effect=false; api.lose_reply=true
+assert(M.add_to_shelf(p,{bookId='b',title='B'})); p:finish()
+assert(p.settings.bookstore_shelf_pending.alice.b)
+local writes=api.writes
+assert(M.add_to_shelf(p,{bookId='b',title='B'})); p:finish()
+assert(api.writes==writes,'uncertain write was repeated instead of verified')
+assert(not p.settings.bookstore_shelf_pending.alice)
+
+-- Cancellation/restart loses the callback but preserves verification-only state.
+api.effect=true; api.lose_reply=false; api.present=false
+M.add_to_shelf(p,{bookId='c',title='C'})
+local interrupted=p.job
+interrupted.fn() -- the server accepted the request before its parent was stopped
+dialogs[#dialogs].buttons[1][1].callback()
+assert(not p.job and p.settings.bookstore_shelf_pending.alice.c,'cancel discarded pending write uncertainty')
+local pending_settings=copy(p.settings)
+local restarted=plugin(); restarted.settings=pending_settings
+writes=api.writes
+M.add_to_shelf(restarted,{bookId='c',title='C'}); restarted:finish()
+assert(api.writes==writes and not restarted.settings.bookstore_shelf_pending.alice)
+
+p=plugin(); p.fail_save=true; writes=api.writes
+assert(not M.add_to_shelf(p,{bookId='d',title='D'}) and not p.job and api.writes==writes)
+assert(not p.settings.bookstore_shelf_pending.alice,'failed persistence left uncommitted intent in memory')
+p.fail_save=false; api.present=false
+assert(M.add_to_shelf(p,{bookId='d',title='D'})); p:finish()
+assert(api.writes==writes+1,'failed intent persistence turned a later retry into verification-only')
+
+-- Clearing a confirmed intent can fail after Store:set changes live settings.
+-- Preserve the original pending record so a retry still only reads the server.
+p=plugin(); api.present=false
+M.add_to_shelf(p,{bookId='persist',title='Persist'})
+p:finish(function() p.fail_save=true end)
+assert(p.settings.bookstore_shelf_pending.alice.persist,'failed clear discarded durable write uncertainty')
+p.fail_save=false; writes=api.writes
+M.add_to_shelf(p,{bookId='persist',title='Persist'}); p:finish()
+assert(api.writes==writes and not p.settings.bookstore_shelf_pending.alice,'failed-clear recovery repeated a POST')
+p=plugin(); p.fail_start=true
+assert(not M.add_to_shelf(p,{bookId='e',title='E'}))
+assert(not p.settings.bookstore_shelf_pending.alice,'worker-start failure left a phantom pending write')
+p=plugin(); p.offline=true
+assert(not M.add_to_shelf(p,{bookId='f',title='F'}) and not p.settings.bookstore_shelf_pending)
+p=plugin(); p.auth.cookies.wr_skey=nil
+assert(not M.add_to_shelf(p,{bookId='g',title='G'}) and not p.job)
+
+p=plugin()
+M.browse(p,{kind='category',category_id='all',rank=true,title='All'})
+local cancelled_page=p.job
+view_count=#views
+dialogs[#dialogs].buttons[1][1].callback()
+assert(not p.job)
+cancelled_page.callback({ok=true,value=cancelled_page.fn()})
+assert(#views==view_count,'cancelled load reopened its list')
+
+-- Exercise the shared worker's real cancellation hook, including results
+-- dropped by its reader/home context guard rather than explicit cancellation.
+local cancel_method=assert(source:match('function Plugin:_cancel_interactive_network%(reason%).-\nend'))
+local run_method=assert(source:match('function Plugin:_run_interactive_network%(key,label,worker,callback,options%).-\nend'))
+local methods=assert(loadstring([[
+local Plugin={}
+local logger={info=function() end}
+local function monotonic_wall_time() return 0 end
+local function _(text) return text end
+]]..cancel_method..'\n'..run_method..'\nreturn Plugin'))()
+local worker_plugin=setmetatable({valid=true,jobs={}},{__index=methods})
+function worker_plugin:is_online() return true end
+function worker_plugin:_interactive_network_context() return {} end
+function worker_plugin:_interactive_network_context_valid() return self.valid end
+function worker_plugin:info() end
+function worker_plugin:toast() end
+worker_plugin.interactive_network_async={
+    available=function() return true end,
+    busy=function() return worker_plugin.active~=nil end,
+    cancel=function() worker_plugin.active=nil end,
+    run=function(_,label,fn,callback)
+        local job={callback=callback}
+        worker_plugin.jobs[#worker_plugin.jobs+1]=job
+        worker_plugin.active=job
+        return true
+    end,
+}
+local cancelled,completed=0,0
+local function start(key)
+    assert(worker_plugin:_run_interactive_network(key,key,function() end,
+        function() completed=completed+1 end,{on_cancel=function() cancelled=cancelled+1 end}))
+    return worker_plugin.active
+end
+local cancelled_job=start('cancel')
+worker_plugin:_cancel_interactive_network('user cancelled')
+worker_plugin:_cancel_interactive_network('already stopped')
+cancelled_job.callback({ok=true})
+assert(cancelled==1 and completed==0,'shared cancellation hook did not run exactly once')
+local stale_job=start('stale')
+worker_plugin.active=nil; worker_plugin.valid=false
+stale_job.callback({ok=true})
+assert(cancelled==2 and completed==0,'context guard left bookstore modal open')
+worker_plugin.valid=true
+local old_job=start('old')
+local new_job=start('new')
+old_job.callback({ok=true})
+assert(cancelled==3 and completed==0,'superseded worker reached its callback')
+worker_plugin.active=nil; new_job.callback({ok=true})
+worker_plugin:_cancel_interactive_network('after completion')
+assert(cancelled==3 and completed==1,'completed worker retained its cancellation hook')
+print('bookstore UI navigation and shelf recovery: PASS')

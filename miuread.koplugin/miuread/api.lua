@@ -364,6 +364,57 @@ end
 function Api:search(q, offset, count)
     return self:call("/store/search", {keyword=tostring(q or ""), scope=10, maxIdx=offset or 0, count=count or 30}, {retries=1, timeout={10, 18}})
 end
+function Api:recommend_books(offset,count)
+    return self:call("/book/recommend",{maxIdx=offset or 0,count=count or 20},{retries=1,timeout={8,15}})
+end
+function Api:similar_books(id,offset,count,session_id)
+    local params={bookId=tostring(id),maxIdx=offset or 0,count=count or 20}
+    if session_id and session_id~="" then params.sessionId=tostring(session_id) end
+    return self:call("/book/similar",params,{retries=1,timeout={8,15}})
+end
+function Api:store_categories()
+    return self.http:get_json("https://weread.qq.com/web/categories?rank=1&synckey=0",{
+        auth=false,retries=1,timeout={6,12},headers={Referer="https://weread.qq.com/web/category/all"},
+    })
+end
+function Api:category_books(id,offset,rank)
+    id=tostring(id or "")
+    if id=="" or not id:match("^[%w_%-]+$") then error("invalid bookstore category") end
+    return self.http:get_json("https://weread.qq.com/web/bookListInCategory/"..Protocol.escape(id)
+        .."?rank="..(rank and "1" or "0").."&maxIndex="..Protocol.escape(offset or 0),{
+        auth=false,retries=1,timeout={6,12},headers={Referer="https://weread.qq.com/web/category/"..id},
+    })
+end
+function Api:book_on_shelf(id)
+    id=tostring(id or "")
+    if id=="" then error("invalid book id") end
+    local Data=require("miuread.bookstore_data")
+    local ok,data=pcall(function()
+        return self:_recover_web_once("shelf_membership",function()
+            return self.http:get_json("https://weread.qq.com/web/shelf/bookIds?bookIds="..Protocol.escape(id)
+                .."&_="..tostring(os.time()),{auth=true,retries=0,timeout={6,10},
+                    headers={Referer=Protocol.reader_url(id),["Cache-Control"]="no-cache, no-store"}})
+        end)
+    end)
+    local present
+    if ok then present=Data.shelf_state(data,id,false) end
+    if type(present)=="boolean" then return present end
+    -- The official full snapshot also covers sessions where the Web reader's
+    -- scoped membership endpoint is unavailable or returns an unknown shape.
+    present=Data.shelf_state(self:shelf({retries=0,timeout={6,10}}),id,true)
+    if type(present)~="boolean" then error("shelf membership could not be verified") end
+    return present
+end
+function Api:add_to_shelf(id)
+    id=tostring(id or "")
+    if id=="" or Protocol.is_mp(id) or Protocol.is_mp_account(id) then error("invalid book id") end
+    -- Exact Web reader contract: bookIds is an array; this POST must never
+    -- replay after a timeout, session recovery or rate-limit response.
+    return self.http:post_json("https://weread.qq.com/web/shelf/add",{bookIds={id}},{
+        auth=true,retries=0,rate_limit_retries=0,rate_limit_fail_fast=true,timeout={6,10},
+        headers={Origin="https://weread.qq.com",Referer=Protocol.reader_url(id)},
+    })
+end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end
 function Api:chapters(id) return self:call("/book/chapterinfo", {bookId=tostring(id)}) end
 function Api:progress(id) return self:call("/book/getprogress", {bookId=tostring(id), _t=os.time()}) end
