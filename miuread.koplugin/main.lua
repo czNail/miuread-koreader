@@ -9755,6 +9755,13 @@ function Plugin:_home_hold_book(book,anchor)
         end}
     end
     actions[#actions+1]={icon="i",label="书籍详情",detail="简介、作者与出版信息",callback=function() self:book_details(target) end}
+    if unified_source=="weread" and not Protocol.is_mp(id) then
+        local shelf_action=require("miuread.bookstore").shelf_action(self,target)
+        if shelf_action then
+            actions[#actions+1]={icon="library",label=shelf_action.text,
+                detail="同步微信书架，保留本机文件",callback=shelf_action.callback}
+        end
+    end
     ActionSheet.show{
         anchor=anchor,
         preferred_direction="above",
@@ -18463,6 +18470,14 @@ function Plugin:open_mp_neighbor(delta)
     local target=articles[index+(tonumber(delta) or 0)]
     if not target then self:toast((delta or 0)<0 and "已经是第一篇" or "已经是最后一篇",2); return end
     self:open_or_download_mp_article({bookId=context.bookId,title=context.account_title or "公众号",author="公众号"},target)
+end
+
+function Plugin:_confirm_shelf_removal(book,callback)
+    TransientGuard.close_all()
+    UIManager:show(ConfirmBox:new{
+        text="从微信书架移除《"..tostring(book.title or "本书").."》？\n\n本机已下载的文件会保留。",
+        ok_text="移除",cancel_text="取消",ok_callback=callback,
+    })
 end
 
 function Plugin:book_menu(b,back_callback)

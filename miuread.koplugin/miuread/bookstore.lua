@@ -65,7 +65,7 @@ local function request(plugin,key,label,fn,callback,timeout)
     close_loading(s)
     local dialog
     dialog=ButtonDialog:new{
-        title=label.."\n\n"..(key:find("^add:") and "正在确认微信书架，请稍候。" or "正在后台获取，请稍候。"),title_align="center",
+        title=label.."\n\n"..(key:find("^shelf:") and "正在确认微信书架，请稍候。" or "正在后台获取，请稍候。"),title_align="center",
         close_callback=function()
             if dialog.bookstore_done then return end
             dialog.bookstore_done=true
@@ -308,57 +308,108 @@ local function save_pending(plugin,id,value)
     return saved
 end
 
+local function known_membership(plugin,id)
+    local observed=state(plugin).cache["shelf:"..id]
+    if observed and os.time()-observed.at<=Data.CACHE_TTL then return observed.value end
+    local snapshot=plugin.store:shelf_cache()
+    local rows=type(snapshot.raw_books)=="table" and #snapshot.raw_books>0 and snapshot.raw_books or snapshot.books
+    for _,cached in ipairs(rows or {}) do
+        if tostring(cached.bookId or cached.book_id or "")==id then return true end
+    end
+    return false
+end
+
 function M.shelf_action(plugin,book)
     local id=tostring(book.bookId or book.book_id or "")
     if id=="" then return nil end
     local _,_,entry=pending(plugin,id)
-    return {text=entry and "确认是否已加入微信书架" or "加入微信书架",
-        callback=function() M.add_to_shelf(plugin,book) end}
+    local present=known_membership(plugin,id)
+    return {text=entry and "确认微信书架状态" or (present and "从微信书架移除" or "加入微信书架"),
+        callback=function()
+            if present then M.remove_from_shelf(plugin,book) else M.add_to_shelf(plugin,book) end
+        end}
 end
 
-function M.add_to_shelf(plugin,book)
+local function change_shelf(plugin,book,desired,confirmed)
     if not plugin:require_login() then return false end
     local auth=plugin.store:auth()
     if tostring((auth.cookies or {}).wr_skey or "")=="" then
-        plugin:info("加入微信书架需要网页登录，请先扫码登录或修复登录。")
+        plugin:info("管理微信书架需要网页登录，请先扫码登录或修复登录。")
         return false
     end
     local id=tostring(book.bookId or book.book_id or "")
     if id=="" then return false end
-    if plugin._interactive_network_key=="bookstore:add:"..id then
+    if plugin._interactive_network_key=="bookstore:shelf:"..id then
         plugin:toast("正在确认书架状态",2); return false
     end
     if not plugin:is_online() then plugin:info("网络不可用，请联网后重试。"); return false end
     local _,_,old=pending(plugin,id)
+    -- A pending operation always verifies its original target, even if a stale
+    -- menu now requests the opposite action. Old add-only records remain valid.
+    if old then desired=not (type(old)=="table" and old.desired==false) end
+    if not desired and not old and not confirmed then
+        local vid,session=identity(plugin)
+        local target=U.copy(book)
+        plugin:_confirm_shelf_removal(target,function()
+            local current_vid,current_session=identity(plugin)
+            if current_vid~=vid or current_session~=session then
+                plugin:info("登录账号已变更，请重新选择书籍操作。")
+                return
+            end
+            change_shelf(plugin,target,false,true)
+        end)
+        return true
+    end
     -- Persist before handing the POST to a subprocess. On cancellation, death
     -- or stale callbacks the next user action performs verification only.
-    if not old and save_pending(plugin,id,{started_at=os.time()})~=true then
-        plugin:info("无法保存加入书架任务，请稍后重试。")
+    if not old and save_pending(plugin,id,{started_at=os.time(),desired=desired})~=true then
+        plugin:info("无法保存书架变更任务，请稍后重试。")
         return false
     end
-    local started=request(plugin,"add:"..id,"微信书架",function(api)
-        return require("miuread.shelf_add").run(api,id,old~=nil)
+    local s=state(plugin)
+    local shelf_view=plugin._shelf_view
+    local started=request(plugin,"shelf:"..id,"微信书架",function(api)
+        return require("miuread.shelf_membership").run(api,id,desired,old~=nil)
     end,function(ok,value)
-        if ok and type(value)=="table" and (value.state=="verified" or value.state=="absent") then
+        if ok and type(value)=="table" and (value.state=="verified" or value.state=="mismatch") then
             local saved=save_pending(plugin,id,nil)
             if saved~=true then logger.warn("[MiuRead][Bookstore] shelf verification persistence failed") end
+            cache(s,"shelf:"..id,value.present)
             if value.state=="verified" then
-                plugin:toast(value.already and "已在微信书架" or "已加入微信书架",3)
-                plugin:_refresh_shelf_async(function(_,_,err)
-                    if not err and plugin._home_enabled and plugin:_home_enabled() then
-                        plugin:_home_apply_remote_cache_snapshot()
-                    end
-                end,true,{skip_online_probe=true})
-            else plugin:info("已确认本书不在微信书架，可再次选择“加入微信书架”。") end
+                plugin:toast(desired and (value.already and "已在微信书架" or "已加入微信书架")
+                    or (value.already and "已不在微信书架" or "已从微信书架移除"),3)
+            else
+                plugin:info(value.present and "已确认本书仍在微信书架，可再次选择移除。"
+                    or "已确认本书不在微信书架，可再次选择加入。")
+            end
+            plugin:_refresh_shelf_async(function(_,_,err)
+                local vid,session=identity(plugin)
+                if err or plugin._bookstore~=s or vid~=s.vid or session~=s.session then return end
+                if plugin._home_enabled and plugin:_home_enabled() then
+                    plugin:_home_apply_remote_cache_snapshot()
+                end
+                if value.state=="verified" and shelf_view and plugin._shelf_view==shelf_view
+                    and not shelf_view._miu_closed then
+                    plugin:_reopen_shelf(plugin._last_shelf_mode,plugin._last_shelf_section)
+                end
+            end,true,{skip_online_probe=true})
             return
         end
         local message=ok and type(value)=="table" and value.error or value
-        plugin:info("加入结果尚未确认。再次点击加入操作将先核对云端状态。\n\n"
+        plugin:info((desired and "加入" or "移除").."结果尚未确认。再次点击书架操作将先核对云端状态。\n\n"
             ..error_message(plugin,message,"书架确认"))
     end,75)
     -- A worker that never started cannot have submitted a write.
     if not started and not old then save_pending(plugin,id,nil) end
     return started
+end
+
+function M.add_to_shelf(plugin,book)
+    return change_shelf(plugin,book,true)
+end
+
+function M.remove_from_shelf(plugin,book)
+    return change_shelf(plugin,book,false)
 end
 
 return M

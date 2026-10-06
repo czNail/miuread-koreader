@@ -9,6 +9,8 @@ local function copy(value,seen)
 end
 package.preload['miuread.util']=function() return {
     copy=copy,utf8_truncate=function(s,n) return s:sub(1,n) end,
+    trim=function(s) return tostring(s or ''):match('^%s*(.-)%s*$') end,
+    file_exists=function() return true end,
 } end
 package.preload['logger']=function() return {warn=function() end} end
 local source_file=assert(io.open('miuread.koplugin/main.lua','rb'))
@@ -75,7 +77,14 @@ function api:book_on_shelf()
     if self.fail_reads then error('read failed') end
     return self.present==true
 end
+function api:remove_from_shelf()
+    self.writes=self.writes+1
+    self.last_target=false
+    if self.effect~=false then self.present=false end
+    if self.lose_reply then error('POST timed out') end
+end
 function api:add_to_shelf()
+    self.last_target=true
     self.writes=self.writes+1
     if self.effect~=false then self.present=true end
     if self.lose_reply then error('POST timed out') end
@@ -89,6 +98,29 @@ package.preload['miuread.reader']=function() return {new=function(_,http,store)
     return {http=http,store=store}
 end} end
 local M=require('miuread.bookstore')
+local confirm_method=assert(source:match('function Plugin:_confirm_shelf_removal%(book,callback%).-\nend'))
+local confirmation_methods=assert(loadstring([[
+local Plugin={}
+local TransientGuard=require('miuread.transient_guard')
+local UIManager=require('ui/uimanager')
+local ConfirmBox=require('ui/widget/buttondialog'):extend{_miuread_modal_surface=true}
+]]..confirm_method..'\nreturn Plugin'))()
+
+
+local home_method=assert(source:match('function Plugin:_home_hold_book%(book,anchor%).-\nend'))
+local home_methods,last_home_sheet=assert(loadstring([[
+local Plugin={}
+local U=require('miuread.util')
+local Protocol={is_mp=function(id) return id:match('^MP_')~=nil end,
+    is_mp_account=function(id) return id:match('^MP_WXS_')~=nil end}
+local UnifiedLibrary={canonical_source=function(book) return book.unified_source or 'local' end}
+local BookIntegrity={partial_repairs=function() return {} end}
+local BookLocalFilesDialog={}
+local LocalLibrary={normalize=tostring}
+local lfs={attributes=function() return 'file' end}
+local sheet
+local ActionSheet={show=function(opts) sheet=opts end}
+]]..home_method..'\nreturn Plugin,function() return sheet end'))()
 
 local function plugin()
     local p={jobs={},info_messages={},toasts={},refreshes=0,
@@ -102,6 +134,8 @@ local function plugin()
     end
     function p.store:set_deferred(key,value) p.settings[key]=copy(value) end
     p._interactive_child_store=child_methods._interactive_child_store
+    p._confirm_shelf_removal=confirmation_methods._confirm_shelf_removal
+    function p.store:shelf_cache() return copy(p.settings.shelf_cache or {raw_books={}}) end
     p.library={cached_cover_path=function() return nil end}
     p.interactive_network_async={busy=function() return p.job~=nil end}
     p.cover_async={available=function() return false end}
@@ -142,6 +176,11 @@ local function plugin()
     function p:_close_current_shelf() end
     function p:book_menu(book,back) self.book={value=book,back=back} end
     function p:_refresh_shelf_async(cb) self.refreshes=self.refreshes+1; cb({}, {}, nil) end
+    function p:_reopen_shelf(mode,section)
+        self.reopened={mode=mode,section=section}
+        self._shelf_view._miu_closed=true
+        self._shelf_view={_miu_closed=false}
+    end
     function p:_home_enabled() return true end
     function p:_home_apply_remote_cache_snapshot() self.home_updated=true end
     return p
@@ -276,6 +315,114 @@ dialogs[#dialogs].buttons[1][1].callback()
 assert(not p.job)
 cancelled_page.callback({ok=true,value=cancelled_page.fn()})
 assert(#views==view_count,'cancelled load reopened its list')
+
+-- The known full shelf selects removal; its confirmation uses the existing
+-- modal and cannot persist an intent, write, or delete local files on cancel.
+local book={bookId='remove',title='Remove me'}
+p=plugin(); p.settings.shelf_cache={raw_books={book}}
+p.settings.downloads={remove={file='kept.epub'}}
+p._shelf_view={_miu_closed=false}; p._last_shelf_mode=false; p._last_shelf_section='account'
+api.present=true; api.effect=true; api.lose_reply=false; api.fail_reads=false
+local action=M.shelf_action(p,book)
+assert(action.text=='从微信书架移除')
+p:list('Book menu',{{text='old'}})
+old_menu=p.menu; writes=api.writes
+action.callback()
+local stack=require('ui/uimanager')._window_stack
+local confirmation=stack[#stack].widget
+assert(old_menu._miu_closed and confirmation.ok_text=='移除' and confirmation.cancel_text=='取消')
+assert(confirmation.text:find('Remove me',1,true) and confirmation.text:find('本机已下载的文件会保留',1,true))
+assert(not p.job and not p.settings.bookstore_shelf_pending and api.writes==writes)
+require('ui/uimanager'):close(confirmation)
+assert(not p.job and not p.settings.bookstore_shelf_pending and api.writes==writes,'cancel submitted removal')
+M.remove_from_shelf(p,book)
+confirmation=stack[#stack].widget
+confirmation.ok_callback()
+assert(p.job and p.settings.bookstore_shelf_pending.alice.remove.desired==false)
+assert(not M.remove_from_shelf(p,book),'double-tap spawned duplicate removal')
+p:finish()
+assert(api.writes==writes+1 and api.last_target==false and not api.present and p.refreshes==1 and p.home_updated)
+assert(p.reopened and p.reopened.section=='account' and p.reopened.mode==false,'visible shelf was not refreshed after removal')
+assert(p.toasts[#p.toasts]=='已从微信书架移除' and p.settings.downloads.remove.file=='kept.epub')
+assert(M.shelf_action(p,book).text=='加入微信书架','verified removal retained a stale shelf-cache action')
+
+-- Both UI paths use the same action, including legacy caches whose full raw
+-- snapshot is unavailable. Unrelated local/provider menus never expose it.
+p=plugin(); p.settings.shelf_cache={books={book}}
+assert(M.shelf_action(p,book).text=='从微信书架移除','legacy effective shelf lost the removal entrance')
+p._home_hold_book=home_methods._home_hold_book
+function p:_local_entry_mode() return '',nil end
+function p:_home_attach_local_record() end
+function p:_preferred_record() return nil end
+p.book_delete_service={summary=function() return {has_local=false} end}
+function p:_download_state() return {} end
+function p:_home_variant_download_context() return {} end
+function p:_home_variant_download_action() return {label='下载'} end
+function p:_finished_status_action() return nil end
+p:_home_hold_book({bookId='remove',title='Remove me',unified_source='weread'})
+local home_action
+for _,row in ipairs(last_home_sheet().actions) do
+    if row.label=='从微信书架移除' then home_action=row end
+end
+assert(home_action,'Home long-press menu omitted shelf management')
+writes=api.writes; home_action.callback()
+assert(stack[#stack].widget.ok_text=='移除' and not p.job and api.writes==writes)
+for _,other in ipairs({{unified_source='local'},{unified_source='zlibrary'},
+    {unified_source='fanqie',external_source='fanqie'},{bookId='MP_WXS_1',unified_source='wechat_mp'}}) do
+    other.bookId=other.bookId or 'remove'
+    p:_home_hold_book(other)
+    for _,row in ipairs(last_home_sheet().actions) do
+        assert(row.label~='从微信书架移除' and row.label~='加入微信书架','another provider exposed WeRead shelf mutation')
+    end
+end
+
+-- Account/session changes while the confirmation is open cannot remove a book
+-- using another login, even when the new account has the same numeric vid.
+for _,change in ipairs({'account','session'}) do
+    p=plugin(); writes=api.writes
+    M.remove_from_shelf(p,book)
+    confirmation=stack[#stack].widget
+    if change=='account' then p.auth.account.vid='bob' else p.auth.login_session_id='two' end
+    confirmation.ok_callback()
+    assert(not p.job and not p.settings.bookstore_shelf_pending and api.writes==writes)
+end
+
+-- Ambiguous removal survives cancellation/restart and opposing stale menus.
+p=plugin(); api.present=true; api.effect=false; api.lose_reply=true
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+assert(p.settings.bookstore_shelf_pending.alice.remove.desired==false)
+assert(M.shelf_action(p,book).text=='确认微信书架状态')
+writes=api.writes
+M.add_to_shelf(p,book); p:finish()
+assert(api.writes==writes and api.present,'opposing stale add action replayed an uncertain removal')
+assert(not p.settings.bookstore_shelf_pending.alice and M.shelf_action(p,book).text=='从微信书架移除')
+
+api.effect=true; api.lose_reply=true
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback()
+interrupted=p.job; interrupted.fn()
+dialogs[#dialogs].buttons[1][1].callback()
+assert(not p.job and p.settings.bookstore_shelf_pending.alice.remove.desired==false)
+restarted=plugin(); restarted.settings=copy(p.settings); writes=api.writes
+M.add_to_shelf(restarted,book); restarted:finish()
+assert(api.writes==writes and not restarted.settings.bookstore_shelf_pending.alice and not api.present)
+assert(restarted.toasts[#restarted.toasts]=='已不在微信书架')
+
+-- Older add-only ledger entries also remain verification-only if the user
+-- reaches them from a removal action after installing this version.
+p=plugin(); p.settings.bookstore_shelf_pending={alice={remove={started_at=1}}}
+api.present=false; writes=api.writes
+M.remove_from_shelf(p,book); assert(p.job); p:finish()
+assert(api.writes==writes and not p.settings.bookstore_shelf_pending.alice)
+assert(M.shelf_action(p,book).text=='加入微信书架')
+
+-- Unknown preflight and failed persistence cannot permit a removal POST.
+p=plugin(); api.present=true; api.fail_reads=true; writes=api.writes
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+assert(api.writes==writes and p.settings.bookstore_shelf_pending.alice.remove.desired==false)
+api.fail_reads=false; api.lose_reply=false
+p=plugin(); p.fail_save=true
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback()
+assert(not p.job and api.writes==writes and not p.settings.bookstore_shelf_pending.alice)
 
 -- Exercise the shared worker's real cancellation hook, including results
 -- dropped by its reader/home context guard rather than explicit cancellation.

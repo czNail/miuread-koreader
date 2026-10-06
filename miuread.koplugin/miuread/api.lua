@@ -411,8 +411,24 @@ function Api:add_to_shelf(id)
     -- Exact Web reader contract: bookIds is an array; this POST must never
     -- replay after a timeout, session recovery or rate-limit response.
     return self.http:post_json("https://weread.qq.com/web/shelf/add",{bookIds={id}},{
-        auth=true,retries=0,rate_limit_retries=0,rate_limit_fail_fast=true,timeout={6,10},
+        auth=true,redirects=0,retries=0,rate_limit_retries=0,rate_limit_fail_fast=true,timeout={6,10},
         headers={Origin="https://weread.qq.com",Referer=Protocol.reader_url(id)},
+    })
+end
+function Api:remove_from_shelf(id)
+    id=tostring(id or "")
+    if id=="" or Protocol.is_mp(id) or Protocol.is_mp_account(id) then error("invalid book id") end
+    local auth=self.store:auth()
+    local cookies=auth.cookies or {}
+    local vid=tostring((auth.account or {}).vid or "")
+    if vid=="" then vid=tostring(cookies.wr_vid or "") end
+    local token=tostring(cookies.wr_skey or "")
+    if vid=="" or token=="" then error("移除微信书架需要有效的扫码登录凭证") end
+    -- The native shelf endpoint uses the accessToken saved by the existing QR
+    -- login as wr_skey. Do not invent a Web /shelf/delete route or replay writes.
+    return self.http:post_json("https://i.weread.qq.com/shelf/delete",{bookIds={id}},{
+        auth=false,redirects=0,retries=0,rate_limit_retries=0,rate_limit_fail_fast=true,timeout={6,10},
+        headers={vid=vid,accessToken=token},
     })
 end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end
