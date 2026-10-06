@@ -7,8 +7,15 @@ local function copy(value,seen)
     for k,v in pairs(value) do out[k]=copy(v,seen) end
     return out
 end
+local function merge(a,b)
+    local out=copy(a or {})
+    for k,v in pairs(b or {}) do
+        out[k]=type(v)=='table' and type(out[k])=='table' and merge(out[k],v) or copy(v)
+    end
+    return out
+end
 package.preload['miuread.util']=function() return {
-    copy=copy,utf8_truncate=function(s,n) return s:sub(1,n) end,
+    copy=copy,merge=merge,utf8_truncate=function(s,n) return s:sub(1,n) end,
     trim=function(s) return tostring(s or ''):match('^%s*(.-)%s*$') end,
     file_exists=function() return true end,
 } end
@@ -120,7 +127,8 @@ local LocalLibrary={normalize=tostring}
 local lfs={attributes=function() return 'file' end}
 local sheet
 local ActionSheet={show=function(opts) sheet=opts end}
-]]..home_method..'\nreturn Plugin,function() return sheet end'))()
+]]..home_method..'\n'..assert(source:match('(function Plugin:_home_action_function_actions%(key,anchor%).-\nend)'))
+    ..'\nreturn Plugin,function() return sheet end'))()
 
 local function plugin()
     local p={jobs={},info_messages={},toasts={},refreshes=0,
@@ -185,6 +193,82 @@ local function plugin()
     function p:_home_apply_remote_cache_snapshot() self.home_updated=true end
     return p
 end
+
+-- Exercise real preference normalization and Store defaults so an upgrade
+-- cannot silently enable a seventh shortcut or overwrite a customized bar.
+local store_file=assert(io.open('miuread.koplugin/miuread/store.lua','rb'))
+local store_source=store_file:read('*a'); store_file:close()
+local store_defaults=assert(store_source:match('(local defaults=%b{})'))
+local prefs_store,default_preferences=assert(loadstring('local Store={}; local Config={}; local U=require("miuread.util")\n'
+    ..store_defaults..'\n'..assert(store_source:match('(function Store:preferences%(%)[^\n]+)'))..'\n'
+    ..assert(store_source:match('(function Store:save_preferences%(v%)[^\n]+)'))..'\nreturn Store,defaults.preferences'))()
+local constants={}
+for _,name in ipairs({'HOME_SECTION_ORDER','HOME_ACTION_ITEM_ORDER','HOME_ACTION_ITEM_DEFAULT',
+    'HOME_PANEL_ITEM_ORDER','HOME_PANEL_ITEM_DEFAULT'}) do
+    constants[#constants+1]=assert(source:match('(local '..name..'=%b{})'))
+end
+for _,name in ipairs({'HOME_ACTION_LAYOUT_VERSION','HOME_PANEL_LAYOUT_VERSION'}) do
+    constants[#constants+1]=assert(source:match('(local '..name..'=%d+)'))
+end
+local preference_methods,preference_device=assert(loadstring([[
+local Plugin={}
+local U=require('miuread.util')
+local Device={suspend=true,canSuspend=function(self) return self.suspend end}
+local LocalLibrary={normalize=function(path) return tostring(path or '') end}
+local lfs={attributes=function() return nil end}
+local UiScale={setDisplayMode=function() end,setFontName=function() end}
+local HomeView={is_shown=function() return false end}
+]]..table.concat(constants,'\n')..'\n'
+    ..assert(source:match('(function Plugin:_home_preferences%(%).-\nend)'))..'\n'
+    ..assert(source:match('(function Plugin:_home_restore_all_quick_defaults%(%).-\nend)'))
+    ..'\nreturn Plugin,Device'))()
+local function preference_plugin(home)
+    local p=plugin()
+    p.settings.preferences=home and {home_ui=copy(home)} or {}
+    p.store.preferences=prefs_store.preferences
+    p.store.save_preferences=prefs_store.save_preferences
+    p._home_preferences=preference_methods._home_preferences
+    p._home_restore_all_quick_defaults=preference_methods._home_restore_all_quick_defaults
+    function p:_home_ui_font_name() end
+    function p:_save_home_preferences(home,preferences)
+        preferences.home_ui=home; return self.store:save_preferences(preferences)
+    end
+    return p
+end
+local recommended=preference_plugin():_home_preferences()
+assert(recommended.action_items.bookstore and not recommended.action_items.search)
+assert(recommended.action_order[2]=='bookstore' and recommended.action_order[3]=='search')
+local old=copy(default_preferences.home_ui)
+old.action_layout_version=6; old.action_items.search=true; old.action_items.bookstore=nil
+old.action_order={'refresh','search','downloads','sync','sleep','miuread_settings','all_books','history','file_manager','screenshot','extensions'}
+local upgrade=preference_plugin(old)
+local upgraded=upgrade:_home_preferences()
+assert(upgraded.action_items.bookstore and not upgraded.action_items.search and upgraded.action_layout_version==7)
+assert(upgraded.action_order[2]=='bookstore' and upgraded.action_order[3]=='search')
+assert(table.concat(upgrade:_home_preferences().action_order,'|')==table.concat(upgraded.action_order,'|'),'layout migration repeated')
+old.action_items.bookstore=false; old.action_order[#old.action_order+1]='bookstore'
+assert(preference_plugin(old):_home_preferences().action_items.bookstore,'previous test-build default was not migrated')
+local custom=copy(old); custom.action_items.sync=false; custom.action_items.bookstore=true
+local custom_upgraded=preference_plugin(custom):_home_preferences()
+assert(custom_upgraded.action_items.search and custom_upgraded.action_items.bookstore and not custom_upgraded.action_items.sync)
+assert(custom_upgraded.action_order[2]=='bookstore' and custom_upgraded.action_order[3]=='search','auto-appended candidate remained at the tail')
+custom.action_order={'downloads','bookstore','refresh','sync','search','sleep','miuread_settings','all_books','history','file_manager','screenshot','extensions'}
+local custom_plugin=preference_plugin(custom)
+custom_upgraded=custom_plugin:_home_preferences()
+assert(table.concat(custom_upgraded.action_order,'|')==table.concat(custom.action_order,'|'),'explicit custom ordering was overwritten')
+custom_plugin:_home_restore_all_quick_defaults()
+assert(custom_plugin:_home_preferences().action_items.bookstore and not custom_plugin:_home_preferences().action_items.search)
+custom=copy(old); custom.action_items.bookstore=nil; custom.action_items.refresh=false
+assert(not preference_plugin(custom):_home_preferences().action_items.bookstore,'upgrade enabled a new button on a custom bar')
+custom.action_layout_version=nil; custom.action_items.search=nil
+local unversioned=preference_plugin(custom):_home_preferences()
+assert(unversioned.action_items.search and not unversioned.action_items.bookstore,'unversioned customized preferences inherited the new defaults')
+local search_actions=home_methods._home_action_function_actions({},'bookstore')
+assert(#search_actions==4 and search_actions[2].label=='搜索微信读书' and search_actions[3].label=='搜索我的书架' and search_actions[4].label=='搜索批注','default bookstore hold lost search shortcuts')
+preference_device.suspend=false
+old.action_items.sleep=false
+assert(preference_plugin(old):_home_preferences().action_items.bookstore,'device without suspend did not migrate its untouched defaults')
+preference_device.suspend=true
 
 local p=plugin()
 M.open(p); assert(#p.menu.rows==5,'bookstore root entrances missing')

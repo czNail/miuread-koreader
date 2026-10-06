@@ -161,9 +161,9 @@ local HOME_SECTION_ORDER={"shelf","device","recent"}
 -- fully configurable.
 -- Frontlight is no longer a homepage shortcut candidate. It lives only in the
 -- pull-down direct-control section (and the reader controls).
-local HOME_ACTION_ITEM_ORDER={"refresh","search","bookstore","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"}
-local HOME_ACTION_ITEM_DEFAULT={refresh=true,search=true,bookstore=false,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false}
-local HOME_ACTION_LAYOUT_VERSION=6
+local HOME_ACTION_ITEM_ORDER={"refresh","bookstore","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"}
+local HOME_ACTION_ITEM_DEFAULT={refresh=true,search=false,bookstore=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false}
+local HOME_ACTION_LAYOUT_VERSION=7
 local HOME_ACTION_MAX_VISIBLE=6
 -- Keep the full pull-down control-center candidate pool, but render at most
 -- eight supported/selected controls in one compact row. The display limit is
@@ -3401,6 +3401,49 @@ function Plugin:_home_preferences()
         end
         if table.concat(normalized,"|")~=table.concat(home[order_key],"|") then changed=true end
         home[order_key]=normalized
+    end
+    if type(home.action_items)~="table" then home.action_items={}; changed=true end
+    local saved=self.store:get("preferences",{})
+    local saved_home=type(saved)=="table" and type(saved.home_ui)=="table" and saved.home_ui or {}
+    if (tonumber(home.action_layout_version) or 0)<7
+        or (type(saved_home.action_items)=="table" and tonumber(saved_home.action_layout_version)==nil) then
+        -- Replace Search only for the untouched recommended bar. New optional
+        -- candidates belong beside their related action, not at the old tail.
+        if type(saved_home.action_items)=="table" and saved_home.action_items.search==nil then
+            home.action_items.search=true
+        end
+        if home.action_items.bookstore==nil then home.action_items.bookstore=false end
+        local order=U.copy(type(saved_home.action_order)=="table" and saved_home.action_order or home.action_order or {})
+        local old_order,expected_order,seen={},{},{}
+        local bookstore_position,search_position
+        for index,key in ipairs(order) do
+            if key=="bookstore" then bookstore_position=index
+            elseif not seen[key] then seen[key]=true; old_order[#old_order+1]=key end
+            if key=="search" then search_position=index end
+        end
+        for _,key in ipairs(HOME_ACTION_ITEM_ORDER) do
+            if key~="bookstore" then expected_order[#expected_order+1]=key end
+        end
+        local untouched=table.concat(old_order,"|")==table.concat(expected_order,"|")
+            and (not bookstore_position or bookstore_position==#order
+                or (search_position and math.abs(bookstore_position-search_position)==1))
+        for key,enabled in pairs(HOME_ACTION_ITEM_DEFAULT) do
+            local expected=enabled
+            if key=="search" then expected=true elseif key=="bookstore" then expected=false end
+            local actual=home.action_items[key]==true
+            if key=="sleep" and not Device:canSuspend() then actual=false; expected=false end
+            if actual~=expected then untouched=false end
+        end
+        if untouched then
+            home.action_items.search=false
+            home.action_items.bookstore=true
+            order=U.copy(HOME_ACTION_ITEM_ORDER)
+        elseif not bookstore_position or bookstore_position==#order then
+            if bookstore_position then table.remove(order,bookstore_position) end
+            table.insert(order,search_position or 1,"bookstore")
+        end
+        home.action_order=order
+        changed=true
     end
     if home.action_items.mp~=nil then home.action_items.mp=nil; changed=true end
     normalize_quick_group("action_items","action_order","action_layout_version",HOME_ACTION_LAYOUT_VERSION,HOME_ACTION_ITEM_ORDER,HOME_ACTION_ITEM_DEFAULT)
@@ -9534,7 +9577,7 @@ function Plugin:_show_home_quick_notice(anchor,title,subtitle,delay)
 end
 
 function Plugin:_home_action_function_actions(key,anchor)
-    if key=="search" then return {
+    if key=="search" or key=="bookstore" then return {
         {icon="library",label="浏览微信读书书城",detail="推荐 排行榜与分类",callback=function() self:show_bookstore() end},
         {icon="⌕",label="搜索微信读书",detail="全库搜索，未加入书架也能下载",callback=function() self:search_dialog("搜索微信读书") end},
         {icon="▦",label="搜索我的书架",detail="本地搜索统一书架中的现有内容",callback=function() self:show_home_search_dialog("shelf") end},
