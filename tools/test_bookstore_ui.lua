@@ -19,7 +19,13 @@ package.preload['miuread.util']=function() return {
     trim=function(s) return tostring(s or ''):match('^%s*(.-)%s*$') end,
     file_exists=function() return true end,
 } end
-package.preload['logger']=function() return {warn=function() end} end
+local logs={}
+local function record_log(...)
+    local parts={...}
+    for i,v in ipairs(parts) do parts[i]=tostring(v) end
+    logs[#logs+1]=table.concat(parts,' ')
+end
+package.preload['logger']=function() return {warn=record_log,info=record_log} end
 local source_file=assert(io.open('miuread.koplugin/main.lua','rb'))
 local source=source_file:read('*a'); source_file:close()
 local child_factory=assert(source:match('(local function interactive_child_store.-\nend)'))
@@ -85,6 +91,9 @@ function api:book_on_shelf()
     return self.present==true
 end
 function api:remove_from_shelf()
+    if self.block_native then
+        error('[MiuReadShelfPreflight] HTTP 401: {"errcode":-2011,"accessToken":"secret-sentinel"}')
+    end
     self.writes=self.writes+1
     self.last_target=false
     if self.effect~=false then self.present=false end
@@ -100,7 +109,12 @@ package.preload['miuread.api']=function() return {new=function(_,http,store,read
     api.store,api.reader=store,reader
     return api
 end} end
-package.preload['miuread.http']=function() return {new=function() return {} end} end
+package.preload['miuread.http']=function() return {
+    new=function() return {} end,
+    auth_error_code=function(value) return tostring(value):match('error_code=(%-?%d+)') end,
+    is_auth_error=function(value) return tostring(value):find('HTTP 401',1,true)~=nil end,
+    is_network_error=function(value) return tostring(value):find('timed out',1,true)~=nil end,
+} end
 package.preload['miuread.reader']=function() return {new=function(_,http,store)
     return {http=http,store=store}
 end} end
@@ -428,6 +442,8 @@ p:finish()
 assert(api.writes==writes+1 and api.last_target==false and not api.present and p.refreshes==1 and p.home_updated)
 assert(p.reopened and p.reopened.section=='account' and p.reopened.mode==false,'visible shelf was not refreshed after removal')
 assert(p.toasts[#p.toasts]=='已从微信书架移除' and p.settings.downloads.remove.file=='kept.epub')
+assert(logs[#logs]:find('state= verified',1,true) and logs[#logs]:find('present= false error= none',1,true),
+    'successful shelf mutation logged a phantom error')
 assert(M.shelf_action(p,book).text=='加入微信书架','verified removal retained a stale shelf-cache action')
 
 -- Both UI paths use the same action, including legacy caches whose full raw
@@ -502,8 +518,33 @@ assert(M.shelf_action(p,book).text=='加入微信书架')
 -- Unknown preflight and failed persistence cannot permit a removal POST.
 p=plugin(); api.present=true; api.fail_reads=true; writes=api.writes
 M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+assert(api.writes==writes and not p.settings.bookstore_shelf_pending.alice)
+assert(p.info_messages[#p.info_messages]:find('未提交移除',1,true))
+-- An older uncertain write must survive the same failed membership read.
+p=plugin(); p.settings.bookstore_shelf_pending={alice={remove={started_at=1,desired=false}}}
+M.remove_from_shelf(p,book); p:finish()
 assert(api.writes==writes and p.settings.bookstore_shelf_pending.alice.remove.desired==false)
 api.fail_reads=false; api.lose_reply=false
+
+-- Native credential rejection happened before the POST, so there is no pending
+-- write or promise of automatic renewal. Logs keep only stage/class/code.
+p=plugin(); api.present=true; api.block_native=true; writes=api.writes
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+assert(api.writes==writes and not p.settings.bookstore_shelf_pending.alice)
+local message=p.info_messages[#p.info_messages]
+assert(message:find('未提交移除',1,true) and message:find('拒绝了当前登录凭证',1,true))
+assert(message:find('-2011',1,true) and not message:find('自动尝试续期',1,true)
+    and not message:find('secret-sentinel',1,true))
+assert(M.shelf_action(p,book).text=='从微信书架移除' and p.refreshes==0)
+assert(logs[#logs]:find('state= blocked',1,true) and logs[#logs]:find('stage= credentials',1,true)
+    and logs[#logs]:find('code=-2011:http=401',1,true))
+for _,line in ipairs(logs) do assert(not line:find('secret-sentinel',1,true),'credential leaked into diagnostic log') end
+api.block_native=false
+-- A later explicit retry performs one removal and clears the new intent.
+api.effect=true
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+assert(api.writes==writes+1 and not p.settings.bookstore_shelf_pending.alice)
+writes=api.writes
 p=plugin(); p.fail_save=true
 M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback()
 assert(not p.job and api.writes==writes and not p.settings.bookstore_shelf_pending.alice)

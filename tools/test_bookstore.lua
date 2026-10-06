@@ -59,12 +59,17 @@ assert(Data.shelf_state({books={{bookInfo={bookId='a'}}}},'a',true))
 local posts,gets,shelf_reads={}, {},0
 local membership={data={{bookId='a',onShelf=0}}}
 local shelf={books={}}
+local native_shelf={books={}}
 local http={}
 function http:get_json(url,opt)
     gets[#gets+1]={url=url,opt=copy(opt)}
     if url:find('/web/shelf/bookIds?',1,true) then
         if membership=='error' then error('web auth failed') end
         return copy(membership)
+    end
+    if url=='https://i.weread.qq.com/shelf/sync' then
+        if type(native_shelf)=='string' then error(native_shelf) end
+        return copy(native_shelf)
     end
     return {data={}}
 end
@@ -105,6 +110,26 @@ assert(write.opt.auth==false and write.opt.redirects==0 and write.opt.retries==0
     and write.opt.rate_limit_retries==0 and write.opt.rate_limit_fail_fast)
 assert(write.opt.headers.vid=='alice' and write.opt.headers.accessToken=='qr-access-token'
     and write.opt.headers.Cookie==nil,'native removal omitted QR credentials or borrowed Web cookies')
+local preflight=gets[#gets]
+assert(preflight.url=='https://i.weread.qq.com/shelf/sync' and preflight.opt.auth==false)
+assert(preflight.opt.redirects==0 and preflight.opt.retries==0 and preflight.opt.rate_limit_retries==0)
+for _,key in ipairs({'vid','accessToken','baseapi','appver','basever','osver','channelId','User-Agent'}) do
+    assert(preflight.opt.headers[key]==write.opt.headers[key] and write.opt.headers[key],
+        'native read/write profile differs: '..key)
+end
+assert(write.opt.headers.basever==write.opt.headers.appver and write.opt.headers['User-Agent']:find('wr_eink',1,true))
+membership={data={{bookId='a',onShelf=1}}}
+for _,response in ipairs({'HTTP 401: {"errcode":-2011}',{}}) do
+    native_shelf=response
+    local count=#posts
+    local ok,err=pcall(api.remove_from_shelf,api,'a')
+    assert(not ok and tostring(err):find('[MiuReadShelfPreflight]',1,true) and #posts==count,
+        'rejected/malformed native read permitted a deletion')
+    local rejected=Membership.run(api,'a',false,false)
+    assert(rejected.state=='blocked' and rejected.stage=='credentials' and #posts==count,
+        'real API preflight rejection became an uncertain write')
+end
+native_shelf={books={}}
 assert(not pcall(api.remove_from_shelf,api,'MP_WXS_1'))
 assert(not pcall(api.remove_from_shelf,api,''))
 credential.cookies.wr_skey=nil
@@ -130,7 +155,8 @@ function repair_http:post_json(url,body,opt)
     assert(opt.headers.Authorization=='Bearer renewed')
     return {books={}}
 end
-function repair_http:get_json()
+function repair_http:get_json(url)
+    if url=='https://i.weread.qq.com/shelf/sync' then return {books={}} end
     web_reads=web_reads+1
     if web_reads==1 then error('authentication expired') end
     return {data={{bookId='a',onShelf=0}}}
@@ -162,6 +188,7 @@ function fake:add_to_shelf()
     if self.lose_reply then error('POST timeout') end
 end
 function fake:remove_from_shelf()
+    if self.block_native then error('[MiuReadShelfPreflight] HTTP 401') end
     writes=writes+1; self.last_target=false
     if self.lose_reply then error('POST timeout') end
 end
@@ -178,9 +205,20 @@ for _,desired in ipairs({true,false}) do
     local mismatch=Membership.run(fake,'a',desired,true)
     assert(mismatch.state=='mismatch' and mismatch.present==not desired and writes==0)
     reads,writes=0,0; sequence={'error'}
-    assert(not pcall(Membership.run,fake,'a',desired,false) and writes==0,'unverified preflight permitted a POST')
+    assert(Membership.run(fake,'a',desired,false).state=='blocked' and writes==0,'unverified preflight permitted a POST')
+    reads,writes=0,0; sequence={'error'}
+    assert(Membership.run(fake,'a',desired,true).state=='unconfirmed' and writes==0,'read failure discarded an older uncertain write')
     reads,writes=0,0; sequence={}
-    assert(not pcall(Membership.run,fake,'a',desired,false) and writes==0)
+    assert(Membership.run(fake,'a',desired,false).state=='blocked' and writes==0)
+    reads,writes=0,0; sequence={not desired,'error','error'}; fake.lose_reply=true
+    local unknown=Membership.run(fake,'a',desired,false)
+    assert(unknown.state=='unconfirmed' and unknown.write_error:find('POST timeout',1,true)
+        and unknown.read_error:find('read timeout',1,true) and unknown.error==unknown.write_error,
+        'readback overwrote the original mutation error')
 end
+reads,writes=0,0; sequence={true}; fake.block_native=true
+local blocked=Membership.run(fake,'a',false,false)
+assert(blocked.state=='blocked' and blocked.stage=='credentials' and blocked.present and writes==0)
+fake.block_native=false
 assert(not pcall(Membership.run,fake,'a',nil,false),'missing target defaulted to a destructive write')
 print('bookstore data, API and shelf mutation: PASS')

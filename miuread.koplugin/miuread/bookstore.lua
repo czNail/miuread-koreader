@@ -330,6 +330,29 @@ function M.shelf_action(plugin,book)
         end}
 end
 
+local function shelf_error_summary(value)
+    if not value then return "none" end
+    local Http=require("miuread.http")
+    local text=tostring(value)
+    local code=tonumber(Http.auth_error_code(text))
+        or tonumber(text:lower():match('"errcode"%s*:%s*(%-?%d+)'))
+    local status=text:match("HTTP (%d+)")
+    local kind=Http.is_auth_error(text) and "auth" or (Http.is_network_error(text) and "network" or "response")
+    return kind..(code and (":code="..tostring(code)) or "")..(status and (":http="..status) or "")
+end
+
+local function shelf_error_message(plugin,value,desired,native_preflight)
+    if require("miuread.http").is_auth_error(value) then
+        if native_preflight then
+            return "客户端书架接口拒绝了当前登录凭证，可先在微信读书 App 中移除。\n"
+                .."接口错误："..shelf_error_summary(value)
+        end
+        return "当前凭证未通过书架接口验证。"..(desired and "加入" or "移除")
+            .."请求不会自动重试。\n接口错误："..shelf_error_summary(value)
+    end
+    return error_message(plugin,value,"书架确认")
+end
+
 local function change_shelf(plugin,book,desired,confirmed)
     if not plugin:require_login() then return false end
     local auth=plugin.store:auth()
@@ -371,6 +394,22 @@ local function change_shelf(plugin,book,desired,confirmed)
     local started=request(plugin,"shelf:"..id,"微信书架",function(api)
         return require("miuread.shelf_membership").run(api,id,desired,old~=nil)
     end,function(ok,value)
+        local result=ok and type(value)=="table" and value or {}
+        local log=(result.state=="verified" or result.state=="mismatch") and logger.info or logger.warn
+        -- Only log stages and numeric codes: no response body or credentials.
+        log("[MiuRead][Bookstore] shelf result","book=",id,"target=",desired and "present" or "absent",
+            "state=",result.state or "worker_failed","stage=",result.stage or "membership",
+            "present=",tostring(result.present),"error=",shelf_error_summary(not ok and value or result.error),
+            "write=",shelf_error_summary(result.write_error),"read=",shelf_error_summary(result.read_error))
+        if result.state=="blocked" and not old then
+            if save_pending(plugin,id,nil)~=true then
+                logger.warn("[MiuRead][Bookstore] shelf preflight persistence failed")
+            end
+            if type(result.present)=="boolean" then cache(s,"shelf:"..id,result.present) end
+            plugin:info("未提交"..(desired and "加入" or "移除").."，可稍后重新操作。\n\n"
+                ..shelf_error_message(plugin,result.error,desired,result.stage=="credentials"))
+            return
+        end
         if ok and type(value)=="table" and (value.state=="verified" or value.state=="mismatch") then
             local saved=save_pending(plugin,id,nil)
             if saved~=true then logger.warn("[MiuRead][Bookstore] shelf verification persistence failed") end
@@ -397,7 +436,7 @@ local function change_shelf(plugin,book,desired,confirmed)
         end
         local message=ok and type(value)=="table" and value.error or value
         plugin:info((desired and "加入" or "移除").."结果尚未确认。再次点击书架操作将先核对云端状态。\n\n"
-            ..error_message(plugin,message,"书架确认"))
+            ..shelf_error_message(plugin,message,desired,false))
     end,75)
     -- A worker that never started cannot have submitted a write.
     if not started and not old then save_pending(plugin,id,nil) end

@@ -423,13 +423,24 @@ function Api:remove_from_shelf(id)
     local vid=tostring((auth.account or {}).vid or "")
     if vid=="" then vid=tostring(cookies.wr_vid or "") end
     local token=tostring(cookies.wr_skey or "")
-    if vid=="" or token=="" then error("移除微信书架需要有效的扫码登录凭证") end
-    -- The native shelf endpoint uses the accessToken saved by the existing QR
-    -- login as wr_skey. Do not invent a Web /shelf/delete route or replay writes.
-    return self.http:post_json("https://i.weread.qq.com/shelf/delete",{bookIds={id}},{
+    local preflight="[MiuReadShelfPreflight] "
+    if vid=="" or token=="" then error(preflight.."移除微信书架需要有效的扫码登录凭证") end
+    -- Native shelf requests need the e-ink client version headers as well as
+    -- vid/accessToken (weread-omni/src/device-ua.ts). Web login alone does not
+    -- prove that its token is accepted here: check a read before any write.
+    local options={
         auth=false,redirects=0,retries=0,rate_limit_retries=0,rate_limit_fail_fast=true,timeout={6,10},
-        headers={vid=vid,accessToken=token},
-    })
+        headers={vid=vid,accessToken=token,baseapi="30",appver="2.1.2.10245900",
+            basever="2.1.2.10245900",osver="11",channelId="900",
+            ["User-Agent"]="WeRead/2.1.2 WRBrand/Onyx wr_eink Dalvik/2.1.0 (Linux; U; Android 11; BOOX Build/onyx)"},
+    }
+    local ok,data=pcall(self.http.get_json,self.http,"https://i.weread.qq.com/shelf/sync",U.copy(options))
+    if not ok then error(preflight..tostring(data)) end
+    if type(data)~="table" or type(data.books)~="table" then
+        error(preflight.."客户端书架接口未返回有效书架，未提交移除")
+    end
+    -- Never replay a mutation or use an unverified Web deletion route.
+    return self.http:post_json("https://i.weread.qq.com/shelf/delete",{bookIds={id}},options)
 end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end
 function Api:chapters(id) return self:call("/book/chapterinfo", {bookId=tostring(id)}) end
