@@ -1790,7 +1790,7 @@ function Plugin:confirm_logout()
         if downloading and self.download_task then self.download_task:cancel() end
         self.auth_flow:cancel()
         self:_cancel_interactive_network("logout")
-        if self._bookstore then require("miuread.bookstore").reset(self) end
+        if self._bookstore or self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
         self._auth_transitioning=true
         if self.sync and self.sync.invalidate_login_session then
             pcall(self.sync.invalidate_login_session,self.sync,"logout")
@@ -1810,7 +1810,7 @@ function Plugin:on_auth_replaced(old_auth,new_auth)
     local new_vid=tostring((new_auth.account or {}).vid or (new_auth.cookies or {}).wr_vid or "")
     local same_account=old_vid~="" and new_vid~="" and old_vid==new_vid
     self:_cancel_interactive_network(same_account and "auth refreshed" or "account changed")
-    if self._bookstore then require("miuread.bookstore").reset(self) end
+    if self._bookstore or self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
     self._auth_transitioning=true
     if self.sync and self.sync.invalidate_login_session then
         self.sync:invalidate_login_session(same_account and "login_refreshed" or "account_changed")
@@ -27524,6 +27524,7 @@ function Plugin:show_about()
         .."\n\n非官方社区项目，与微信读书及 KOReader 无官方隶属或合作关系。")
 end
 function Plugin:onExit()
+    if self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
     BookExcerptDialog.close("exit")
     self:_cancel_interactive_network("exit")
     if not HOME_EXITING then self:_begin_koreader_exit("external exit") end
@@ -30798,6 +30799,7 @@ function Plugin:onNotCharging()
 end
 
 function Plugin:onSuspend()
+    if self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
     -- 书摘局域网传输只属于前台交互。任何 Suspend 边沿都先关闭它，
     -- 不申请下载/同步的后台保活，也不会在 Resume 后自动恢复。
     BookExcerptDialog.close("suspend")
@@ -31546,6 +31548,7 @@ function Plugin:_schedule_post_reader_work(reason,delay,phase)
 end
 
 function Plugin:onCloseDocument()
+    if self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
     BookExcerptDialog.close("document close")
     local closing_path=normalized_reader_file(self:_current_document_path())
         or normalized_reader_file(HOME_SESSION.reader_session_file)

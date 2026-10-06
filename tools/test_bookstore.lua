@@ -78,7 +78,8 @@ function http:post_json(url,body,opt)
     if body.api_name=='/shelf/sync' then shelf_reads=shelf_reads+1; return copy(shelf) end
     return {succ=1}
 end
-local credential={api_key='fake-key',account={vid='alice'},cookies={wr_vid='alice',wr_skey='qr-access-token'}}
+local credential={api_key='fake-key',account={vid='alice'},cookies={wr_vid='alice',wr_skey='web-token'},
+    native_shelf={vid='alice',accessToken='client-token',refreshToken='client-refresh',deviceId='device'}}
 local api=Api:new(http,{auth=function() return credential end})
 api:recommend_books(12,20)
 assert(posts[#posts].body.api_name=='/book/recommend' and posts[#posts].body.maxIdx==12)
@@ -108,8 +109,8 @@ write=posts[#posts]
 assert(write.url=='https://i.weread.qq.com/shelf/delete' and write.body.bookIds[1]=='a')
 assert(write.opt.auth==false and write.opt.redirects==0 and write.opt.retries==0
     and write.opt.rate_limit_retries==0 and write.opt.rate_limit_fail_fast)
-assert(write.opt.headers.vid=='alice' and write.opt.headers.accessToken=='qr-access-token'
-    and write.opt.headers.Cookie==nil,'native removal omitted QR credentials or borrowed Web cookies')
+assert(write.opt.headers.vid=='alice' and write.opt.headers.accessToken=='client-token'
+    and write.opt.headers.Cookie==nil,'native removal omitted client credentials or borrowed Web cookies')
 local preflight=gets[#gets]
 assert(preflight.url=='https://i.weread.qq.com/shelf/sync' and preflight.opt.auth==false)
 assert(preflight.opt.redirects==0 and preflight.opt.retries==0 and preflight.opt.rate_limit_retries==0)
@@ -132,10 +133,10 @@ end
 native_shelf={books={}}
 assert(not pcall(api.remove_from_shelf,api,'MP_WXS_1'))
 assert(not pcall(api.remove_from_shelf,api,''))
-credential.cookies.wr_skey=nil
+credential.native_shelf=nil
 local before=#posts
 assert(not pcall(api.remove_from_shelf,api,'a') and #posts==before,'missing credential permitted removal')
-credential.cookies.wr_skey='renewed-token'
+credential.native_shelf={vid='alice',accessToken='renewed-token',refreshToken='refresh',deviceId='device'}
 credential.account.vid=''
 api:remove_from_shelf('a')
 assert(posts[#posts].opt.headers.vid=='alice','empty account vid ignored cookie identity')
@@ -143,7 +144,8 @@ assert(posts[#posts].opt.headers.accessToken=='renewed-token','removal captured 
 
 
 -- Reads may use the existing login recovery path; the shelf POST must not.
-credential={api_key='expired',account={vid='alice'},cookies={wr_skey='expired'}}
+credential={api_key='expired',account={vid='alice'},cookies={wr_skey='expired'},
+    native_shelf={vid='alice',accessToken='client-token',refreshToken='refresh',deviceId='device'}}
 local attempts,repaired,web_reads,web_repaired=0,0,0,0
 package.loaded['miuread.http'].is_auth_error=function(err)
     return tostring(err):find('authentication expired',1,true)~=nil

@@ -110,6 +110,10 @@ local function request(plugin,key,label,fn,callback,timeout)
 end
 
 function M.reset(plugin)
+    if plugin._bookstore_shelf_auth then
+        plugin._bookstore_shelf_auth:cancel()
+        plugin._bookstore_shelf_auth=nil
+    end
     local s=plugin._bookstore
     if s then s.generation=s.generation+1 end
     close_view(plugin)
@@ -341,16 +345,48 @@ local function shelf_error_summary(value)
     return kind..(code and (":code="..tostring(code)) or "")..(status and (":http="..status) or "")
 end
 
-local function shelf_error_message(plugin,value,desired,native_preflight)
+local function shelf_error_message(plugin,value,desired)
     if require("miuread.http").is_auth_error(value) then
-        if native_preflight then
-            return "客户端书架接口拒绝了当前登录凭证，可先在微信读书 App 中移除。\n"
-                .."接口错误："..shelf_error_summary(value)
-        end
         return "当前凭证未通过书架接口验证。"..(desired and "加入" or "移除")
             .."请求不会自动重试。\n接口错误："..shelf_error_summary(value)
     end
     return error_message(plugin,value,"书架确认")
+end
+
+local function authorize_shelf(plugin,detail)
+    local vid,session=identity(plugin)
+    local dialog
+    dialog=ButtonDialog:new{
+        title="书架管理需要客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权后，再重新选择移除。"
+            ..(detail and ("\n\n接口错误："..shelf_error_summary(detail)) or ""),title_align="center",
+        buttons={{{text="微信扫码授权",callback=function()
+            UIManager:close(dialog)
+            local current_vid,current_session=identity(plugin)
+            if current_vid~=vid or current_session~=session then
+                plugin:info("登录账号已变更，请重新选择书籍操作。")
+                return
+            end
+            if plugin._bookstore_shelf_auth then plugin._bookstore_shelf_auth:cancel() end
+            if plugin.auth_flow then plugin.auth_flow:cancel() end
+            local host={
+                is_online=function() return plugin:is_online() end,
+                online=function(_,label,fn) plugin:online(label,fn) end,
+                toast=function(_,text,duration) plugin:toast(text,duration) end,
+                info=function(_,text) plugin:info(text) end,
+                on_auth_success=function()
+                    plugin:info("书架管理授权已保存。请重新选择要移除的书籍。")
+                end,
+            }
+            local Client=require("miuread.shelf_client")
+            local Auth=require("miuread.auth")
+            local flow=Auth:new(plugin.http,plugin.store,host,Client.new(plugin.http,plugin.store))
+            plugin._bookstore_shelf_auth=flow
+            flow:start()
+        end},{text="取消",callback=function() UIManager:close(dialog) end}}},
+    }
+    TransientGuard.close_all()
+    UIManager:show(dialog)
+    return true
 end
 
 local function change_shelf(plugin,book,desired,confirmed)
@@ -406,8 +442,13 @@ local function change_shelf(plugin,book,desired,confirmed)
                 logger.warn("[MiuRead][Bookstore] shelf preflight persistence failed")
             end
             if type(result.present)=="boolean" then cache(s,"shelf:"..id,result.present) end
-            plugin:info("未提交"..(desired and "加入" or "移除").."，可稍后重新操作。\n\n"
-                ..shelf_error_message(plugin,result.error,desired,result.stage=="credentials"))
+            if result.stage=="credentials" and (require("miuread.http").is_auth_error(result.error)
+                or tostring(result.error):find("[MiuReadShelfAuthorization]",1,true)) then
+                authorize_shelf(plugin,result.error)
+            else
+                plugin:info("未提交"..(desired and "加入" or "移除").."，可稍后重新操作。\n\n"
+                    ..shelf_error_message(plugin,result.error,desired))
+            end
             return
         end
         if ok and type(value)=="table" and (value.state=="verified" or value.state=="mismatch") then
@@ -436,7 +477,7 @@ local function change_shelf(plugin,book,desired,confirmed)
         end
         local message=ok and type(value)=="table" and value.error or value
         plugin:info((desired and "加入" or "移除").."结果尚未确认。再次点击书架操作将先核对云端状态。\n\n"
-            ..shelf_error_message(plugin,message,desired,false))
+            ..shelf_error_message(plugin,message,desired))
     end,75)
     -- A worker that never started cannot have submitted a write.
     if not started and not old then save_pending(plugin,id,nil) end

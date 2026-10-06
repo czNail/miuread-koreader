@@ -1602,6 +1602,13 @@ local function same_login_cookies(a,b)
     end
     return true
 end
+local function same_native_shelf_credentials(a,b)
+    a=type(a)=="table" and a or {}; b=type(b)=="table" and b or {}
+    for _,key in ipairs({"vid","accessToken","refreshToken","deviceId"}) do
+        if tostring(a[key] or "")~=tostring(b[key] or "") then return false end
+    end
+    return true
+end
 local function same_auth_credentials(a,b)
     a=sanitized_auth(a); b=sanitized_auth(b)
     local aa=type(a.account)=="table" and a.account or {}
@@ -1612,6 +1619,7 @@ local function same_auth_credentials(a,b)
         and tostring(a.wr_ticket or "")==tostring(b.wr_ticket or "")
         and tostring(a.wr_wrpa or "")==tostring(b.wr_wrpa or "")
         and same_login_cookies(a.cookies,b.cookies)
+        and same_native_shelf_credentials(a.native_shelf,b.native_shelf)
 end
 function Store:auth() return sanitized_auth(self:get("auth",{})) end
 function Store:save_auth(v,opt)

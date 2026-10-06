@@ -26,6 +26,7 @@ local function record_log(...)
     logs[#logs+1]=table.concat(parts,' ')
 end
 package.preload['logger']=function() return {warn=record_log,info=record_log} end
+package.preload['miuread.protocol']=function() return {escape=tostring} end
 local source_file=assert(io.open('miuread.koplugin/main.lua','rb'))
 local source=source_file:read('*a'); source_file:close()
 local child_factory=assert(source:match('(local function interactive_child_store.-\nend)'))
@@ -91,6 +92,9 @@ function api:book_on_shelf()
     return self.present==true
 end
 function api:remove_from_shelf()
+    if not self.store:auth().native_shelf then
+        error('[MiuReadShelfPreflight] [MiuReadShelfAuthorization] 请先授权书架管理')
+    end
     if self.block_native then
         error('[MiuReadShelfPreflight] HTTP 401: {"errcode":-2011,"accessToken":"secret-sentinel"}')
     end
@@ -117,6 +121,14 @@ package.preload['miuread.http']=function() return {
 } end
 package.preload['miuread.reader']=function() return {new=function(_,http,store)
     return {http=http,store=store}
+end} end
+local auth_flows={}
+package.preload['miuread.auth']=function() return {new=function(_,http,store,host,backend)
+    local flow={host=host,backend=backend}
+    function flow:start() self.started=true end
+    function flow:cancel() self.cancelled=true end
+    auth_flows[#auth_flows+1]=flow
+    return flow
 end} end
 local M=require('miuread.bookstore')
 local confirm_method=assert(source:match('function Plugin:_confirm_shelf_removal%(book,callback%).-\nend'))
@@ -146,7 +158,8 @@ local ActionSheet={show=function(opts) sheet=opts end}
 
 local function plugin()
     local p={jobs={},info_messages={},toasts={},refreshes=0,
-        auth={account={vid='alice'},cookies={wr_skey='fake'},login_session_id='one'},settings={}}
+        auth={account={vid='alice'},cookies={wr_skey='fake'},login_session_id='one',
+            native_shelf={vid='alice',accessToken='native',refreshToken='refresh',deviceId='device'}},settings={}}
     p.store={data_dir='test',temp_dir='test'}
     function p.store:auth() return copy(p.auth) end
     function p.store:get(key,default) return copy(p.settings[key] or default) end
@@ -446,6 +459,46 @@ assert(logs[#logs]:find('state= verified',1,true) and logs[#logs]:find('present=
     'successful shelf mutation logged a phantom error')
 assert(M.shelf_action(p,book).text=='加入微信书架','verified removal retained a stale shelf-cache action')
 
+-- A stale remove menu for a book already removed on the phone needs no new
+-- authorization: fresh Web membership can confirm the result directly.
+p=plugin(); p.auth.native_shelf=nil; api.present=false; writes=api.writes
+local no_scan_count=#auth_flows
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+assert(#auth_flows==no_scan_count and api.writes==writes and p.toasts[#p.toasts]=='已不在微信书架')
+
+-- Web-only users get an explicit scan entrance after fresh membership proves
+-- a removal is needed. Opening/cancelling/completing that scan never removes.
+p=plugin(); p.auth.native_shelf=nil; api.present=true; writes=api.writes
+local flow_count=#auth_flows
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+local auth_dialog=stack[#stack].widget
+assert(auth_dialog.buttons[1][1].text=='微信扫码授权' and not p.job
+    and not p.settings.bookstore_shelf_pending.alice and api.writes==writes)
+auth_dialog.buttons[1][2].callback()
+assert(#auth_flows==flow_count and api.writes==writes)
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+stack[#stack].widget.buttons[1][1].callback()
+local auth_flow=auth_flows[#auth_flows]
+assert(auth_flow.started and auth_flow.backend and p._bookstore_shelf_auth==auth_flow)
+auth_flow.host:on_auth_success()
+assert(api.writes==writes and not p.settings.bookstore_shelf_pending.alice
+    and p.info_messages[#p.info_messages]:find('重新选择',1,true))
+M.reset(p)
+assert(auth_flow.cancelled and not p._bookstore_shelf_auth)
+-- A pending task is verified through Web membership without requiring native
+-- authorization; no expired client token can turn verification into a write.
+p=plugin(); p.auth.native_shelf=nil
+p.settings.bookstore_shelf_pending={alice={remove={desired=false,started_at=1}}}
+flow_count=#auth_flows
+M.remove_from_shelf(p,book); assert(p.job); p:finish()
+assert(#auth_flows==flow_count and api.writes==writes and not p.settings.bookstore_shelf_pending.alice)
+-- Changing accounts before opening the scan leaves both auth and shelf alone.
+p=plugin(); p.auth.native_shelf=nil
+M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
+auth_dialog=stack[#stack].widget
+p.auth.account.vid='bob'; auth_dialog.buttons[1][1].callback()
+assert(#auth_flows==flow_count and api.writes==writes and not p.job)
+
 -- Both UI paths use the same action, including legacy caches whose full raw
 -- snapshot is unavailable. Unrelated local/provider menus never expose it.
 p=plugin(); p.settings.shelf_cache={books={book}}
@@ -458,7 +511,6 @@ p.book_delete_service={summary=function() return {has_local=false} end}
 function p:_download_state() return {} end
 function p:_home_variant_download_context() return {} end
 function p:_home_variant_download_action() return {label='下载'} end
-function p:_finished_status_action() return nil end
 p:_home_hold_book({bookId='remove',title='Remove me',unified_source='weread'})
 local home_action
 for _,row in ipairs(last_home_sheet().actions) do
@@ -531,8 +583,9 @@ api.fail_reads=false; api.lose_reply=false
 p=plugin(); api.present=true; api.block_native=true; writes=api.writes
 M.remove_from_shelf(p,book); stack[#stack].widget.ok_callback(); p:finish()
 assert(api.writes==writes and not p.settings.bookstore_shelf_pending.alice)
-local message=p.info_messages[#p.info_messages]
-assert(message:find('未提交移除',1,true) and message:find('拒绝了当前登录凭证',1,true))
+local authorization=stack[#stack].widget
+local message=authorization.title
+assert(message:find('书架管理需要客户端授权',1,true) and authorization.buttons[1][1].text=='微信扫码授权')
 assert(message:find('-2011',1,true) and not message:find('自动尝试续期',1,true)
     and not message:find('secret-sentinel',1,true))
 assert(M.shelf_action(p,book).text=='从微信书架移除' and p.refreshes==0)
