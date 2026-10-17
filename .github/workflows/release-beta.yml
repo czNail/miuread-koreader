@@ -278,6 +278,7 @@ jobs:
           luajit tools/test_translation.lua
           luajit tools/test_translation_generation.lua
           luajit tools/test_translation_fetch.lua
+          luajit tools/test_translation_ux.lua
           luajit tools/test_internal_links.lua
           python3 tools/test_extension_center_ux.py
           python3 tools/verify_600_beta1.py

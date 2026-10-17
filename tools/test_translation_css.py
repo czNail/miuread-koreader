@@ -207,6 +207,22 @@ for scale in (100, 120):
         assert abs(sizes[pdf_section[5]] - reader_size * 1.58 * scale / 100) < .001
 assert "rem !important" not in translation.css(pdf_profile, "original", 120)
 
+# Partial support must hide only the verified subtitle source. Id-less title
+# and body sources remain visible alongside their translations, even when
+# another chapter supports full translation-only display.
+partial_css = translation.css(pdf_profile, "translation")
+assert partial_css and translation.translation_only_status(pdf_profile).reason == "partial"
+partial_nodes = {node.etree_element for node in visible(partial_css, pdf_dom)}
+assert pdf_section[0] in partial_nodes and pdf_section[2] in partial_nodes
+assert pdf_section[4] not in partial_nodes
+assert all(pdf_section[i] in partial_nodes for i in (1, 3, 5))
+cross_chapters = [chapter("safe", '<p id="paired">Safe source</p><p id="paired" class="wr-translation">Safe translation</p>')] + pdf_chapters
+cross_profile = make_profile(cross_chapters)
+cross_dom = imported_dom(cross_chapters)
+cross_nodes = {node.etree_element for node in visible(translation.css(cross_profile, "translation"), cross_dom)}
+assert cross_dom[0].find("body/section/p") not in cross_nodes
+assert cross_dom[1].find("body/section/p") in cross_nodes
+
 # Independently parse the device's reported mismatched language end tags as
 # HTML, then verify actual CSS matching on that recovered DOM. The original
 # and Chinese text must remain separate sibling paragraphs; hiding the source

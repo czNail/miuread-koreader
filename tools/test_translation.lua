@@ -40,6 +40,21 @@ local pdf_css=T.css(profile(pdf),'bilingual',120)
 assert(pdf_css:find('font-size: 1.056rem !important;',1,true),'translated PDF body still inherits the fixed root size')
 assert(pdf_css:find('font-size: 2.52rem !important;',1,true),'converted heading size was lost')
 assert(not T.css(profile(pdf),'original'):find('font-size:',1,true),'original mode changed PDF fonts')
+local mixed_pairs=assert(T.analyze(chapter('<p id="safe">Paired original.</p>'
+    ..'<p id="safe" class="wr-translation">已对应的译文。</p>'
+    ..'<p>Unpaired original.</p><p class="wr-translation">未对应的译文。</p>'),'1',1))
+local capability=T.translation_only_status(profile(mixed_pairs))
+assert(not mixed_pairs.separable and capability.available and capability.reason=='partial'
+    and capability.pairs==1 and capability.unpaired==1,'one unpaired block disabled verified translations')
+local mixed_css=assert(T.css(profile(mixed_pairs),'translation'))
+assert(mixed_css:find('#safe { display: none',1,true) and not mixed_css:find('nth-of-type(3) { display: none',1,true),
+    'partial translation mode hid an unverified original')
+assert(T.translation_only_status(profile(pdf)).reason=='unpaired')
+assert(T.translation_only_status(nil).reason=='inspection')
+assert(T.translation_only_status({blocks=0,chapters={}}).reason=='missing')
+local cross_profile={blocks=result.blocks+pdf.blocks,chapters={result,pdf},separable=false}
+assert(T.translation_only_status(cross_profile).available and T.css(cross_profile,'translation'),
+    'an unsupported chapter disabled translated chapters elsewhere')
 local mixed=assert(T.analyze(chapter('<p><span style="font-size:.88rem">AAA</span><span style="font-size:18px">BBB</span></p>'
     ..'<p class="wr-translation">正文</p>')))
 assert(#mixed.typography==0,'ambiguous mixed font sizes were inferred')
@@ -120,7 +135,12 @@ assert(T.remap_xpointer(profile(result),'/body/DocFragment[1]/body/section/p[3]'
 -- document, rolls back on failure and does not inspect ordinary book opening.
 local Plugin={}
 local scheduled
+local function copy(value)
+    if type(value)~='table' then return value end
+    local result={}; for key,item in pairs(value) do result[key]=copy(item) end; return result
+end
 local env=setmetatable({Plugin=Plugin,require=require,
+    U={copy=copy,file_exists=function() return true end},
     Event={new=function(_,name,value) return {name=name,value=value} end},
     normalized_reader_file=function(path) return path end,
     monotonic_wall_time=os.clock,Config={},
@@ -129,7 +149,8 @@ local env=setmetatable({Plugin=Plugin,require=require,
 require('translation_test_support').load_plugin_methods(ROOT,{'_reader_translation_mode','_reader_translation_font_scale_value','_reader_adjust_translation_font_scale',
     '_reader_translation_profile',
     '_reader_translation_css','_apply_reader_translation_mode','_show_reader_translation_font_scale_panel',
-    '_show_reader_translation_panel','_install_marks_getCssText_wrapper','_reader_typography_pending_value',
+    '_show_reader_translation_panel','_show_reader_translation_only_help','_reader_translation_record','_reader_translation_context',
+    '_install_marks_getCssText_wrapper','_reader_typography_pending_value',
     '_reader_queue_typography','_reader_typography_apply_now'},env)
 local saved={}
 local events={}
@@ -185,13 +206,56 @@ assert(T.normalize_font_scale(nil)==100 and T.normalize_font_scale(-100)==80 and
 local shown
 env.ReaderSettingsDialog={show=function(opts) shown=opts end}
 plugin:_show_reader_translation_panel(function() end)
-local rows=shown.rows()
+local sections=shown.sections()
+assert(#sections==2 and sections[1].title=='阅读方式' and sections[2].title=='离线译文')
+local rows=sections[1].rows
 assert(rows[#rows].label=='译文正文大小' and rows[#rows].value=='120%' and rows[#rows].enabled)
+assert(#rows==4 and #sections[2].rows==1 and sections[2].rows[1].enabled==false)
 rows[#rows].callback()
 assert(shown.title=='译文正文大小' and shown.hero().value=='120%')
 shown.hero().on_increase(); assert(shown.hero().value=='130%')
 scheduled(); assert(saved.miuread_translation_font_scale==130)
 shown.rows()[1].callback(); scheduled(); assert(saved.miuread_translation_font_scale==100)
+
+-- An unavailable option explains its conditions on tap instead of becoming
+-- an inert row. Partially verified books can select translation-only mode.
+local original_profile=plugin._reader_translation_profile
+local explanation,mode_requests=nil,0
+plugin.info=function(_,message) explanation=message end
+plugin._request_reader_translation_mode=function() mode_requests=mode_requests+1 end
+plugin._reader_translation_profile=function() return profile(pdf) end
+plugin:_show_reader_translation_panel(function() end)
+local only_row=shown.sections()[1].rows[3]
+assert(only_row.enabled~=false and only_row.value:find('查看原因',1,true))
+only_row.callback()
+assert(explanation:find('逐段对应',1,true) and explanation:find('自动可用',1,true) and mode_requests==0)
+plugin._reader_translation_profile=function() return profile(mixed_pairs) end
+plugin:_show_reader_translation_panel(function() end)
+only_row=shown.sections()[1].rows[3]
+assert(only_row.enabled~=false and only_row.value:find('部分',1,true))
+only_row.callback(); assert(mode_requests==1)
+shown.sections()[1].rows[4].callback()
+assert(explanation:find('保留双语',1,true) and explanation:find('尚未翻译',1,true))
+assert(plugin:_apply_reader_translation_mode('translation') and saved.miuread_translation_mode=='translation',
+    'reader application still rejected partial translation support')
+plugin._reader_translation_profile=function() return {blocks=0,chapters={}} end
+plugin._current_book_record=function()
+    return {book={book_id='test'},record={file='book.epub',pending_file='new.epub',pending_install=true,
+        translation_mode='bilingual',translation_only_available=false,chapter_map={{uid='1'}}}}
+end
+plugin:_show_reader_translation_panel(function() end)
+only_row=shown.sections()[1].rows[3]
+assert(only_row.value:find('查看原因',1,true),'unsupported staged translations were advertised as ready for translation-only display')
+only_row.callback(); assert(explanation:find('逐段对应',1,true))
+plugin._current_book_record=nil
+plugin:_show_reader_translation_panel(function() end)
+assert(shown.sections()[1].rows[3].value=='需下载译文')
+plugin._reader_translation_profile=function() return nil end
+plugin:_show_reader_translation_panel(function() end)
+only_row=shown.sections()[1].rows[3]
+assert(only_row.value=='暂无法确认')
+only_row.callback(); assert(explanation:find('重新打开',1,true))
+plugin._reader_translation_profile=original_profile
 
 -- Repeated native stylesheet requests reuse both parsing and CSS. A changed
 -- file, ReaderUI document, display mode or scale must invalidate the cache.

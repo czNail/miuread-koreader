@@ -335,11 +335,26 @@ local function block_selector(scope, pair, translated)
         :gsub("/([%w_-]+)%[(%d+)%]", " > %1:nth-of-type(%2)")
 end
 
+-- A single unpaired translation must not disable verified pairs elsewhere.
+-- Only pairs with a chapter scope are usable by the fragment-safe stylesheet.
+-- Keep `separable` as the stricter full-coverage diagnostic for old callers.
+function M.translation_only_status(profile)
+    if not profile then return {available=false,reason="inspection",blocks=0,pairs=0,unpaired=0} end
+    local blocks=tonumber(profile.blocks) or 0
+    local paired=0
+    for _,chapter in ipairs(profile.chapters or {}) do
+        if chapter.chapter_uid and chapter.chapter_uid~="" then paired=paired+#(chapter.pairs or {}) end
+    end
+    local unpaired=math.max(0,blocks-paired)
+    return {available=paired>0,blocks=blocks,pairs=paired,unpaired=unpaired,
+        reason=blocks==0 and "missing" or (paired==0 and "unpaired" or (unpaired>0 and "partial" or "ready"))}
+end
+
 function M.css(profile, mode, font_scale)
     mode = M.normalize_mode(mode)
     font_scale=M.normalize_font_scale(font_scale)
     if not profile or (profile.blocks or 0) == 0 then return nil end
-    if mode == "translation" and not profile.separable then return nil end
+    if mode == "translation" and not M.translation_only_status(profile).available then return nil end
     local lines = {"/* MiuRead: WeRead translation display */"}
     for _, chapter in ipairs(profile.chapters or {}) do
         if chapter.blocks > 0 and chapter.chapter_uid ~= "" then

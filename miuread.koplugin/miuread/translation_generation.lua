@@ -1,8 +1,48 @@
--- Official WeRead generation, used only after an explicit reader mode change.
+-- Official WeRead generation, used only after an explicit reader action.
 -- No local membership flag, free-trial activation or third-party translator.
 local M={}
 local function truth(value) return value==true or value==1 or value=="1" or value=="true" end
 local function uid(chapter) return type(chapter)=="table" and tostring(chapter.chapterUid or chapter.uid or "") or "" end
+
+function M.normalize_batch_size(value)
+    if value=="all" then return value end
+    value=tonumber(value)
+    return (value==1 or value==5 or value==10 or value==20) and value or "auto"
+end
+
+-- Work inside the local EPUB's selected catalog. Directory pages do not use
+-- the reading budget, and missing word counts still have a hard chapter cap.
+-- Cached chapters count toward the reading window but need no generation.
+function M.plan(chapters, current_uid, options)
+    options=options or {}
+    local batch=M.normalize_batch_size(options.batch_size)
+    local found,words=batch=="all",0
+    local current_found=false
+    local plan={chapters={},pending={},words=0}
+    for _,chapter in ipairs(chapters or {}) do
+        local key=uid(chapter)
+        if key==tostring(current_uid) then found=true; current_found=true end
+        if found and chapter.structural~=true and key~="" then
+            plan.chapters[#plan.chapters+1]=chapter
+            words=words+math.max(0,tonumber(chapter.wordCount or chapter.word_count) or 0)
+            if not (options.cached_uids and options.cached_uids[key]) then
+                plan.pending[#plan.pending+1]=chapter
+            end
+            local count=#plan.chapters
+            if (batch=="auto" and (count>=20 or (count>=3 and words>=8000)))
+                or (type(batch)=="number" and count>=batch) then break end
+        end
+    end
+    if not current_found then error("当前章节不在本地书籍范围内，原文件已保留。") end
+    for _,chapter in ipairs(plan.chapters) do
+        if uid(chapter)==tostring(current_uid) then plan.required_uid=uid(chapter); break end
+    end
+    -- A title/directory page has no translatable body. Use the first readable
+    -- chapter in the window as the installation guard instead.
+    plan.required_uid=plan.required_uid or (plan.chapters[1] and uid(plan.chapters[1]))
+    plan.words=words
+    return plan
+end
 
 -- Log schema and types only. A raw response may contain account/session data.
 function M.describe_response(value,depth)
@@ -42,13 +82,13 @@ function M.friendly_error(error_value)
         or message:find("仅限会员",1,true) or message:find("付费会员",1,true)
         or message:find("会员专属",1,true) or lower:find("membership required",1,true)
         or lower:find("paid member",1,true) then
-        return "生成外文译文需要微信读书付费会员，请确认当前登录账号的会员状态。"
+        return "下载译文需要微信读书付费会员，请确认当前登录账号的会员状态。"
     end
     if message:find("[MiuReadTranslationTimeout]",1,true) then
-        return "微信读书仍在生成当前章译文，原文可以继续阅读。稍后再次选择双语或仅译文即可重试。"
+        return "本章译文还在准备中，已保留下载进度，可以继续阅读原文并稍后重试。"
     end
     if message:find("[MiuReadTranslationContentPending]",1,true) then
-        return "微信读书的译文章节尚未准备好，已停止本次更新并保留原文件。稍后再次切换即可重试。"
+        return "译文暂未准备好，原书和下载进度已保留，可稍后继续下载。"
     end
     if message:find("[MiuReadTranslationUnsupported]",1,true)
         or message:find("暂不支持",1,true) or message:find("不支持翻译",1,true)
@@ -62,10 +102,7 @@ function M.friendly_error(error_value)
     return nil
 end
 
-function M.prepare(api, book_id, chapters, current_uid, options)
-    options=options or {}
-    local now=options.now or os.time
-    local wait=options.wait or function(seconds) require("socket").sleep(seconds) end
+local function authorize(api, book_id, options)
     local function check_cancel()
         if options.cancelled and options.cancelled() then error("download cancelled") end
     end
@@ -76,6 +113,16 @@ function M.prepare(api, book_id, chapters, current_uid, options)
         error("无法确认微信读书会员状态，请稍后重试。")
     end
     if not truth(member.isPaying) then error("[MiuReadTranslationMemberRequired]") end
+    return check_cancel
+end
+
+local function prepare_chapter(api, book_id, chapters, current_uid, options)
+    local now=options.now or os.time
+    local wait=options.wait or function(seconds) require("socket").sleep(seconds) end
+    local function check_cancel()
+        if options.cancelled and options.cancelled() then error("download cancelled") end
+    end
+    check_cancel()
     local index
     for i,chapter in ipairs(chapters or {}) do if uid(chapter)==tostring(current_uid) then index=i; break end end
     if not index then error("微信读书目录中没有找到当前章节，原文件已保留。") end
@@ -89,7 +136,6 @@ function M.prepare(api, book_id, chapters, current_uid, options)
         read[#read+1]={uid=chapters[index+1].chapterUid or chapters[index+1].uid,
             translateVersion=math.max(0,tonumber(chapters[index+1].translateVersion) or 0)}
     end
-    api:toggle_translate(book_id,true)
     local deadline=now()+math.max(2,math.min(120,tonumber(options.timeout) or 90))
     local logged_state
     while true do
@@ -100,7 +146,7 @@ function M.prepare(api, book_id, chapters, current_uid, options)
         if not response then
             local summary=M.describe_response(raw_response)
             require("logger").warn("[MiuRead][Translation] unrecognized response schema",summary)
-            error("微信读书未返回可识别的译文状态（返回摘要："..summary.."）。原文件已保留。")
+            error("暂时无法确认译文状态，原书和下载进度已保留，请稍后重试。")
         end
         local versions,current_seen={},false
         for _,status in ipairs(type(response.curStatus)=="table" and response.curStatus or {}) do
@@ -145,6 +191,93 @@ function M.prepare(api, book_id, chapters, current_uid, options)
     end
 end
 
+function M.prepare(api, book_id, chapters, current_uid, options)
+    options=options or {}
+    authorize(api,book_id,options)
+    local found=false
+    for _,chapter in ipairs(chapters or {}) do if uid(chapter)==tostring(current_uid) then found=true; break end end
+    if not found then error("微信读书目录中没有找到当前章节，原文件已保留。") end
+    api:toggle_translate(book_id,true)
+    return prepare_chapter(api,book_id,chapters,current_uid,options)
+end
+
+-- Keep the official current/next request shape. Unlike the opportunistic next
+-- request, every missing chapter in this window gets its own completed poll.
+-- A later generation timeout keeps the completed prefix; cancellation and
+-- service errors still stop the transaction before the original is replaced.
+function M.prepare_batch(api, book_id, chapters, current_uid, options)
+    options=options or {}
+    local plan=M.plan(chapters,current_uid,options)
+    if not plan.required_uid then error("当前下载范围没有可翻译的正文章节。") end
+    current_uid=plan.required_uid
+    local whole_book=M.normalize_batch_size(options.batch_size)=="all"
+    local ready,targets,indices={},{},{}
+    for index,chapter in ipairs(chapters) do indices[uid(chapter)]=index end
+    for _,chapter in ipairs(plan.pending) do
+        local key=uid(chapter)
+        targets[key]=true
+        -- Persisted completed generation is distinct from installed text. It
+        -- still requires a guarded content fetch before it can be displayed.
+        local saved=options.ready_versions and tonumber(options.ready_versions[key])
+        local baseline=math.max(0,tonumber(chapter.translateVersion) or 0)
+        if saved and saved>0 and saved>=baseline then ready[key]=saved end
+    end
+    if #plan.pending==0 then return ready,plan end
+    local check_cancel=authorize(api,book_id,options)
+    api:toggle_translate(book_id,true)
+    local now=options.now or os.time
+    local deadline=not whole_book and (now()+300) or nil
+    -- For the whole file, prepare the open chapter first, then the remaining
+    -- chapters in catalog order. Never change the EPUB's actual chapter order.
+    local order={}
+    if whole_book and targets[tostring(current_uid)] then order[1]=chapters[indices[tostring(current_uid)]] end
+    for _,chapter in ipairs(plan.pending) do
+        if not whole_book or uid(chapter)~=tostring(current_uid) then order[#order+1]=chapter end
+    end
+    for _,chapter in ipairs(order) do
+        local key=uid(chapter)
+        local index=indices[key]
+        if targets[key] and not ready[key] then
+            check_cancel()
+            local remaining=deadline and (deadline-now()) or 120
+            if remaining<2 then
+                if not ready[tostring(current_uid)] and not (options.cached_uids and options.cached_uids[tostring(current_uid)]) then
+                    error("[MiuReadTranslationTimeout]")
+                end
+                plan.incomplete=true
+                break
+            end
+            local completed=0
+            for id in pairs(ready) do if targets[id] then completed=completed+1 end end
+            local prefix="正在准备译文 · "..(completed+1).."/"..#plan.pending.." · "..tostring(chapter.title or key)
+            if options.progress then options.progress(prefix,completed+1,#plan.pending) end
+            local per_chapter={now=options.now,wait=options.wait,cancelled=options.cancelled,
+                timeout=math.min(tonumber(options.timeout) or 90,remaining),
+                include_next=chapters[index+1]~=nil and targets[uid(chapters[index+1])]==true and not ready[uid(chapters[index+1])],
+                progress=function(message) if options.progress then options.progress(prefix.."\n"..message,completed+1,#plan.pending) end end}
+            local ok,versions=pcall(prepare_chapter,api,book_id,chapters,key,per_chapter)
+            if not ok then
+                check_cancel()
+                if (whole_book or next(ready)) and key~=tostring(current_uid) and tostring(versions):find("[MiuReadTranslationTimeout]",1,true)
+                    and (ready[tostring(current_uid)] or (options.cached_uids and options.cached_uids[tostring(current_uid)])) then
+                    plan.incomplete=true
+                    if not whole_book then break end
+                else
+                    error(versions,0)
+                end
+            else
+                local completed_versions={}
+                for id,version in pairs(versions) do
+                    if targets[id] then ready[id]=version; completed_versions[id]=version end
+                end
+                if options.on_ready then options.on_ready(completed_versions) end
+            end
+        end
+    end
+    check_cancel()
+    return ready,plan
+end
+
 function M.content_ready(fragment)
     local analyzed,err=require("miuread.translation").analyze("<html><body>"..tostring(fragment or "").."</body></html>")
     return analyzed~=nil and analyzed.blocks>0,err
@@ -156,5 +289,11 @@ function M.should_refresh(versions, chapter_uid)
     -- translation. Fetch it even if metadata already reported the same
     -- version: generation status can precede the updated content shards.
     return target~=nil and target>0
+end
+
+function M.can_reuse_content(entry, version, fragment)
+    local saved=type(entry)=="table" and tonumber(entry.translation_version)
+    local target=tonumber(version)
+    return saved~=nil and target~=nil and saved>=target and target>0 and M.content_ready(fragment)
 end
 return M

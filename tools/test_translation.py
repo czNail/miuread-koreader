@@ -21,7 +21,7 @@ def main():
         parser.error(f"EPUB does not exist: {args.epub}")
     tools = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="miuread-regression-") as directory:
-        for name in ("test_translation.lua", "test_translation_generation.lua", "test_translation_fetch.lua", "test_internal_links.lua"):
+        for name in ("test_translation.lua", "test_translation_generation.lua", "test_translation_fetch.lua", "test_translation_ux.lua", "test_internal_links.lua"):
             path = tools / name
             lua = LuaRuntime(unpack_returned_tuples=True)
             lua.globals().arg = lua.table_from({0: path.as_posix(), 1: Path(directory).as_posix()})
