@@ -38,7 +38,10 @@ lua.execute("""
 package.preload['json']=function() return {encode=json_encode,decode=json_decode} end
 package.preload['logger']=function() return {info=function() end,warn=function() end,dbg=function() end} end
 package.preload['util']=function() return {} end -- KOReader helpers outside the packaging path.
-package.preload['miuread.http']=function() return {} end -- No network calls in these tests.
+package.preload['miuread.http']=function() return {
+    is_rate_limit_error=function() return false end,is_auth_error=function() return false end,
+    is_network_error=function() return false end,
+} end -- No network calls in these tests.
 """)
 lua.execute("package.path = " + repr((ROOT / "miuread.koplugin/?.lua").as_posix()) + " .. ';' .. package.path")
 lua.execute("package.path = " + repr((ROOT / "tools/?.lua").as_posix()) + " .. ';' .. package.path")
@@ -60,11 +63,27 @@ with tempfile.TemporaryDirectory(prefix="miuread-translation-") as directory:
         path.mkdir(parents=True, exist_ok=True)
         return True
 
+    def directory_entries(path):
+        path = Path(path).resolve()
+        assert path == work or work in path.parents, "test listing escaped temporary directory"
+        return lua.table_from([entry.name for entry in path.iterdir()])
+
+    def rmdir(path):
+        path = Path(path).resolve()
+        assert work in path.parents, "test removal escaped temporary directory"
+        path.rmdir()
+        return True
+
     lua.globals().host_attributes = attributes
     lua.globals().host_mkdir = mkdir
+    lua.globals().host_directory_entries = directory_entries
+    lua.globals().host_rmdir = rmdir
     lua.execute("""
 package.preload['libs/libkoreader-lfs']=function()
-    return {attributes=host_attributes,mkdir=host_mkdir,dir=function() return function() return nil end end}
+    return {attributes=host_attributes,mkdir=host_mkdir,rmdir=host_rmdir,dir=function(path)
+        local entries,index=host_directory_entries(path),0
+        return function() index=index+1; return entries[index] end
+    end}
 end
 """)
     lua.globals().work = work.as_posix()
@@ -408,6 +427,160 @@ passed,reason=pcall(downloader._save,downloader,book,on_disk,{},css,nil,failed_o
 assert(not passed and tostring(reason):find('译文章节解析未通过：chapter=22 unterminated_tag',1,true),
     'translation parse failure was misreported as unavailable translated text')
 assert(U.read_file(target,true)==original_bytes,'malformed translated chapter replaced the original')
+
+-- Reproduce the device log: all chapters report generation complete, but
+-- chapter 3 repeatedly returns a readable original without translated blocks.
+-- Run the real download loop, Reader retries, checkpoints and EPUB packaging.
+do
+    local Reader=require('miuread.reader')
+    local Source=require('miuread.source_position')
+    local Generation=require('miuread.translation_generation')
+    local db_methods={}
+    for _,name in ipairs({'load_manifest','save_manifest','save_assets','load_assets'}) do db_methods[name]=DB[name] end
+    local manifests,asset_manifests={},{}
+    DB.load_manifest=function(path)
+        if host_attributes(path,'mode')=='directory' then return U.copy(manifests[path]) end
+    end
+    DB.save_manifest=function(path,value) manifests[path]=U.copy(value); return true end
+    DB.save_assets=function(path,uid,value) asset_manifests[path..'/'..uid]=U.copy(value); return true end
+    DB.load_assets=function(path,uid) return U.copy(asset_manifests[path..'/'..uid]) end
+    local cache_source=Source.cacheChapter
+    Source.cacheChapter=function() return true end
+    local test_root=work..'/pending-content'
+    U.mkdir(test_root)
+    local test_book={bookId='CB_pending',title='Pending translation regression',version=1}
+    local test_path=test_root..'/original.epub'
+    local test_map,test_catalog,test_chapters={},{},{}
+    for index=1,5 do
+        test_map[index]={uid=tostring(index),structural=index==5,title='Chapter '..index}
+        test_catalog[index]={chapterUid=index,chapterIdx=index,title='Chapter '..index,
+            translateVersion=index==3 and 10130 or 0,hasTranslated=index==3}
+        test_chapters[index]={uid=tostring(index),title='Chapter '..index,body=body,structural=index==5}
+    end
+    Epub.build(test_path,test_book,test_chapters,css,{},nil,
+        {book_id=test_book.bookId,variant='clean',chapters=test_map})
+    local original=assert(U.read_file(test_path,true))
+    local test_store={record={file=test_path,chapter_map=test_map,variant='clean'}}
+    function test_store:book_dir() return test_root end
+    function test_store:epub_root() return test_root end
+    function test_store:epub_path(name) return test_root..'/'..name end
+    function test_store:variant() return self.record end
+    function test_store:save_variant(_,_,value) self.saved=value end
+    function test_store:save_book() end
+    function test_store:save_session() end
+    function test_store:auth() return {} end
+    local requests,seen,reads={},{},{}
+    local ready_three,ready_two=false,false
+    local test_api={translation_member_summary=function() return {isPaying=true} end,toggle_translate=function() end}
+    function test_api:en_read(_,uid)
+        uid=tostring(uid)
+        requests[#requests+1]=uid
+        assert(uid~='5','fresh catalog lost the proven local structural flag')
+        if seen[uid] then
+            for _,manifest in pairs(manifests) do
+                assert(manifest.translation_generation.versions[uid]==nil,
+                    'content retry retained its stale completed generation checkpoint')
+            end
+            if uid=='2' then ready_two=true end
+        end
+        seen[uid]=true
+        if uid=='3' then return {stopPoll=true} end -- Device: unchanged completed catalog version, no curStatus.
+        return {stopPoll=true,curStatus={{uid=uid,translateVersion=7}}}
+    end
+    local test_reader=Reader:new({},test_store)
+    function test_reader:chapter_state() return {book_version=1} end
+    function test_reader:_epub_once(_,chapter,options,state)
+        local uid=tostring(chapter.chapterUid)
+        reads[#reads+1]={uid=uid,translation=options.translation==true}
+        local available=uid~='3' or ready_three
+        if uid=='2' and not ready_two then available=false end
+        local fragment=options.translation and available and translated or body
+        state.structural=uid=='5'
+        state.content_format='epub'
+        state.coord_html='<html><body>'..fragment..'</body></html>'
+        return state.coord_html,css,{},state
+    end
+    local test_downloader=Downloader:new(test_reader,test_api,nil,test_store,{})
+    function test_downloader:catalog() return {format='epub'},U.copy(test_catalog) end
+    local result=test_downloader:book(test_book,{generate_translation_uid='3',translation_batch_size='all',
+        translation_mode='bilingual',images=false},function() end)
+    assert(result.pending_install and result.chapter_count==5)
+    assert(result.translation_batch_summary.total==4 and result.translation_batch_summary.available==3,
+        'one pending chapter aborted the book or was counted as translated')
+    local profile=assert(Translation.inspect(result.pending_file))
+    local completed={}
+    for _,chapter in ipairs(profile.chapters) do completed[chapter.chapter_uid]=chapter.blocks>0 end
+    assert(completed['1'] and completed['2'] and not completed['3'] and completed['4'],
+        'pending chapter 3 prevented fetching later chapters')
+    assert(U.read_file(test_path,true)==original,'partially translated download overwrote the open original')
+    local count_three=0
+    for _,uid in ipairs(requests) do if uid=='3' then count_three=count_three+1 end end
+    assert(count_three==2 and #requests==6,'chapter repair regenerated the whole book or retried indefinitely')
+    local original_three=false
+    for _,read in ipairs(reads) do if read.uid=='3' and not read.translation then original_three=true end end
+    assert(original_three,'pending chapter was omitted instead of preserving its actual original')
+
+    -- After applying partial translations, continue only the missing chapter.
+    assert(Installer.install(result.pending_file,test_path,{book_id=test_book.bookId,chapters=test_map}))
+    test_store.record=U.copy(result)
+    test_store.record.pending_install=nil; test_store.record.pending_file=nil
+    ready_three=true; requests={}; seen={}
+    local resumed=test_downloader:book(test_book,{generate_translation_uid='3',translation_batch_size='all',
+        translation_mode='bilingual',translation_cached_uids={['1']=true,['2']=true,['4']=true},images=false},function() end)
+    assert(#requests==1 and requests[1]=='3','continuation regenerated already installed translations')
+    assert(resumed.translation_batch_summary.total==4 and resumed.translation_batch_summary.available==4)
+
+    -- Existing translations and the requested chapter of a short batch must
+    -- never be replaced by an untranslated fallback, even when status is ready.
+    local retry_cache={root=test_root..'/guard',manifest={translation_generation={versions={['3']=10130}}}}
+    local retry_options={generate_translation_uid='3',translation_batch_size='auto',translation_refresh_versions={['3']=10130}}
+    function test_api:en_read() return {stopPoll=true} end
+    ready_three=false
+    local good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and Generation.is_content_pending(why) and retry_cache.manifest.translation_generation.versions['3']==nil,tostring(why))
+    assert(Generation.friendly_error(why):find('Chapter 3',1,true),'failure hid the chapter that needs attention')
+    retry_options.translation_batch_size='all'; retry_options.translation_cached_uids={['3']=true}
+    good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and Generation.is_content_pending(why),'an already installed translation was replaced with its original')
+
+    local reader_chapter=test_reader.chapter
+    local original_reads=0
+    function test_reader:chapter(_,_,_,options)
+        if not options.translation then original_reads=original_reads+1 end
+        error('test network failure')
+    end
+    good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and tostring(why):find('test network failure',1,true) and original_reads==0,
+        'an unrelated failure was treated as an unavailable translation')
+    test_reader.chapter=reader_chapter
+    DB.save_manifest=function() return nil,'test disk failure' end
+    good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and tostring(why):find('test disk failure',1,true),'re-confirmation ignored checkpoint storage failure')
+    Source.cacheChapter=cache_source
+    for name,method in pairs(db_methods) do DB[name]=method end
+end
+
+-- No newly downloaded translated text must not be reported as a completed
+-- whole-book update, even if older translated chapters are still present.
+do
+    local none_opt=U.copy(opt)
+    none_opt.translation_batch_size='all'
+    none_opt.translation_cached_uids={['21']=true}
+    none_opt.translation_content_pending={['22']=true}
+    none_opt.download_run_id='no-new-translation'
+    assert(U.atomic_write(on_disk[1].body_path,translated,true))
+    assert(U.atomic_write(on_disk[2].body_path,body,true))
+    store.saved=nil
+    local good,why=pcall(downloader._save,downloader,book,on_disk,{},css,nil,none_opt,{})
+    assert(not good and require('miuread.translation_generation').is_content_pending(why))
+    assert(require('miuread.translation_generation').friendly_error(why):find('Second',1,true),
+        'no-progress message named an already translated chapter instead of the pending one')
+    assert(not store.saved and U.read_file(target,true)==original_bytes,'empty translation update replaced the original')
+end
 """)
     with ZipFile(work / "old.epub") as archive:
         assert archive.testzip() is None

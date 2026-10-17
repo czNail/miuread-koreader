@@ -1334,6 +1334,9 @@ function Reader:chapter(book, chapter, format, opt)
             -- DNS are usable after resume/restart. Give network failures a
             -- longer recovery window instead of rapidly exhausting retries.
             if tostring(a):find("[MiuReadTranslationContentPending]",1,true) then
+                if attempt==1 and opt and type(opt.on_translation_pending)=="function" then
+                    opt.on_translation_pending()
+                end
                 pause(attempt == 1 and 3.0 or 6.0)
             elseif Http.is_network_error(a) then
                 pause(attempt == 1 and 4.0 or 8.0)

@@ -81,6 +81,29 @@ do
         'unavailable translated content was accepted or retried indefinitely')
 end
 do
+    -- A batch completion can precede the actual chapter content. The download
+    -- owner may re-confirm this chapter once before the fresh-page retry.
+    sleeps={}
+    local http=transport(999)
+    local reader=Reader:new(http,{})
+    local confirmations=0
+    local xhtml=reader:chapter(book,chapter,'epub',{translation=true,images=false,
+        on_translation_pending=function()
+            confirmations=confirmations+1
+            http.ready_after=http.pages+1
+        end})
+    assert(Generation.content_ready(Codec.body_fragment(xhtml)) and confirmations==1 and http.pages==2)
+    assert(#sleeps==1 and sleeps[1]==3,'re-confirmation bypassed bounded fresh-page retries')
+end
+do
+    local http=transport(999)
+    local reader=Reader:new(http,{})
+    local ok,err=pcall(reader.chapter,reader,book,chapter,'epub',{translation=true,images=false,
+        on_translation_pending=function() error('download cancelled') end})
+    assert(not ok and tostring(err):find('download cancelled',1,true) and http.pages==1,
+        'cancellation during chapter re-confirmation was retried or ignored')
+end
+do
     local http=transport(1)
     local reader=Reader:new(http,{})
     local xhtml=reader:chapter(book,chapter,'txt',{translation=true,images=false})

@@ -22,7 +22,7 @@ function M.plan(chapters, current_uid, options)
     for _,chapter in ipairs(chapters or {}) do
         local key=uid(chapter)
         if key==tostring(current_uid) then found=true; current_found=true end
-        if found and chapter.structural~=true and key~="" then
+        if found and chapter.structural~=true and not (options.structural_uids and options.structural_uids[key]) and key~="" then
             plan.chapters[#plan.chapters+1]=chapter
             words=words+math.max(0,tonumber(chapter.wordCount or chapter.word_count) or 0)
             if not (options.cached_uids and options.cached_uids[key]) then
@@ -88,7 +88,8 @@ function M.friendly_error(error_value)
         return "本章译文还在准备中，已保留下载进度，可以继续阅读原文并稍后重试。"
     end
     if message:find("[MiuReadTranslationContentPending]",1,true) then
-        return "译文暂未准备好，原书和下载进度已保留，可稍后继续下载。"
+        local title=message:match("%[MiuReadTranslationContentPending%]%s*《([^\r\n]-)》")
+        return (title and ("《"..title.."》") or "").."译文暂未准备好，原书和下载进度已保留，继续下载时会重新确认本章。"
     end
     if message:find("[MiuReadTranslationUnsupported]",1,true)
         or message:find("暂不支持",1,true) or message:find("不支持翻译",1,true)
@@ -281,6 +282,15 @@ end
 function M.content_ready(fragment)
     local analyzed,err=require("miuread.translation").analyze("<html><body>"..tostring(fragment or "").."</body></html>")
     return analyzed~=nil and analyzed.blocks>0,err
+end
+
+function M.is_content_pending(value)
+    return tostring(value):find("[MiuReadTranslationContentPending]",1,true)~=nil
+end
+
+function M.content_pending_error(chapter)
+    local title=tostring(chapter and (chapter.title or chapter.chapterUid or chapter.uid) or ""):gsub("[%c]"," ")
+    return "[MiuReadTranslationContentPending]《"..title.."》"
 end
 
 function M.should_refresh(versions, chapter_uid)

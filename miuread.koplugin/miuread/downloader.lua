@@ -493,6 +493,12 @@ end
 
 function Downloader:_prepare_translation(book, selected, opt, cache, progress)
     local Generation=require("miuread.translation_generation")
+    -- The fresh server catalog does not carry the structural flags verified
+    -- when the local original was downloaded. Empty dividers need no translation.
+    local structural_uids={}
+    for _,chapter in ipairs(opt.existing_download_record and opt.existing_download_record.chapter_map or {}) do
+        if chapter.structural==true then structural_uids[tostring(chapter.uid or chapter.chapterUid)]=true end
+    end
     local signature=catalog_signature(selected)
     local source_version=tostring(book.version or "")
     local previous=cache.manifest.translation_generation
@@ -502,7 +508,7 @@ function Downloader:_prepare_translation(book, selected, opt, cache, progress)
     cache.manifest.translation_generation=checkpoint
     cache_save(cache)
     local versions,plan=Generation.prepare_batch(self.api,book.bookId,selected,opt.generate_translation_uid,{
-        batch_size=opt.translation_batch_size,cached_uids=opt.translation_cached_uids,
+        batch_size=opt.translation_batch_size,cached_uids=opt.translation_cached_uids,structural_uids=structural_uids,
         ready_versions=saved,timeout=90,cancelled=opt.cancelled,progress=progress,
         on_ready=function(ready)
             for uid,version in pairs(ready) do checkpoint.versions[uid]=version end
@@ -520,6 +526,72 @@ function Downloader:_prepare_translation(book, selected, opt, cache, progress)
         if version then chapter.translateVersion=version end
     end
     return plan
+end
+
+function Downloader:_translation_chapter(book, chapter, format, read_options, opt, cache, progress)
+    local Generation=require("miuread.translation_generation")
+    local key=tostring(chapter.chapterUid or chapter.uid)
+    local options=U.copy(read_options)
+    local checkpoint=cache.manifest.translation_generation
+    local reconfirmed=false
+    local function check_cancel()
+        if opt.cancelled and opt.cancelled() then error("download cancelled") end
+    end
+    local function invalidate()
+        if checkpoint then checkpoint.versions[key]=nil end
+        opt.translation_refresh_versions[key]=nil
+        cache_save(cache)
+    end
+    options.on_translation_pending=function()
+        check_cancel()
+        invalidate()
+        if progress then progress("译文正在同步，正在重新确认本章") end
+        -- A completed batch status is not proof that this chapter's content
+        -- endpoint is ready. Re-select the actual chapter before a fresh read;
+        -- never repeat the whole book or trust the stale generation checkpoint.
+        local ok,versions=pcall(Generation.prepare,self.api,book.bookId,{chapter},key,{
+            include_next=false,timeout=30,cancelled=opt.cancelled,progress=progress,
+        })
+        if not ok then
+            if tostring(versions):find("[MiuReadTranslationTimeout]",1,true) then
+                error(Generation.content_pending_error(chapter),0)
+            end
+            error(versions,0)
+        end
+        chapter.translateVersion=versions[key]
+        reconfirmed=true
+    end
+    check_cancel()
+    local ok,a,b,c,d=pcall(self.reader.chapter,self.reader,book,chapter,format,options)
+    check_cancel()
+    if ok then
+        if reconfirmed then
+            opt.translation_refresh_versions[key]=chapter.translateVersion
+            if checkpoint then checkpoint.versions[key]=chapter.translateVersion end
+            cache_save(cache)
+        end
+        return a,b,c,d
+    end
+    if not Generation.is_content_pending(a) then error(a,0) end
+    invalidate()
+    logger.warn("[MiuRead][Translation] chapter content still pending","chapter=",key,"title=",tostring(chapter.title))
+    local cached=opt.translation_cached_uids and opt.translation_cached_uids[key]
+    local whole_book=Generation.normalize_batch_size(opt.translation_batch_size)=="all"
+    if cached or (not whole_book and key==tostring(opt.generate_translation_uid)) then
+        error(Generation.content_pending_error(chapter),0)
+    end
+    -- One unavailable chapter must not discard translations from the rest of
+    -- the batch. Keep its real original, never an empty placeholder; _save
+    -- verifies retained chapters and reports actual translated chapter counts.
+    opt.translation_content_pending=opt.translation_content_pending or {}
+    opt.translation_content_pending[key]=true
+    chapter.translateVersion=nil
+    if progress then progress("本章译文暂未就绪，保留原文并继续下载") end
+    options.translation=false
+    options.require_translation=false
+    options.on_translation_pending=nil
+    check_cancel()
+    return self.reader:chapter(book,chapter,format,options)
 end
 
 local function cache_reset_entry(cache, uid)
@@ -1119,9 +1191,25 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
             if chapter.blocks>0 then translated_uids[chapter.chapter_uid]=true end
             if chapter.chapter_uid==tostring(opt.generate_translation_uid) and chapter.blocks>0 then current_ready=true end
         end
-        if not current_ready then
+        local required_ready=current_ready
+        if require("miuread.translation_generation").normalize_batch_size(opt.translation_batch_size)=="all" then
+            required_ready=false
+            for uid in pairs(opt.translation_batch_uids or {}) do
+                if translated_uids[uid] and not (opt.translation_cached_uids and opt.translation_cached_uids[uid]) then
+                    required_ready=true; break
+                end
+            end
+        end
+        if not required_ready then
             os.remove(temp_path)
-            error("译文状态已更新，但章节正文尚未返回译文。原文件已保留，请稍后再次切换。 "..tostring(translation_error or ""))
+            local missing={title="当前章节"}
+            local pending_uid=next(opt.translation_content_pending or {})
+            for _,chapter in ipairs(chapters) do
+                if tostring(chapter.uid)==tostring(pending_uid or opt.generate_translation_uid) then
+                    missing=chapter; break
+                end
+            end
+            error(require("miuread.translation_generation").content_pending_error(missing))
         end
         -- Rendering capability must not discard valid downloaded translations.
         -- The parent installer falls back to bilingual when the requested mode
@@ -2008,17 +2096,26 @@ function Downloader:_book_once(input, opt, progress)
                 local message=(kind=="image_extract") and "正在低内存整理章节图片" or "正在下载章节图片"
                 progress("content",index,expected,chapter.title,{message=message,activity=kind,transfer_bytes=bytes})
             end
-            local ok, downloaded, downloaded_style, downloaded_assets, state = pcall(
-                self.reader.chapter, self.reader, book, chapter, format, {
-                    images=opt.images,
-                    translation=refresh_translation or cached_translation,
-                    require_translation=refresh_translation or cached_translation or uid==tostring(opt.generate_translation_uid or ""),
-                    activity=chapter_activity,
-                    -- Chapter content is the only place where reuse is enabled:
-                    -- five sequential requests to the same origin per chapter.
-                    keepalive=true,
-                    yield=function(stage) respect_reader_priority(stage or "images") end,
-                })
+            local read_options={
+                images=opt.images,
+                translation=refresh_translation or cached_translation,
+                require_translation=refresh_translation or cached_translation or uid==tostring(opt.generate_translation_uid or ""),
+                activity=chapter_activity,
+                -- Chapter content is the only place where reuse is enabled:
+                -- five sequential requests to the same origin per chapter.
+                keepalive=true,
+                yield=function(stage) respect_reader_priority(stage or "images") end,
+            }
+            local function read_chapter()
+                if read_options.translation then
+                    return self:_translation_chapter(book,chapter,format,read_options,opt,cache,function(message)
+                        respect_reader_priority("chapter")
+                        progress("content",index,expected,chapter.title,{message=message,activity="translation_wait"})
+                    end)
+                end
+                return self.reader:chapter(book,chapter,format,read_options)
+            end
+            local ok, downloaded, downloaded_style, downloaded_assets, state = pcall(read_chapter)
             if not ok then
                 if tostring(downloaded):find("[MiuReadTranslationContentPending]",1,true) then error(downloaded) end
                 if Http.is_rate_limit_error(downloaded) then error(downloaded) end
