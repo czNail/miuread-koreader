@@ -108,6 +108,27 @@ local raw_head=chapter('<p id="p">One<br></br><area/><embed></embed></p><p id="p
 local html_voids=assert(T.analyze(raw_head,'1',1))
 assert(html_voids.blocks==1 and html_voids.separable,
     'head raw text or explicit void-tag end broke translation pairing')
+do
+    -- Raw SPARQL IRIs can be mistaken for a namespace with no local tag name.
+    -- Such a token used to raise at name:lower(), failing the whole download.
+    for _,token in ipairs({'<http://example.org/rdf>','<https://example.org/type/>',
+        '<rdf:>','</rdf:>','<rdf:/>','<:>'}) do
+        local document=chapter('<p id="query">PREFIX rdf: '..token..'<em id="tail">SELECT ?s</em></p>'
+            ..'<p id="query" class="wr-translation">查询语句。</p>')
+        local parsed=assert(T.analyze(document,'53',1,true))
+        assert(parsed.blocks==1 and parsed.separable and parsed.recoveries==1,
+            'empty local tag name prevented inspecting verified translations')
+        local tail
+        for _,node in ipairs(parsed.original_nodes) do if node.id=='tail' then tail=node end end
+        assert(tail and tail.path=='/body/section[1]/p[1]/em[1]',
+            'an invalid namespace token invented a native parent element')
+    end
+    local namespaced=assert(T.analyze(chapter('<xhtml:p id="p"><rdf:Description>Source</rdf:Description></xhtml:p>'
+        ..'<xhtml:p id="p" class="wr-translation">译文。</xhtml:p>'),'53',1))
+    assert(namespaced.blocks==1 and namespaced.separable and namespaced.recoveries==0,
+        'valid namespace-qualified tags lost their local names')
+    assert(T.analyze('<html><body><p>Broken <rdf:')==nil,'unfinished markup was accepted as a complete chapter')
+end
 local quoted=assert(T.analyze(chapter('<p id="a&amp;&quot;&gt;">One</p><p id="a&amp;&quot;&gt;" class="wr-translation">译文</p>')))
 local quoted_css=T.css(profile(quoted),'translation')
 assert(quoted.separable and quoted_css:find(' > section:nth-of-type(1) > p:nth-of-type(1) { display: none',1,true),

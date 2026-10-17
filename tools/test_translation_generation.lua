@@ -116,6 +116,12 @@ for _,summary in ipairs({{isPaying=false},{isPaying=0},{isPaying='0'},{},{freeTr
     if summary.isPaying~=nil then assert(Generation.friendly_error(err):find('付费会员',1,true)) end
 end
 do
+    local summary=assert(Generation.friendly_error('下载不完整，未生成新的 EPUB\n必需内容：230\n已完整获取：229\n'
+        ..'• Triple Stores and SPARQL：plugins/miuread.koplugin/miuread/translation.lua:156: attempt to index a nil value'))
+    assert(summary:find('229 / 230',1,true) and summary:find('Triple Stores and SPARQL',1,true)
+        and not summary:find('translation.lua',1,true),'incomplete download hid the saved count or exposed an internal stack')
+end
+do
     local api=mock_api({isPaying=1},{{curStatus={{uid=2,translateVersion=0}}},
         {stopPoll=true,curStatus={{uid=2,translateVersion=7},{uid=3,translateVersion=8},{uid=4,translateVersion=9}}}})
     local progress=0

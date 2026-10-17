@@ -152,8 +152,15 @@ function M.analyze(html, chapter_uid, fragment_index, collect_positions)
             if not finish then return nil, "unterminated_tag" end
             local raw = html:sub(start_at, finish)
             local closing, full_name = raw:match("^<%s*(/?)%s*([%w:_-]+)")
-            if full_name then
-                local name = full_name:match("([^:]+)$"):lower()
+            local name=full_name and full_name:match("([^:]+)$")
+            -- CRE's ReadIdent rejects an empty local name, then skips through
+            -- '>'. Unescaped SPARQL IRIs such as <http://example.org/type>
+            -- take this path. Skip the token without inventing a DOM element
+            -- or changing any source bytes/native text offsets.
+            -- https://github.com/koreader/crengine/blob/60a5fbc1531f76a47c54699d487390e2e2cb1c14/crengine/src/lvxml.cpp#L5807-L5834
+            if full_name and not name then out.recoveries=out.recoveries+1 end
+            if name then
+                name=name:lower()
                 if closing == "/" then
                     -- Imported HTML sometimes spells a void tag as <br></br>.
                     -- It has no children and must not pop its enclosing block.

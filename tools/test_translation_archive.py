@@ -167,6 +167,33 @@ assert(language_rebased.annotations[1].pos0=='/body/DocFragment[2]/body/section[
     'adding a translated sibling shifted a note inside the original custom element')
 assert(language_rebased.last_xpointer=='/body/DocFragment[2]/body/section[1]/p[2]')
 
+-- Technical books can contain unescaped RDF/SPARQL IRIs. Keep the exact
+-- source and its native code offsets while adding the official translation.
+do
+    local query_source='<section><pre id="query"><code>PREFIX rdf: <http://example.org/rdf#> '
+        ..'SELECT ?s WHERE { ?s rdf:type ?o . }</code></pre></section>'
+    local query_translation=query_source:gsub('</pre>','</pre><pre id="query" class="wr-translation">查询三元组。</pre>')
+    local query_meta={book_id=book.bookId,variant='clean',chapters={{uid='53'}}}
+    Epub.build(work..'/query-original.epub',book,{{uid='53',body=query_source}},css,{},nil,query_meta)
+    Epub.build(work..'/query-translated.epub',book,{{uid='53',body=query_translation}},css,{},nil,query_meta)
+    local query_profile=assert(Translation.inspect(work..'/query-translated.epub'))
+    assert(query_profile.blocks==1 and query_profile.separable and query_profile.recoveries==1)
+    local query_xp='/body/DocFragment[1]/body/section/pre/code/text().8'
+    local query_notes={last_xpointer=query_xp,annotations={{pos0=query_xp,pos1=query_xp,note='Keep SPARQL code note'}}}
+    local rebased=assert(Translation.rebase_settings(work..'/query-original.epub',work..'/query-translated.epub',query_notes,'bilingual'))
+    local expected='/body/DocFragment[1]/body/section[1]/pre[1]/code[1]/text().8'
+    assert(rebased.last_xpointer==expected and rebased.annotations[1].pos0==expected
+        and rebased.annotations[1].note=='Keep SPARQL code note','SPARQL recovery shifted a code note')
+    assert(Installer.visit_chapter_text(work..'/query-translated.epub',function(html)
+        assert(html:find('<http://example.org/rdf#>',1,true),'inspection rewrote the original URI source')
+        return true
+    end))
+    local changed=query_translation:gsub('SELECT %?s','SELECT ?other')
+    Epub.build(work..'/query-changed.epub',book,{{uid='53',body=changed}},css,{},nil,query_meta)
+    local unsafe,why=Translation.rebase_settings(work..'/query-original.epub',work..'/query-changed.epub',query_notes,'bilingual')
+    assert(not unsafe and why:find('translation_position_unverified',1,true),'namespace recovery accepted changed code text')
+end
+
 -- Reproduce close -> sidecar migration -> atomic install -> reopen -> CSS
 -- using the real plugin installer and real ZIPs. The old original has no ids;
 -- the official translated response adds ids/attributes and translated siblings.
@@ -450,12 +477,15 @@ do
     U.mkdir(test_root)
     local test_book={bookId='CB_pending',title='Pending translation regression',version=1}
     local test_path=test_root..'/original.epub'
+    local query_source='<section><pre id="query"><code>PREFIX rdf: <http://example.org/rdf#> SELECT ?s</code></pre></section>'
+    local query_translation=query_source:gsub('</pre>','</pre><pre id="query" class="wr-translation">查询语句。</pre>')
     local test_map,test_catalog,test_chapters={},{},{}
-    for index=1,5 do
-        test_map[index]={uid=tostring(index),structural=index==5,title='Chapter '..index}
-        test_catalog[index]={chapterUid=index,chapterIdx=index,title='Chapter '..index,
+    for index=1,230 do
+        local title=index==53 and 'Triple Stores and SPARQL' or ('Chapter '..index)
+        test_map[index]={uid=tostring(index),structural=index==5,title=title}
+        test_catalog[index]={chapterUid=index,chapterIdx=index,title=title,
             translateVersion=index==3 and 10130 or 0,hasTranslated=index==3}
-        test_chapters[index]={uid=tostring(index),title='Chapter '..index,body=body,structural=index==5}
+        test_chapters[index]={uid=tostring(index),title=title,body=index==53 and query_source or body,structural=index==5}
     end
     Epub.build(test_path,test_book,test_chapters,css,{},nil,
         {book_id=test_book.bookId,variant='clean',chapters=test_map})
@@ -488,13 +518,16 @@ do
         return {stopPoll=true,curStatus={{uid=uid,translateVersion=7}}}
     end
     local test_reader=Reader:new({},test_store)
+    local query_failed=true
     function test_reader:chapter_state() return {book_version=1} end
     function test_reader:_epub_once(_,chapter,options,state)
         local uid=tostring(chapter.chapterUid)
         reads[#reads+1]={uid=uid,translation=options.translation==true}
+        if uid=='53' and query_failed then error('test interrupted chapter processing') end
         local available=uid~='3' or ready_three
         if uid=='2' and not ready_two then available=false end
         local fragment=options.translation and available and translated or body
+        if uid=='53' then fragment=options.translation and query_translation or query_source end
         state.structural=uid=='5'
         state.content_format='epub'
         state.coord_html='<html><body>'..fragment..'</body></html>'
@@ -502,22 +535,31 @@ do
     end
     local test_downloader=Downloader:new(test_reader,test_api,nil,test_store,{})
     function test_downloader:catalog() return {format='epub'},U.copy(test_catalog) end
+    local passed,reason=pcall(test_downloader.book,test_downloader,test_book,
+        {generate_translation_uid='3',translation_batch_size='all',translation_mode='bilingual',images=false},function() end)
+    assert(not passed and tostring(reason):find('已完整获取：229',1,true)
+        and tostring(reason):find('• Triple Stores and SPARQL：',1,true),
+        'a chapter processing failure did not keep its completed checkpoint set: '..tostring(reason))
+    query_failed=false; requests={}; seen={}; reads={}
     local result=test_downloader:book(test_book,{generate_translation_uid='3',translation_batch_size='all',
         translation_mode='bilingual',images=false},function() end)
-    assert(result.pending_install and result.chapter_count==5)
-    assert(result.translation_batch_summary.total==4 and result.translation_batch_summary.available==3,
+    assert(result.pending_install and result.chapter_count==230)
+    assert(result.translation_batch_summary.total==229 and result.translation_batch_summary.available==228,
         'one pending chapter aborted the book or was counted as translated')
     local profile=assert(Translation.inspect(result.pending_file))
     local completed={}
     for _,chapter in ipairs(profile.chapters) do completed[chapter.chapter_uid]=chapter.blocks>0 end
-    assert(completed['1'] and completed['2'] and not completed['3'] and completed['4'],
+    assert(completed['1'] and completed['2'] and not completed['3'] and completed['53'] and completed['230'],
         'pending chapter 3 prevented fetching later chapters')
     assert(U.read_file(test_path,true)==original,'partially translated download overwrote the open original')
     local count_three=0
     for _,uid in ipairs(requests) do if uid=='3' then count_three=count_three+1 end end
-    assert(count_three==2 and #requests==6,'chapter repair regenerated the whole book or retried indefinitely')
+    assert(count_three==2 and #requests==2,'chapter repair regenerated the whole book or retried indefinitely')
     local original_three=false
-    for _,read in ipairs(reads) do if read.uid=='3' and not read.translation then original_three=true end end
+    for _,read in ipairs(reads) do
+        assert(read.uid=='3' or read.uid=='53','resuming a failed book downloaded an already completed chapter again')
+        if read.uid=='3' and not read.translation then original_three=true end
+    end
     assert(original_three,'pending chapter was omitted instead of preserving its actual original')
 
     -- After applying partial translations, continue only the missing chapter.
@@ -525,10 +567,12 @@ do
     test_store.record=U.copy(result)
     test_store.record.pending_install=nil; test_store.record.pending_file=nil
     ready_three=true; requests={}; seen={}
+    local cached_uids={}
+    for uid,available in pairs(completed) do if available then cached_uids[uid]=true end end
     local resumed=test_downloader:book(test_book,{generate_translation_uid='3',translation_batch_size='all',
-        translation_mode='bilingual',translation_cached_uids={['1']=true,['2']=true,['4']=true},images=false},function() end)
+        translation_mode='bilingual',translation_cached_uids=cached_uids,images=false},function() end)
     assert(#requests==1 and requests[1]=='3','continuation regenerated already installed translations')
-    assert(resumed.translation_batch_summary.total==4 and resumed.translation_batch_summary.available==4)
+    assert(resumed.translation_batch_summary.total==229 and resumed.translation_batch_summary.available==229)
 
     -- Existing translations and the requested chapter of a short batch must
     -- never be replaced by an untranslated fallback, even when status is ready.

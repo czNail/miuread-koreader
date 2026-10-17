@@ -78,6 +78,14 @@ end
 function M.friendly_error(error_value)
     local message=tostring(error_value or "")
     local lower=message:lower()
+    if message:find("下载不完整，未生成新的 EPUB",1,true) then
+        local expected,actual=message:match("必需内容：(%d+)"),message:match("已完整获取：(%d+)")
+        local title=message:match("\n• ([^\r\n]-)：")
+        local summary=expected and actual and ("已保存 "..actual.." / "..expected.." 章下载内容，仍有章节未完成。")
+            or "仍有章节未完整下载。"
+        if title then summary=summary.."\n未完成章节："..title.."。" end
+        return summary.."\n原书和下载进度已保留，可从断点继续。"
+    end
     if message:find("[MiuReadTranslationMemberRequired]",1,true)
         or message:find("仅限会员",1,true) or message:find("付费会员",1,true)
         or message:find("会员专属",1,true) or lower:find("membership required",1,true)
