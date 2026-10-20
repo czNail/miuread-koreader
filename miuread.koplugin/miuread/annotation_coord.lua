@@ -68,8 +68,8 @@ end
 
 --- 真实服务端 range -> text -> range 闭环检查。
 -- `ok=false` 仅作为诊断，不会改变现有云端批注显示；上传路径可把它作为硬门槛。
-function Coord.roundTrip(coord_html, range_str)
-    local resolved, err = Coord.resolveRange(coord_html, range_str)
+function Coord.roundTrip(coord_html, range_str, source_map)
+    local resolved, err = Coord.resolveRangeOnMap(source_map or Coord.build(coord_html), range_str)
     if not resolved then return {ok=false, error=err} end
 
     if resolved.point then

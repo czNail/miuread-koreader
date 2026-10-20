@@ -1065,7 +1065,10 @@ function Reader:_txt_once(book, chapter, opt, state)
     local a = self:shard("/web/book/chapter/t_0", id, uid, state.psvts, false, opt.keepalive,context)
     local ok_b, b = pcall(self.shard, self, "/web/book/chapter/t_1", id, uid, state.psvts, false, opt.keepalive,context)
     if not ok_b then b = "" end
-    local xhtml = Codec.text_xhtml(Codec.decode_parts({a, b}))
+    local raw_text = Codec.decode_parts({a, b})
+    local xhtml = Codec.text_xhtml(raw_text)
+    -- WeRead ranges for TXT chapters address the decrypted text itself.
+    state.raw_text = raw_text
     if not has_readable_content(xhtml, false) then error("decoded TXT chapter is empty") end
     -- Keep the complete decrypted chapter before any coordinate/body trimming.
     -- beta.10 exports this only for local coordinate diagnostics.

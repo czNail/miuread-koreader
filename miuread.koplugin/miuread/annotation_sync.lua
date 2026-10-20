@@ -21,8 +21,12 @@ local function scalar(value)
     return ""
 end
 
-local function clean_text(value)
-    return tostring(value or ""):gsub("%s", ""):gsub("%*", "")
+-- `plain` marks text from a raw TXT chapter, where ideographic spaces are
+-- paragraph indentation rather than content.
+local function clean_text(value, plain)
+    local text = tostring(value or ""):gsub("%s", ""):gsub("%*", "")
+    if plain == true then text = text:gsub("\227\128\128", "") end
+    return text
 end
 
 -- Footnote-spanning highlights are resolved by PosMap against an exact
@@ -33,9 +37,9 @@ end
 -- the shared range. A review may quote only a sub-span of that range. Treat a
 -- sufficiently long containment relationship as supporting evidence instead of
 -- a coordinate failure.
-local function text_relation(expected_value, actual_value)
-    local expected = clean_text(expected_value)
-    local actual = clean_text(actual_value)
+local function text_relation(expected_value, actual_value, plain)
+    local expected = clean_text(expected_value, plain)
+    local actual = clean_text(actual_value, plain)
     if expected == "" or actual == "" then return "missing", false end
     if expected == actual then return "exact", true end
 
@@ -368,12 +372,12 @@ function AnnotationSync:_verify_coordinate_basis(book_id, chapter_ctx)
             review_id=tostring(anchor.review_id or ""),
             expected=tostring(anchor.abstract or ""),
         }
-        if clean_text(anchor.abstract) ~= "" and detail.range ~= "" then
+        if clean_text(anchor.abstract, chapter_ctx.plain_text) ~= "" and detail.range ~= "" then
             local resolved, resolve_error = Coord.resolveRangeOnMap(chapter_ctx.map, detail.range)
-            if resolved and clean_text(resolved.text) ~= "" then
+            if resolved and clean_text(resolved.text, chapter_ctx.plain_text) ~= "" then
                 checked = checked + 1
                 detail.resolved = tostring(resolved.text or "")
-                local relation, supports = text_relation(anchor.abstract, resolved.text)
+                local relation, supports = text_relation(anchor.abstract, resolved.text, chapter_ctx.plain_text)
                 detail.relation = relation
                 if relation == "exact" then
                     exact = exact + 1
@@ -405,7 +409,7 @@ function AnnotationSync:_verify_coordinate_basis(book_id, chapter_ctx)
         contained=contained,
         mismatched=mismatched,
         unresolved=unresolved,
-        source=COORD_SOURCE,
+        source=chapter_ctx.coord_source or COORD_SOURCE,
         version=COORD_VERSION,
         anchors=details,
     }
@@ -437,7 +441,7 @@ function AnnotationSync:_verify_coordinate_basis(book_id, chapter_ctx)
     chapter_ctx.coord_verification = result
     logger.info("[MiuRead][AnnotationSync] coordinate basis",
         "book=", tostring(book_id), "chapter=", tostring(chapter_ctx.chapter_uid or ""),
-        "source=", COORD_SOURCE, "version=", tostring(COORD_VERSION),
+        "source=", chapter_ctx.coord_source or COORD_SOURCE, "version=", tostring(COORD_VERSION),
         "status=", tostring(result.status), "anchors=", tostring(result.total),
         "checked=", tostring(result.checked), "matched=", tostring(result.matched),
         "exact=", tostring(result.exact), "contained=", tostring(result.contained),
@@ -644,7 +648,16 @@ function AnnotationSync:_coord_map_for_chapter(book, row, candidate, cache)
     -- compatible with future visible star injection.
     local stars = type(state) == "table" and type(state.annotation_stars) == "table"
         and state.annotation_stars or {}
-    local built_ok, bridge = pcall(PosMap.buildBridge, coord_html, stars)
+    local plain_text = type(state) == "table" and state.content_format == "txt"
+    local built_ok, bridge
+    if plain_text then
+        if type(state.raw_text) ~= "string" or state.raw_text == "" then return nil, "raw_txt_missing" end
+        coord_html = state.raw_text
+        local map_ok, map = pcall(PosMap.build, coord_html, true)
+        built_ok, bridge = map_ok, map_ok and {coord=map, injected=map, stars={}} or map
+    else
+        built_ok, bridge = pcall(PosMap.buildBridge, coord_html, stars)
+    end
     if not built_ok or type(bridge) ~= "table" or type(bridge.coord) ~= "table" then
         return nil, tostring(bridge or "coord_bridge_failed")
     end
@@ -652,10 +665,13 @@ function AnnotationSync:_coord_map_for_chapter(book, row, candidate, cache)
     if raw_html == "" then raw_html = tostring(downloaded or "") end
     local state_book_version = type(state) == "table" and
         (positive_version(state.book_version) or find_book_version(state, book_arg.bookId)) or nil
+    if plain_text then state_book_version = state_book_version or 0 end
     local ctx = {map=bridge.coord, bridge=bridge, html=coord_html, raw_html=raw_html, chapter=chapter,
+        plain_text=plain_text, coord_source=plain_text and "raw_txt" or COORD_SOURCE,
         chapter_uid=uid, chapter_idx=idx, book_version=state_book_version,
         book_version_source=state_book_version and "reader_chapter_state" or nil}
-    if state_book_version and self.store and type(self.store.save_book) == "function" then
+    -- Version 0 only marks a TXT coordinate basis; never store it as the book version.
+    if positive_version(state_book_version) and self.store and type(self.store.save_book) == "function" then
         pcall(self.store.save_book, self.store, book_arg.bookId, {version=state_book_version})
     end
     cache[cache_key] = ctx
@@ -727,7 +743,7 @@ function AnnotationSync:_locate(row, chapter_ctx)
         if not text_start then return nil, "bookmark_text_map_failed" end
         local point = Range.encode(html_start, html_start + 1, true)
         if not point then return nil, "bookmark_encode_failed" end
-        local round = Coord.roundTrip(chapter_ctx.html, point)
+        local round = Coord.roundTrip(chapter_ctx.html, point, chapter_ctx.plain_text and chapter_ctx.map or nil)
         if not (round and round.ok) then return nil, "bookmark_range_roundtrip_failed" end
         local mark_text = visible_slice(map, text_start, 140)
         if mark_text == "" then return nil, "bookmark_preview_empty" end
@@ -738,7 +754,7 @@ function AnnotationSync:_locate(row, chapter_ctx)
         return {
             range=point, mark_text=mark_text, html_start=html_start,
             text_start=text_start, point=true,
-            coord_version=COORD_VERSION, coord_source=COORD_SOURCE,
+            coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE,
             local_confidence=confidence,
             local_verify="unique_anchor+point_roundtrip",
             anchor_source=tostring(anchor_source or ""),
@@ -755,14 +771,14 @@ function AnnotationSync:_locate(row, chapter_ctx)
     local matched_text = mark_text
 
     if not range_key then
-        local foot_bridge = PosMap.buildFootnoteDisplayBridge(chapter_ctx.html)
+        local foot_bridge = not chapter_ctx.plain_text and PosMap.buildFootnoteDisplayBridge(chapter_ctx.html)
         if foot_bridge then
             local candidate_range, candidate_start, candidate_end, detail =
                 PosMap.locateFootnoteDisplay(foot_bridge, mark_text, opts)
             if candidate_range and type(detail) == "table"
                 and clean_text(detail.display_text) == clean_text(mark_text) then
                 local candidate_resolved = Coord.resolveRangeOnMap(map, candidate_range)
-                local candidate_round = Coord.roundTrip(chapter_ctx.html, candidate_range)
+                local candidate_round = Coord.roundTrip(chapter_ctx.html, candidate_range, chapter_ctx.plain_text and chapter_ctx.map or nil)
                 if candidate_resolved
                     and clean_text(candidate_resolved.text) == clean_text(detail.source_text)
                     and candidate_round and candidate_round.ok then
@@ -788,11 +804,11 @@ function AnnotationSync:_locate(row, chapter_ctx)
 
     if not range_key then return nil, locate_error or "not_found" end
     local resolved = Coord.resolveRangeOnMap(map, range_key)
-    if not resolved or clean_text(resolved.text) ~= clean_text(matched_text) then
+    if not resolved or clean_text(resolved.text, chapter_ctx.plain_text) ~= clean_text(matched_text, chapter_ctx.plain_text) then
         return nil, locate_mode == "footnote_display_exact"
             and "footnote_display_range_verify_failed" or "range_verify_failed"
     end
-    local round = Coord.roundTrip(chapter_ctx.html, range_key)
+    local round = Coord.roundTrip(chapter_ctx.html, range_key, chapter_ctx.plain_text and chapter_ctx.map or nil)
     if not (round and round.ok) then
         return nil, locate_mode == "footnote_display_exact"
             and "footnote_display_roundtrip_failed" or "range_roundtrip_failed"
@@ -800,7 +816,7 @@ function AnnotationSync:_locate(row, chapter_ctx)
     -- Upload the text re-extracted from coord_html, not the injected KOReader
     -- selection. This keeps markText/abstract free of local display markers.
     return {range=range_key, mark_text=resolved.text, html_start=html_start,
-        html_end_pos=html_end_pos, point=false, coord_version=COORD_VERSION, coord_source=COORD_SOURCE,
+        html_end_pos=html_end_pos, point=false, coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE,
         local_confidence="strong", local_verify=locate_mode == "footnote_display_exact"
             and "text+exact_footnote_display+roundtrip" or "text+context+roundtrip"}
 end
@@ -903,19 +919,19 @@ function AnnotationSync:_review_payload(row, located, version, prefs)
     return payload
 end
 
-local function validate_payload(row, payload)
+local function validate_payload(row, payload, plain_text)
     if tostring(payload.bookId or "") == "" then return nil, "bookId_missing" end
     if tostring(payload.chapterUid or "") == "" then return nil, "chapterUid_missing" end
     if tostring(payload.range or "") == "" then return nil, "range_missing" end
     local start, ending, point = Range.parse(tostring(payload.range))
     if not start or not ending then return nil, "range_invalid" end
     if row.kind == "bookmark" then
-        if not positive_version(payload.bookVersion) then return nil, "bookVersion_missing" end
+        if not positive_version(payload.bookVersion) and not (plain_text == true and tonumber(payload.bookVersion) == 0) then return nil, "bookVersion_missing" end
         if not point then return nil, "bookmark_range_not_point" end
         if tonumber(payload.type) ~= 0 then return nil, "bookmark_type_invalid" end
         if tostring(payload.markText or "") == "" then return nil, "bookmark_markText_missing" end
     elseif row.kind == "highlight" then
-        if not positive_version(payload.bookVersion) then return nil, "bookVersion_missing" end
+        if not positive_version(payload.bookVersion) and not (plain_text == true and tonumber(payload.bookVersion) == 0) then return nil, "bookVersion_missing" end
         if point then return nil, "highlight_range_is_point" end
         if tonumber(payload.type) ~= 1 then return nil, "highlight_type_invalid" end
         if tostring(payload.markText or "") == "" then return nil, "highlight_markText_missing" end
@@ -1200,6 +1216,10 @@ function AnnotationSync:sync_book(book, record, options)
                 local write_version_source = write_version and (chapter_ctx.book_version and
                     tostring(chapter_ctx.book_version_source or "reader_chapter_state")
                     or (positive_version(row.book_version) and "local_row" or tostring(version_source or "cached"))) or "missing"
+                if chapter_ctx.plain_text then
+                    write_version = write_version or 0
+                    write_version_source = "reader_txt_state"
+                end
                 if not write_version then
                     local recovered, recovered_source = self:_book_version(book_id, book or {}, record or {}, row.chapter_uid)
                     write_version = positive_version(recovered)
@@ -1218,7 +1238,7 @@ function AnnotationSync:sync_book(book, record, options)
                     remember_error(row, "coord_failed", verify_error or "coordinate_evidence_inconclusive", "coord_basis", {
                         range_key=located.range, book_version=write_version or 0,
                         chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                        coord_version=COORD_VERSION, coord_source=COORD_SOURCE,
+                        coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE,
                         coord_verify=tostring(effective_verify or "inconclusive"),
                     })
                 else
@@ -1233,12 +1253,12 @@ function AnnotationSync:sync_book(book, record, options)
                     LocalDB.mark_state(self.store, book_id, row.local_id, "local_only", {
                         range_key=located.range, book_version=write_version or 0,
                         chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                        coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                        coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                         last_stage="verify", last_error="", last_attempt_at=os.time(),
                     })
                     row.range_key = located.range
                     row.coord_version = COORD_VERSION
-                    row.coord_source = COORD_SOURCE
+                    row.coord_source = chapter_ctx.coord_source or COORD_SOURCE
                     row.coord_verify = effective_verify
 
                     if cloud_rows then
@@ -1252,7 +1272,7 @@ function AnnotationSync:sync_book(book, record, options)
                         local rid = matched_id or (is_review and review_remote_id(match) or bookmark_remote_id(match))
                         LocalDB.mark_synced(self.store, book_id, row.local_id, rid, located.range, write_version or 0, {
                             chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                            coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                            coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                         })
                         result.synced = result.synced + 1
                         result.reconciled = result.reconciled + 1
@@ -1280,12 +1300,12 @@ function AnnotationSync:sync_book(book, record, options)
                                 U.utf8_len(tostring(payload.markText or "")))
                                 .. " source=" .. tostring(write_version_source or "missing"))
                         end
-                        local payload_ok, payload_error = validate_payload(row, payload)
+                        local payload_ok, payload_error = validate_payload(row, payload, chapter_ctx.plain_text)
                         if not payload_ok then
                             remember_error(row, "metadata_failed", payload_error, "payload", {
                                 range_key=located.range, book_version=write_version or 0,
                                 chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                                coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                                coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                             })
                         else
                             stage_log(row, "post", true, is_review and "review/add" or "book/addBookmark")
@@ -1299,13 +1319,13 @@ function AnnotationSync:sync_book(book, record, options)
                                     remember_error(row, "unknown", "服务器未返回 bookmarkId", "post", {
                                         range_key=located.range, book_version=write_version or 0,
                                         chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                                        coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                                        coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                                     })
                                 else
                                     LocalDB.mark_synced(self.store, book_id, row.local_id,
                                         remote_id, located.range, write_version or 0, {
                                             chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                                            coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                                            coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                                         })
                                     result.synced = result.synced + 1
                                     stage_log(row, "post", true, remote_id ~= "" and "remote_id_saved" or "review_saved")
@@ -1316,7 +1336,7 @@ function AnnotationSync:sync_book(book, record, options)
                                 remember_error(row, "unknown", value, "post", {
                                     range_key=located.range, book_version=write_version or 0,
                                     chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                                    coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                                    coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                                 })
                             elseif retryable_post_error(value) then
                                 -- Authentication/rate-limit/5xx failures are recoverable and
@@ -1324,7 +1344,7 @@ function AnnotationSync:sync_book(book, record, options)
                                 remember_error(row, "local_only", value, "post", {
                                     range_key=located.range, book_version=write_version or 0,
                                     chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                                    coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                                    coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                                 })
                             else
                                 -- Deterministic server rejection is not fixed by hammering the
@@ -1333,7 +1353,7 @@ function AnnotationSync:sync_book(book, record, options)
                                 remember_error(row, "metadata_failed", value, "post_rejected", {
                                     range_key=located.range, book_version=write_version or 0,
                                     chapter_uid=row.chapter_uid, chapter_idx=row.chapter_idx,
-                                    coord_version=COORD_VERSION, coord_source=COORD_SOURCE, coord_verify=effective_verify,
+                                    coord_version=COORD_VERSION, coord_source=chapter_ctx.coord_source or COORD_SOURCE, coord_verify=effective_verify,
                                 })
                             end
                         end
