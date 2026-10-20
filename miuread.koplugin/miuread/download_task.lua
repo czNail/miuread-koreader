@@ -2394,6 +2394,8 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
                         thoughts = detail.thoughts,
                         percent = percent,
                         message = detail.message,
+                        translation_current = detail.translation_current,
+                        translation_total = detail.translation_total,
                         waiting_network = detail.waiting_network==true or stage=="waiting_network" or nil,
                         network_wait_started_at = detail.network_wait_started_at,
                         network_wait_seconds = detail.network_wait_seconds,

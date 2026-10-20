@@ -152,8 +152,15 @@ function M.analyze(html, chapter_uid, fragment_index, collect_positions)
             if not finish then return nil, "unterminated_tag" end
             local raw = html:sub(start_at, finish)
             local closing, full_name = raw:match("^<%s*(/?)%s*([%w:_-]+)")
-            if full_name then
-                local name = full_name:match("([^:]+)$"):lower()
+            local name=full_name and full_name:match("([^:]+)$")
+            -- CRE's ReadIdent rejects an empty local name, then skips through
+            -- '>'. Unescaped SPARQL IRIs such as <http://example.org/type>
+            -- take this path. Skip the token without inventing a DOM element
+            -- or changing any source bytes/native text offsets.
+            -- https://github.com/koreader/crengine/blob/60a5fbc1531f76a47c54699d487390e2e2cb1c14/crengine/src/lvxml.cpp#L5807-L5834
+            if full_name and not name then out.recoveries=out.recoveries+1 end
+            if name then
+                name=name:lower()
                 if closing == "/" then
                     -- Imported HTML sometimes spells a void tag as <br></br>.
                     -- It has no children and must not pop its enclosing block.
@@ -335,11 +342,26 @@ local function block_selector(scope, pair, translated)
         :gsub("/([%w_-]+)%[(%d+)%]", " > %1:nth-of-type(%2)")
 end
 
+-- A single unpaired translation must not disable verified pairs elsewhere.
+-- Only pairs with a chapter scope are usable by the fragment-safe stylesheet.
+-- Keep `separable` as the stricter full-coverage diagnostic for old callers.
+function M.translation_only_status(profile)
+    if not profile then return {available=false,reason="inspection",blocks=0,pairs=0,unpaired=0} end
+    local blocks=tonumber(profile.blocks) or 0
+    local paired=0
+    for _,chapter in ipairs(profile.chapters or {}) do
+        if chapter.chapter_uid and chapter.chapter_uid~="" then paired=paired+#(chapter.pairs or {}) end
+    end
+    local unpaired=math.max(0,blocks-paired)
+    return {available=paired>0,blocks=blocks,pairs=paired,unpaired=unpaired,
+        reason=blocks==0 and "missing" or (paired==0 and "unpaired" or (unpaired>0 and "partial" or "ready"))}
+end
+
 function M.css(profile, mode, font_scale)
     mode = M.normalize_mode(mode)
     font_scale=M.normalize_font_scale(font_scale)
     if not profile or (profile.blocks or 0) == 0 then return nil end
-    if mode == "translation" and not profile.separable then return nil end
+    if mode == "translation" and not M.translation_only_status(profile).available then return nil end
     local lines = {"/* MiuRead: WeRead translation display */"}
     for _, chapter in ipairs(profile.chapters or {}) do
         if chapter.blocks > 0 and chapter.chapter_uid ~= "" then
