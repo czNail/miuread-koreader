@@ -498,7 +498,7 @@ function SheetWidget:onBack() return self:_close() end
 function SheetWidget:onScreenResize() return self:_close() end
 function SheetWidget:onRotation() return self:_close() end
 function SheetWidget:onShow()
-    UIManager:setDirty(self, function() return "full", self.bubble_dimen or self.panel_dimen end)
+    UIManager:setDirty(self, function() return "ui", self.bubble_dimen or self.panel_dimen end)
     local delay=tonumber(self.opts and self.opts.auto_close)
     if delay and delay>0 then
         self._auto_close_callback=function()
@@ -632,7 +632,7 @@ function ActionSheet.show(opts)
     local ok, sheet = pcall(SheetWidget.new, SheetWidget, {opts = opts})
     if not ok or not sheet then return show_fallback(opts, sheet) end
     live_sheet = sheet
-    local shown, show_err = pcall(UIManager.show, UIManager, sheet, "full", sheet.bubble_dimen or sheet.panel_dimen)
+    local shown, show_err = pcall(UIManager.show, UIManager, sheet, "ui", sheet.bubble_dimen or sheet.panel_dimen)
     if not shown then
         live_sheet = nil
         return show_fallback(opts, show_err)
