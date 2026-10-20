@@ -421,24 +421,26 @@ local function settings_payload_valid(payload)
     return true,nil,value
 end
 
+-- Returns the parsed settings and, when they were freshly parsed, the exact
+-- bytes they came from so a Store can reuse them for identical reads.
 local function settings_file_data(path,validated)
     if not path or lfs.attributes(path,"mode")~="file" then return nil,"missing" end
     local size=U.file_size(path) or 0
     if size<=0 then return nil,"empty" end
-    if validated then
-        local file=io.open(path,"rb")
-        local payload=file and file:read("*a")
-        if file then file:close() end
-        -- Compare fresh bytes, not mtime/size: another process can replace a
-        -- same-sized settings file within the same clock tick.
-        if payload==validated.payload then return validated.data end
-    end
-    local loader,err=loadfile(path)
+    local file,open_error=io.open(path,"rb")
+    if not file then return nil,open_error end
+    local payload=file:read("*a")
+    file:close()
+    if not payload then return nil,"settings file unreadable" end
+    -- Compare fresh bytes, not mtime/size: another process can replace a
+    -- same-sized settings file within the same clock tick.
+    if validated and payload==validated.payload then return validated.data end
+    local loader,err=loadstring(payload,"@"..path)
     if not loader then return nil,err end
     local ok,value=pcall(loader)
     if not ok then return nil,value end
     if type(value)~="table" then return nil,"settings file did not return a table" end
-    return value
+    return value,nil,payload
 end
 
 local function settings_file_valid(path)
@@ -2777,13 +2779,39 @@ local function settings_equal(a,b,seen)
     return true
 end
 
+-- Most settings bytes (library catalogs, shelf cache) do not change between
+-- progress saves. Reuse the validated text of each top-level key whose value
+-- still equals the snapshot parsed from that text; serialize and parse only
+-- changed keys. Entries are parsed inside a table constructor, at the same
+-- depth they have in the file, so the joined chunk is valid exactly when every
+-- entry is. Returns nil when compact serialization cannot represent the data,
+-- or nil plus the parse error when an entry is invalid.
+local function incremental_settings_payload(data,path,previous_entries)
+    local entries,parts,parsed={},{},{}
+    for key,value in pairs(data) do
+        local entry=previous_entries and previous_entries[key]
+        if not entry or not settings_equal(value,entry.value) then
+            local text=compact_settings({[key]=value})
+            if not text then return nil end
+            text=text:sub(2,-2)
+            local valid,parse_error,wrapped=settings_payload_valid("return {"..text.."}")
+            if not valid then return nil,parse_error end
+            entry={text=text,value=wrapped[key]}
+        end
+        entries[key]=entry
+        parts[#parts+1]=entry.text
+        parsed[key]=entry.value
+    end
+    return "-- "..tostring(path or "").."\nreturn {"..table.concat(parts).."}\n",parsed,entries
+end
+
 function Store:flush(reason)
     local flush_started=store_perf_clock()
     reason=tostring(reason or "direct")
     local navigation=pending_home_navigation(self)
     local disk_data
     if not self.isolated then
-        disk_data=settings_file_data(self.settings_path,self._validated_settings)
+        disk_data=self:_read_settings_file()
         if type(disk_data)=="table" then
             self.db.data.sessions=merge_newer_progress_sessions(self.db.data.sessions,disk_data.sessions)
         end
@@ -2814,19 +2842,33 @@ function Store:flush(reason)
     end
     local previous_path=self.settings_path..".previous"
     if not self.isolated then
-        if disk_data then U.copy_file(self.settings_path,previous_path) end
+        -- When the backup already holds exactly the bytes on disk, a .previous
+        -- copy would only duplicate it; keep it whenever that is not known.
+        local snapshot=self._validated_settings
+        local backup_matches=disk_data~=nil and snapshot~=nil and snapshot.data==disk_data
+            and snapshot.backed_up==true
+        if disk_data and not backup_matches then U.copy_file(self.settings_path,previous_path) end
     end
 
     -- Serialize exactly like KOReader LuaSettings:flush(): dump() emits only a
     -- table expression, while a settings file must be a chunk that returns it.
     -- Validate the complete chunk in memory, atomically replace the target, and
     -- keep the last valid generation if anything fails.
-    local payload,validated_data
+    local payload,validated_data,validated_entries
+    local previous_entries=self._validated_settings and self._validated_settings.entries
     local function attempt_write()
-        payload=settings_payload(self.db.data,self.settings_path)
-        local valid_payload,parse_error,parsed=settings_payload_valid(payload)
-        if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
-        validated_data=parsed
+        local built,detail,entries=incremental_settings_payload(
+            self.db.data,self.settings_path,previous_entries)
+        if built then
+            payload,validated_data,validated_entries=built,detail,entries
+        elseif detail then
+            error("serialized settings invalid: "..tostring(detail))
+        else
+            payload=settings_payload(self.db.data,self.settings_path)
+            local valid_payload,parse_error,parsed=settings_payload_valid(payload)
+            if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
+            validated_data,validated_entries=parsed,nil
+        end
         local written,write_error=U.atomic_write(self.settings_path,payload,true)
         if not written then error("atomic settings write failed: "..tostring(write_error)) end
     end
@@ -2870,14 +2912,17 @@ function Store:flush(reason)
             "error=",tostring(validation_reason or "validation_failed"))
         return false,validation_reason
     end
+    local backed_up=false
     if not self.isolated then
-        local backed_up,backup_error=U.copy_file(self.settings_path,self.settings_backup_path)
+        local backup_error
+        -- The file was just read back and equals payload byte for byte.
+        backed_up,backup_error=U.atomic_write(self.settings_backup_path,payload,true)
         if not backed_up then
             logger.warn("[MiuRead][Store] settings backup refresh failed",tostring(backup_error or "unknown"))
         end
         os.remove(previous_path)
     end
-    self._validated_settings={payload=payload,data=validated_data}
+    self._validated_settings={payload=payload,data=validated_data,entries=validated_entries,backed_up=backed_up==true}
     self._pending_home_navigation=nil
     local elapsed_ms=math.floor((store_perf_clock()-flush_started)*1000+0.5)
     if elapsed_ms>=250 or reason=="set:auth" then
@@ -2888,22 +2933,82 @@ function Store:flush(reason)
     end
     return true
 end
+-- Read the settings file, reusing the snapshot for bytes this Store already
+-- parsed or wrote. Freshly parsed bytes become that snapshot: until the file
+-- changes again, later reads (Home summaries, reload checks, the next flush)
+-- compare bytes instead of parsing the whole file each time.
+function Store:_read_settings_file()
+    local data,err,payload=settings_file_data(self.settings_path,self._validated_settings)
+    if payload then
+        local previous=self._validated_settings
+        self._validated_settings={payload=payload,data=data,entries=previous and previous.entries}
+    end
+    return data,err
+end
+local function same_value(a,b)
+    if a==b then return true end
+    if type(a)~="table" or type(b)~="table" then return false end
+    for key,value in pairs(a) do
+        if not same_value(value,b[key]) then return false end
+    end
+    for key in pairs(b) do
+        if a[key]==nil then return false end
+    end
+    return true
+end
 function Store:reload()
     local navigation=pending_home_navigation(self)
-    if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
-    self.db = LuaSettings:open(self.settings_path)
+    local data=not self.isolated and self:_read_settings_file() or nil
+    if not self.isolated and not data then
+        restore_settings_file(self.settings_path,self.settings_backup_path)
+    end
+    if data and data==(self._validated_settings and self._validated_settings.data) then
+        -- The file holds exactly the validated snapshot: make every top-level
+        -- value equal to it (strict, including number precision) instead of
+        -- parsing the same bytes again. Unchanged keys keep their tables.
+        local live=self.db.data
+        for key in pairs(live) do
+            if data[key]==nil then live[key]=nil end
+        end
+        for key,value in pairs(data) do
+            if not same_value(live[key],value) then live[key]=U.copy(value) end
+        end
+    else
+        self.db = LuaSettings:open(self.settings_path)
+    end
     -- Reload fresh worker results without discarding deferred tab/page choices.
     -- Only navigation is overlaid; all other settings and library data reload.
     restore_home_navigation(self,navigation)
     if not self.isolated then
-        local valid=settings_file_valid(self.settings_path)
-        if valid then U.copy_file(self.settings_path,self.settings_backup_path) end
+        local valid=self:_read_settings_file()~=nil
+        local snapshot=self._validated_settings
+        -- The backup already holds these exact bytes when the flush that wrote
+        -- them refreshed it; copy only otherwise.
+        if valid and not (snapshot and snapshot.backed_up==true) then
+            local copied=U.copy_file(self.settings_path,self.settings_backup_path)
+            if copied and snapshot then snapshot.backed_up=true end
+        end
     end
     return self
 end
 function Store:read_persisted(key)
-    local data,err=settings_file_data(self.settings_path,self._validated_settings)
+    local data,err=self:_read_settings_file()
     if not data then return nil,err end
     return U.copy(data[key])
+end
+-- Like read_persisted(), but repeated calls for unchanged file bytes return
+-- the same copy. For read-only callers; the validated snapshot is never shared.
+function Store:read_persisted_shared(key)
+    local data,err=self:_read_settings_file()
+    if not data then return nil,err end
+    local snapshot=self._validated_settings
+    if not (snapshot and snapshot.data==data) then return U.copy(data[key]) end
+    snapshot.shared_copies=snapshot.shared_copies or {}
+    local value=snapshot.shared_copies[key]
+    if value==nil then
+        value=U.copy(data[key])
+        snapshot.shared_copies[key]=value
+    end
+    return value
 end
 return Store

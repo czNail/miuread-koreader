@@ -22550,8 +22550,11 @@ function Plugin:_persisted_sessions()
 end
 
 function Plugin:_persisted_library()
-    if self.store and type(self.store.read_persisted)=="function" then
-        local library=self.store:read_persisted("library")
+    -- Callers only look up records and read titles (copying a record before
+    -- changing it), so share one copy per file state instead of deep-copying
+    -- every catalog on each call.
+    if self.store and type(self.store.read_persisted_shared)=="function" then
+        local library=self.store:read_persisted_shared("library")
         if type(library)=="table" then return library end
     end
     return self.store:library() or {}
