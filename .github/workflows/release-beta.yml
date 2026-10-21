@@ -1,9 +1,9 @@
 name: Release beta full package
 
+# Single entry point: manual version + notes. The workflow creates the tag
+# only after the version files and changelog have been committed to beta.
+# A manually pushed v*-beta.* tag cannot safely amend its own source commit.
 on:
-  push:
-    tags:
-      - "v*.*.*-beta.*"
   workflow_dispatch:
     inputs:
       version:
@@ -47,29 +47,17 @@ jobs:
 
           BRANCH_SHA="$(git rev-parse HEAD)"
 
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "${GITHUB_REF:-}" != "refs/heads/beta" ]; then
-              echo "::error::请在 Run workflow 中选择 beta 分支，不能使用 main 或其他分支发布 Beta。"
-              exit 1
-            fi
-            VERSION="$MANUAL_VERSION"
-            RELEASE_TAG="v$VERSION"
-            EVENT_SHA="$BRANCH_SHA"
-          else
-            test "${GITHUB_REF_TYPE:-}" = "tag"
-            RELEASE_TAG="$GITHUB_REF_NAME"
-            VERSION="${RELEASE_TAG#v}"
-            EVENT_SHA="$GITHUB_SHA"
-
-            # Tag push 必须来自 beta 当前 HEAD。
-            # 这里直接使用 GitHub 事件携带的 GITHUB_SHA，
-            # 不再重新 fetch/rev-parse 刚创建的 tag，避免 tag 可见性竞态。
-            if [ "$EVENT_SHA" != "$BRANCH_SHA" ]; then
-              echo "::error::Tag $RELEASE_TAG 必须创建在 beta 分支最新提交上。"
-              echo "::error::beta=$BRANCH_SHA, event_source=$EVENT_SHA"
-              exit 1
-            fi
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "::error::Beta 发布只能通过 Actions → Run workflow 触发；不要手动推送 Tag。"
+            exit 1
           fi
+          if [ "${GITHUB_REF:-}" != "refs/heads/beta" ]; then
+            echo "::error::请在 Run workflow 中选择 beta 分支，不能使用 main 或其他分支发布 Beta。"
+            exit 1
+          fi
+
+          VERSION="$MANUAL_VERSION"
+          RELEASE_TAG="v$VERSION"
 
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
             echo "::error::无效的 Beta 版本：$VERSION"
@@ -88,12 +76,15 @@ jobs:
           echo "  source=$BRANCH_SHA"
 
       - name: Prepare beta release metadata
-        if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
         run: |
           set -euo pipefail
+          if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
+            echo "::error::缺少本次更新说明。如果 Run workflow 页面没有更新说明输入框，请先同步 main 和 beta 两个分支的 release-beta.yml。"
+            exit 1
+          fi
           python3 -m unittest discover -s tools -p 'test_prepare_beta_release.py'
 
           # Never move an already-published tag to a different commit.
@@ -320,7 +311,6 @@ jobs:
           python3 tools/verify_600_beta1.py
 
       - name: Commit prepared beta version and changelog
-        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail

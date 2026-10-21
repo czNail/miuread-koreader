@@ -7,7 +7,7 @@
 
 - 源码版本暂时仍为 `6.0.0-beta.1`：这是原始基线的状态，**不应在提交自动化改动时提前改为新版本**。
 - 下一次真正发布时，Actions 会从你填写的版本号自动更新 `_meta.lua`、`config.lua`、`CHANGELOG.md`，随后测试、提交和打包。
-- 已存在的 `v6.0.1-beta.1` Tag 不应复用或强制移动。建议新版本使用未被占用的后续版本号，例如 `6.0.1-beta.2`，以线上 Tags 为准。
+- GitHub 已存在 `v6.1.0-beta.1` Tag，指向旧版本源码，**不要复用、删除或强制移动这个 Tag**。本次建议直接使用未被占用的新版本 `6.1.0-beta.2`。
 - 本 ZIP 内含从原始上传包保留的 `.git`，当前工作分支为 `beta`，源码修改处于**未提交**状态，不代表已经推送 GitHub。
 
 ## 首次启用（只做一次）
@@ -25,7 +25,7 @@ git push origin beta
 
 如果提示远端 `beta` 已经有更新，请先整合远端的新提交并检查冲突，**不要强制推送**；如存在分支保护，应通过 PR 合并。
 
-注意：GitHub 的 `workflow_dispatch` 手动运行功能需要对应的工作流在仓库默认分支（`main`）上可见。本仓库原本已有 `main` 上的同名工作流。请在 **Run workflow 中明确选择 beta 分支**；如果新 `release_notes` 输入框没有显示，请检查 GitHub 界面加载的工作流版本，必要时同步 `main` 上该工作流的输入声明（不要用 `main` 执行 Beta 发布）。
+注意：GitHub 的 `workflow_dispatch` 页面默认使用 `main` 分支上的工作流输入声明。因此必须同步 `main` 与 `beta` **两个分支的 `.github/workflows/release-beta.yml`**；仅修改 beta 会导致在 Actions 页面看不到 `release_notes`。两个分支用同一份工作流文件。运行时选择 `beta`；如果选 `main`，新增守卫会在发布前明确报错。
 
 ## 以后每次发布 Beta
 
@@ -47,13 +47,14 @@ GitHub → 仓库 → **Actions** → **Release beta full package** → **Run wo
 7. 生成完整安装包，校验 ZIP 大小与 SHA-256，上传 Beta Release；
 8. 更新固定 `beta-channel` 的 OTA 清单。
 
-**不要再先手动创建并推送新 Tag。** 原来的 `push tag` 路径保留作兼容，但仍使用严格的源码版本校验，不会自动填写版本说明。日常发布应走 `Run workflow`。
+**不要再手动创建或推送 Beta Tag。** 已彻底移除 `push tag` 触发器：只有 `Run workflow` 能创建 Beta Release；它会先生成并提交版本文件，再由 Actions 创建 Tag。GitHub Tag 必须指向其对应的版本提交，防止发布包与源码版本不一致。
 
 ## 修改文件清单
 
-- `.github/workflows/release-beta.yml`：加入手动版本/说明输入和自动准备、提交步骤；保留现有发布验证链路。
+- `.github/workflows/release-beta.yml`：禁用 Tag 推送发布，只允许手动输入版本/说明；先准备、提交，再创建 Tag，保留原发布校验链路。**main 和 beta 两个分支必须同步此文件**。
 - `tools/prepare_beta_release.py`：输入校验、生成版本与更新条目；同版本重新运行只接受相同说明。
-- `tools/test_prepare_beta_release.py`：自动化单元测试。
+- `tools/test_prepare_beta_release.py`：版本准备逻辑的单元测试。
+- `tools/test_beta_release_workflow.py`：离线核对单一发布入口及版本提交先于 Tag 创建的工作流约束（可选，不影响线上发布）。
 - `tools/verify_600_beta1.py`：把原来的固定 `6.0.0-beta.1` 断言改成动态版本一致性断言，同时继续要求 6.0.0 基线记录保留。
 - `BETA_自动发布说明.md`：本说明。
 

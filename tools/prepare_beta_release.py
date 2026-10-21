@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Prepare a MiuRead beta release from one version and one set of notes.
 
-Called only for workflow_dispatch. A tag-triggered release retains its existing
-strict validation; this utility does not create or move Git tags.
+Called only for workflow_dispatch. The release workflow commits version
+metadata first and then creates the immutable release tag; direct tag pushes
+do not initiate beta releases.
 """
 
 import argparse
