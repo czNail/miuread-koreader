@@ -1,9 +1,12 @@
 name: Release beta full package
 
-# Single entry point: manual version + notes. The workflow creates the tag
-# only after the version files and changelog have been committed to beta.
-# A manually pushed v*-beta.* tag cannot safely amend its own source commit.
+# Two supported release paths:
+# - A pushed v*-beta.* tag publishes that exact tagged source (no ref rewriting).
+# - Manual dispatch prepares the beta branch and creates a new immutable tag.
 on:
+  push:
+    tags:
+      - "v*.*.*-beta.*"
   workflow_dispatch:
     inputs:
       version:
@@ -32,10 +35,10 @@ jobs:
       MANIFEST_NAME: update-beta.json
 
     steps:
-      - name: Check out beta branch
+      - name: Check out release source
         uses: actions/checkout@v6
         with:
-          ref: beta
+          ref: ${{ github.event_name == 'push' && github.ref || 'beta' }}
           fetch-depth: 0
 
       - name: Resolve beta release identity
@@ -47,17 +50,33 @@ jobs:
 
           BRANCH_SHA="$(git rev-parse HEAD)"
 
-          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
-            echo "::error::Beta 发布只能通过 Actions → Run workflow 触发；不要手动推送 Tag。"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "${GITHUB_REF:-}" != "refs/heads/beta" ]; then
+              echo "::error::手动发布请在 Run workflow 中选择 beta 分支。"
+              exit 1
+            fi
+            VERSION="$MANUAL_VERSION"
+            RELEASE_TAG="v$VERSION"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
+            if [ "${GITHUB_REF:-}" != "refs/tags/$RELEASE_TAG" ] || [ "${RELEASE_TAG#v}" = "$RELEASE_TAG" ]; then
+              echo "::error::需要合法的 v*-beta.* Tag。"
+              exit 1
+            fi
+            VERSION="${RELEASE_TAG#v}"
+            if [ "${GITHUB_SHA:-}" != "$BRANCH_SHA" ]; then
+              echo "::error::检出的源代码与触发 Tag 的 SHA 不一致；拒绝发布。"
+              exit 1
+            fi
+            git fetch origin beta --quiet
+            if ! git merge-base --is-ancestor HEAD origin/beta; then
+              echo "::error::Tag 必须指向 beta 分支历史中的提交。"
+              exit 1
+            fi
+          else
+            echo "::error::不支持的触发事件：$GITHUB_EVENT_NAME"
             exit 1
           fi
-          if [ "${GITHUB_REF:-}" != "refs/heads/beta" ]; then
-            echo "::error::请在 Run workflow 中选择 beta 分支，不能使用 main 或其他分支发布 Beta。"
-            exit 1
-          fi
-
-          VERSION="$MANUAL_VERSION"
-          RELEASE_TAG="v$VERSION"
 
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
             echo "::error::无效的 Beta 版本：$VERSION"
@@ -81,25 +100,42 @@ jobs:
           RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
         run: |
           set -euo pipefail
-          if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
-            echo "::error::缺少本次更新说明。如果 Run workflow 页面没有更新说明输入框，请先同步 main 和 beta 两个分支的 release-beta.yml。"
-            exit 1
-          fi
           python3 -m unittest discover -s tools -p 'test_prepare_beta_release.py'
 
-          # Never move an already-published tag to a different commit.
-          EXISTING_TAG_SHA="$(git rev-parse -q --verify "refs/tags/$RELEASE_TAG^{commit}" 2>/dev/null || true)"
-          if [ -n "$EXISTING_TAG_SHA" ] && [ "$EXISTING_TAG_SHA" != "$(git rev-parse HEAD)" ]; then
-            echo "::error::$RELEASE_TAG 已存在于另一个提交，请使用新版本号。"
-            exit 1
-          fi
-
-          python3 tools/prepare_beta_release.py --version "$VERSION" --notes "$RELEASE_NOTES_INPUT"
-
-          if [ -n "$EXISTING_TAG_SHA" ] && ! git diff --quiet -- \
-              miuread.koplugin/_meta.lua miuread.koplugin/miuread/config.lua CHANGELOG.md; then
-            echo "::error::发布标签已存在，不能重新修改该标签的版本文件。"
-            exit 1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
+              echo "::error::缺少手动发布的更新说明。"
+              exit 1
+            fi
+            # Never move an already-published tag to a different commit.
+            EXISTING_TAG_SHA="$(git rev-parse -q --verify "refs/tags/$RELEASE_TAG^{commit}" 2>/dev/null || true)"
+            if [ -n "$EXISTING_TAG_SHA" ] && [ "$EXISTING_TAG_SHA" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::$RELEASE_TAG 已存在于另一个提交，请使用新版本号。"
+              exit 1
+            fi
+            python3 tools/prepare_beta_release.py --version "$VERSION" --notes "$RELEASE_NOTES_INPUT"
+            if [ -n "$EXISTING_TAG_SHA" ] && ! git diff --quiet -- \
+                miuread.koplugin/_meta.lua miuread.koplugin/miuread/config.lua CHANGELOG.md; then
+              echo "::error::发布标签已存在，不能重新修改该标签的版本文件。"
+              exit 1
+            fi
+          else
+            # This is a published Git tag: never rewrite/move its source commit.
+            # If version fields lag behind the tag, normalize the build workspace
+            # only; the packaged source is self-contained and clearly versioned.
+            SOURCE_VERSION="$(grep -E '^[[:space:]]*VERSION[[:space:]]*=' miuread.koplugin/miuread/config.lua | head -n1 | cut -d '"' -f2)"
+            if [ "$SOURCE_VERSION" != "$VERSION" ]; then
+              RELEASE_NOTES_INPUT="$(git log -1 --format=%s)"
+              RELEASE_NOTES_INPUT="${RELEASE_NOTES_INPUT//|/-}"
+              if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
+                echo "::error::Tag 提交缺少可用于生成更新说明的提交标题。"
+                exit 1
+              fi
+              echo "::warning::Tag 中的源码版本 $SOURCE_VERSION 与目标版本 $VERSION 不同；仅在打包工作区修正元数据，绝不移动 Tag。"
+              python3 tools/prepare_beta_release.py --version "$VERSION" --notes "$RELEASE_NOTES_INPUT"
+            else
+              echo "Tag 源码已包含目标版本，直接校验元数据和 CHANGELOG。"
+            fi
           fi
 
       - name: Read and validate beta identity
@@ -311,6 +347,7 @@ jobs:
           python3 tools/verify_600_beta1.py
 
       - name: Commit prepared beta version and changelog
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
@@ -325,6 +362,7 @@ jobs:
           echo "RELEASE_SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Ensure release tag
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
