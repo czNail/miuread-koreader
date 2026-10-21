@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import re
 import sys
 root=Path(__file__).resolve().parents[1]
 main=(root/'miuread.koplugin/main.lua').read_text(encoding='utf-8')
@@ -15,9 +17,20 @@ ch=(root/'CHANGELOG.md').read_text(encoding='utf-8')
 workflow=(root/'.github/workflows/release-beta.yml').read_text(encoding='utf-8')
 checks=[]
 def ok(cond,msg): checks.append((bool(cond),msg))
-ok('VERSION = "6.0.0-beta.1"' in config,'config version 6.0.0-beta.1')
-ok('version = "6.0.0-beta.1"' in meta,'metadata version 6.0.0-beta.1')
-ok(ch.startswith('## 6.0.0-beta.1'),'6.0.0-beta.1 changelog first')
+# Historical invariants must remain valid after each new release. Do not pin
+# the *current* version to the original 6.0.0-beta.1 baseline.
+config_versions = re.findall(r'(?m)^\s*VERSION\s*=\s*["\'](\d+\.\d+\.\d+-beta\.\d+)["\']', config)
+meta_versions = re.findall(r'(?m)^\s*version\s*=\s*["\'](\d+\.\d+\.\d+-beta\.\d+)["\']', meta)
+current_version = config_versions[0] if len(config_versions) == 1 else None
+ok(len(config_versions) == 1 and len(meta_versions) == 1 and config_versions == meta_versions,
+   'beta config and plugin metadata contain matching versions')
+expected_version = os.environ.get('VERSION')
+ok(current_version is not None and (not expected_version or current_version == expected_version),
+   'beta version matches the release target when supplied')
+changelog_head = re.search(r'(?m)^## (\d+\.\d+\.\d+-beta\.\d+)(?:\s+-\s+.*|\s+—\s+.*)?$', ch)
+ok(current_version is not None and changelog_head is not None and changelog_head.group(1) == current_version,
+   'newest changelog entry matches current beta version')
+ok('## 6.0.0-beta.1' in ch, 'original 6.0.0-beta.1 changelog retained')
 ok('SCHEMA = 136' in config,'schema remains 136')
 ok('SOURCE_ANCHOR_WORDS = {24, 16, 12}' in precise,'beta19 multi-anchor sizes retained')
 ok('anchor_candidates = anchor_candidates' in precise,'beta19 captured anchor set retained')

@@ -235,8 +235,11 @@ store=new_store()
 store.current.native_shelf={vid='alice',accessToken='native-token',refreshToken='native-refresh',deviceId='native-device'}
 store.persisted=copy(store.current)
 h=host(); flow=Auth:new(http,store,h)
+flow.login_fingerprint='1234567890'
+flow.jar={wr_fp='1234567890'}
 name=flow:_finish({webLoginVid='alice',accessToken='web-new',refreshToken='web-new-refresh'})
 assert(name=='Alice' and store.current.cookies.wr_skey=='web-new'
+    and store.current.cookies.wr_fp=='1234567890'
     and store.current.api_key=='new-skills-key' and store.current.login_session_id=='web-session-new')
 assert(store.current.native_shelf and store.current.native_shelf.accessToken=='native-token',
     'same-account Web QR discarded Native shelf authorization')
@@ -244,6 +247,8 @@ store=new_store()
 store.current.native_shelf={vid='alice',accessToken='native-token',refreshToken='native-refresh',deviceId='native-device'}
 store.persisted=copy(store.current)
 h=host(); flow=Auth:new(http,store,h)
+flow.login_fingerprint='1234567890'
+flow.jar={wr_fp='1234567890'}
 name=flow:_finish({webLoginVid='bob',accessToken='web-bob',refreshToken='web-bob-refresh'})
 assert(name=='Alice' and not store.current.native_shelf,'account switch carried Native shelf authorization')
 for _,line in ipairs(logs) do

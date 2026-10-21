@@ -16,6 +16,7 @@ local ButtonDialog=gesture_aware_class(RawButtonDialog)
 local InputDialog=gesture_aware_class(RawInputDialog)
 local UIManager=require("ui/uimanager")
 local Cookies=require("miuread.cookies")
+local DeviceIdentity=require("miuread.device_identity")
 local Protocol=require("miuread.protocol")
 local Text=require("miuread.text")
 local Util=require("miuread.util")
@@ -49,6 +50,7 @@ function Auth:new(http,store,host,backend)
         http=http, store=store, host=host, backend=backend, generation=0, jar={}, dialog=nil,
         retry_dialog=nil, started=0, active=false, closing=false, poll_failures=0,
         refresh_count=0, pending_auth=nil, pending_name="", pending_expected_revision=nil,
+        login_fingerprint=nil,
     },self)
 end
 local function merge_auth_headers(jar,vid,key)
@@ -79,6 +81,7 @@ function Auth:cancel()
     self:_close_dialog()
     self:_close_retry_dialog()
     self.jar={}
+    self.login_fingerprint=nil
     self.started=0
     self.poll_failures=0
     self.refresh_count=0
@@ -86,17 +89,27 @@ function Auth:cancel()
     self.pending_name=""
     self.pending_expected_revision=nil
 end
+-- Keep the fingerprint fixed for a single QR attempt. Never allow a response
+-- Set-Cookie to replace the identity of this KOReader installation.
+function Auth:_login_jar_absorb(headers)
+    self.jar=Cookies.session_absorb(self.jar,header_value(headers,"set-cookie"))
+    if self.login_fingerprint then self.jar.wr_fp=self.login_fingerprint end
+end
 function Auth:_uid()
     if self.backend then return self.backend:uid() end
+    local fingerprint,identity_error=DeviceIdentity.get(self.store)
+    if not fingerprint then error("Unable to prepare device identity: "..tostring(identity_error)) end
+    self.login_fingerprint=fingerprint
+    self.jar={wr_fp=fingerprint}
     local _,code,h=self.http:request{url=BASE.."/r/weread-skills",method="GET",auth=false,
         rate_limit_scope="login",pacing=false,rate_limit_retries=0,rate_limit_fail_fast=true,
-        headers={Referer=BASE.."/"}}
+        headers={Referer=BASE.."/",Cookie=Cookies.session_header(self.jar)}}
     if code<200 or code>=400 then error("login page HTTP "..tostring(code)) end
-    self.jar=Cookies.session_absorb({},header_value(h,"set-cookie"))
+    self:_login_jar_absorb(h)
     local data,headers=self.http:get_json(BASE.."/api/auth/getLoginUid",{auth=false,
         rate_limit_scope="login",pacing=false,rate_limit_retries=0,rate_limit_fail_fast=true,
         headers={Referer=BASE.."/r/weread-skills",Cookie=Cookies.session_header(self.jar)}})
-    self.jar=Cookies.session_absorb(self.jar,header_value(headers,"set-cookie"))
+    self:_login_jar_absorb(headers)
     if type(data.uid)~="string" or data.uid=="" then error("login UID missing") end
     return data.uid
 end
@@ -107,7 +120,7 @@ function Auth:_poll(uid,otp)
     local data,headers=self.http:get_json(url,{auth=false,timeout={5,9},
         rate_limit_scope="login",pacing=false,rate_limit_retries=0,rate_limit_fail_fast=true,
         headers={Referer=BASE.."/r/weread-skills",Cookie=Cookies.session_header(self.jar)}})
-    self.jar=Cookies.session_absorb(self.jar,header_value(headers,"set-cookie"))
+    self:_login_jar_absorb(headers)
     return data
 end
 function Auth:_persisted_auth_matches(expected)
@@ -133,6 +146,10 @@ function Auth:_persisted_auth_matches(expected)
         return false,"core cookie mismatch"
     end
     if self.backend then return self.backend:persisted_matches(expected,persisted) end
+    local required_fp=tostring(expected_cookies.wr_fp or "")
+    if required_fp~="" and tostring(persisted_cookies.wr_fp or "")~=required_fp then
+        return false,"device fingerprint missing from saved account"
+    end
     return true
 end
 
@@ -256,20 +273,26 @@ function Auth:_finish(data)
 
     -- Keep the complete QR/browser session in memory until account verification
     -- and the first public-account credential renewal have both finished.
+    local fingerprint=self.login_fingerprint
+    if not DeviceIdentity.valid(fingerprint) then error("QR login device identity missing") end
     local session=Cookies.session_absorb(self.jar,nil)
+    session.wr_fp=fingerprint
     session.wr_vid=vid; session.wr_skey=key; session.wr_ql="0"
     if refresh~="" then session.wr_rt=Protocol.escape(refresh) end
 
     local user,user_headers=self.http:get_json(BASE.."/api/userInfo?userVid="..Protocol.escape(vid),{auth=false,headers=merge_auth_headers(session,vid,key)})
     session=Cookies.session_absorb(session,header_value(user_headers,"set-cookie"))
+    session.wr_fp=fingerprint
     local account_name=tostring(user.name or user.nickName or user.nickname or user.userName or "")
     local skill,skill_headers=self.http:get_json(BASE.."/api/skills/apikeyGet?only_show=1",{auth=false,headers=merge_auth_headers(session,vid,key)})
     session=Cookies.session_absorb(session,header_value(skill_headers,"set-cookie"))
+    session.wr_fp=fingerprint
     local api_key=skill_api_key(skill)
     if api_key=="" then
         -- only_show=1 does not create a key for first-time Skills users.
         skill,skill_headers=self.http:get_json(BASE.."/api/skills/apikeyGet",{auth=false,headers=merge_auth_headers(session,vid,key)})
         session=Cookies.session_absorb(session,header_value(skill_headers,"set-cookie"))
+        session.wr_fp=fingerprint
         api_key=skill_api_key(skill)
     end
     if api_key=="" then error("No WeRead Skill API key returned") end
@@ -289,6 +312,7 @@ function Auth:_finish(data)
     local wr_ticket,wr_wrpa="",""
     if renewal_ok then
         session=Cookies.session_absorb(session,header_value(renewal_headers,"set-cookie"))
+        session.wr_fp=fingerprint
         renewal_succ=type(renewal)=="table"
             and renewal.succ~=false and tostring(renewal.succ or "")~="0"
         wr_ticket=tostring(header_value(renewal_headers,"x-wr-ticket") or "")
@@ -299,6 +323,7 @@ function Auth:_finish(data)
 
     -- Persist only the proven long-lived cookie boundary. Browser-only session
     -- cookies are discarded after the immediate renewal attempt.
+    session.wr_fp=fingerprint
     local jar=Cookies.sanitize(session)
     local now=os.time()
     local ok_channel={state="ok",checked_at=now,error="",code=""}

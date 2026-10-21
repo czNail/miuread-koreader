@@ -26,6 +26,8 @@ local function generate_login_session_id()
 end
 local defaults={
  schema=Config.SCHEMA,
+ -- Installation-level Web fingerprint: independent of credentials and logout.
+ device_fingerprint="",
  auth={login_session_id="",auth_revision=0,api_key="",cookies={},wr_ticket="",wr_wrpa="",ticket_updated_at=0,
      account={name="",vid="",logged_at=0},
      health={state="unknown",last_checked_at=0,last_ok_at=0,last_error_at=0,
