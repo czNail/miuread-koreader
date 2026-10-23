@@ -105,6 +105,8 @@ end
 function http:post_json(url,body,options)
     validate(options); self.native_api=self.native_api+1
     if url:find('/book/chapterInfos',1,true) then
+        self.native_catalogs=(self.native_catalogs or 0)+1
+        if scenario=='catalog_fallback_resume' and not self.resuming then error('HTTP 404') end
         return {data={{bookId='b',synckey=5,book={format='epub',version=5},updated={
             {chapterUid=2,price=0,wordCount=100},{chapterUid=3,price=0,wordCount=100},{chapterUid=4,price=0,wordCount=100}}}}}
     elseif url:find('/book/readreviews',1,true) then
@@ -140,9 +142,15 @@ end
 function http:close_idle_connections() self.closed=true end
 api={}
 function api:review_batches(ranges) return require('miuread.api').review_batches(self,ranges) end
+function api:catalog()
+    http.web_catalogs=(http.web_catalogs or 0)+1
+    return {book={format='epub'},format='epub',synckey=5,updated={
+        {chapterUid=2,title='First',wordCount=100},{chapterUid=3,title='Second',wordCount=100},
+        {chapterUid=4,title='Third',wordCount=100}}}
+end
 function api:underlines(_,uid)
     http.web_api=http.web_api+1
-    if (scenario=='web_limit' or scenario=='web_cached_resume') and not http.resuming then
+    if (scenario=='web_limit' or scenario=='web_cached_resume' or scenario=='catalog_fallback_resume') and not http.resuming then
         error('[MiuReadRateLimit] error_code=499 wait_seconds=300')
     end
     if scenario=='web_refresh_limit' then
@@ -164,7 +172,7 @@ local Downloader=require('miuread.downloader')
 local Annotations=require('miuread.annotations')
 function new_downloader()
     local r=Reader:new(http,store)
-    function r:chapter(_,chapter,_,options)
+    function r:web_chapter(_,chapter,_,options)
         http.web_bodies=http.web_bodies+1
         local body=py_source(chapter.chapterUid,options.translation==true,true)
         return body,'p{color:black}',{},{coord_html=body,content_format='epub'}
@@ -218,6 +226,8 @@ def run_case(folder, scenario, zlib_path):
     notes = not translation or scenario == 'combined'
     lua.globals().want_notes = notes
     lua.execute(b"d=new_downloader()")
+    if scenario in ('native_catalog', 'catalog_fallback_resume'):
+        lua.execute(b'd.catalog=nil')
     if translation:
         lua.execute(b'''
             -- Keep a real existing EPUB to exercise staged replacement and its
@@ -256,6 +266,14 @@ def run_case(folder, scenario, zlib_path):
             assert(passed,tostring(result))
             assert(http.native_packages==3,'pending Web body was reused with Native annotation coordinates')
         ''')
+    if scenario == 'catalog_fallback_resume':
+        lua.execute(b'''
+            assert(not passed and http.native_catalogs==1 and http.native_packages==0)
+            http.resuming=true; d=new_downloader(); d.catalog=nil
+            passed,result=pcall(d.book,d,book,options)
+            assert(passed,tostring(result))
+            assert(http.native_catalogs==1 and http.web_catalogs==2,'resume probed Native before restoring its Web route')
+        ''')
     if scenario == 'web_refresh_limit':
         lua.execute(b'''
             assert(not passed,'Web annotation rate limit after renewal was swallowed')
@@ -287,13 +305,14 @@ def run_case(folder, scenario, zlib_path):
                 local profile=assert(require('miuread.translation').inspect(result.pending_file))
                 assert(profile.blocks==3 and profile.separable)
             end
-            if scenario=='notes' or scenario=='combined' or scenario=='no_quotes' or scenario=='web_cached_resume' then
+            if scenario=='notes' or scenario=='combined' or scenario=='no_quotes' or scenario=='web_cached_resume' or scenario=='native_catalog' then
                 local resumed_web=scenario=='web_cached_resume' and 1 or 0
                 assert(http.native_packages==3 and http.web_api==resumed_web and http.web_bodies==resumed_web,
                     require('miuread.download_transport').summary(result.download_transport)
                     ..' packages='..http.native_packages..' web_api='..http.web_api..' web_bodies='..http.web_bodies)
                 assert(result.download_transport.eink_chapters==3 and not result.progress_source_complete)
                 assert(thought_groups['2'][1].texts[1].content=='Native thought')
+                if scenario=='native_catalog' then assert(http.native_catalogs==1 and not http.web_catalogs) end
             else
                 assert(result.download_transport.reason=='eink_failed' and http.web_bodies==3)
             end
@@ -322,7 +341,7 @@ def main():
     import os
     os.chdir(ROOT)
     with tempfile.TemporaryDirectory(prefix='miuread-native-features-') as temporary:
-        for scenario in ('web_cached_resume', 'web_refresh_limit', 'notes', 'no_quotes', 'combined', 'notes_unavailable', 'alignment', 'notes_limit', 'web_limit',
+        for scenario in ('native_catalog', 'catalog_fallback_resume', 'web_cached_resume', 'web_refresh_limit', 'notes', 'no_quotes', 'combined', 'notes_unavailable', 'alignment', 'notes_limit', 'web_limit',
                          'translation_unavailable', 'translation_body_missing', 'translation_limit',
                          'member_required', 'cancel', 'hibernate'):
             folder = Path(temporary) / scenario

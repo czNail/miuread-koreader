@@ -106,7 +106,7 @@ function http:get_json(url,opt)
         if self.expired_reads and self.expired_reads>0 then
             self.expired_reads=self.expired_reads-1; error('HTTP 401 [MiuReadAuth] error_code=-2012')
         end
-        return self.bad_shelf and {} or {books={}}
+        return self.bad_shelf and {} or {books=self.present and {{bookId='a'}} or {}}
     end
     if url:find('/web/shelf/bookIds?',1,true) then return {data={{bookId='a',onShelf=self.present and 1 or 0}}} end
     if url:find('/api/userInfo?',1,true) then return {name='Alice'} end

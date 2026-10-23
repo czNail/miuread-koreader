@@ -64,7 +64,7 @@ bookstore=(root/'miuread.koplugin/miuread/bookstore.lua').read_text(encoding='ut
 shelf_client=(root/'miuread.koplugin/miuread/shelf_client.lua').read_text(encoding='utf-8')
 finished=(root/'miuread.koplugin/miuread/finished_status.lua').read_text(encoding='utf-8')
 shelf_progress=(root/'miuread.koplugin/miuread/shelf_progress.lua').read_text(encoding='utf-8')
-api=(root/'miuread.koplugin/miuread/api.lua').read_text(encoding='utf-8')
+api=(root/'miuread.koplugin/miuread/api_web.lua').read_text(encoding='utf-8')
 ok('function Api:add_to_shelf' in api and 'function Api:remove_from_shelf' in api,'#123 shelf add/remove API retained')
 ok('function Api:book_read_info' in api and 'function Api:mark_book_finished' in api,'#126 finished-status API retained')
 ok('similar' in bookstore and 'recommend' in bookstore,'#123 bookstore recommendation paths retained')

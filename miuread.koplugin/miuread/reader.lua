@@ -853,6 +853,7 @@ function Reader:_recover_login_session()
         -- session or stop a long background download.
         local skills_ok, skills_result = pcall(self.repair_login_session, self)
         if not skills_ok then
+            propagate_control_error(skills_result)
             logger.warn("[MiuRead][Reader] optional Skills credential refresh failed",
                 tostring(skills_result))
         end
@@ -1013,7 +1014,10 @@ function Reader:chapter_state(book_id,chapter_uid,keepalive,fresh)
     return state
 end
 
-function Reader:catalog(book_id, request_options)
+function Reader:catalog(book_id,request_options)
+    return require("miuread.api"):new(self.http,self.store,self):catalog(book_id,request_options)
+end
+function Reader:web_catalog(book_id, request_options)
     request_options=type(request_options)=="table" and request_options or {}
     local function load_catalog()
         -- Catalog is a small control request. beta.24 avoids multiplying a
@@ -1368,7 +1372,10 @@ function Reader:_chapter_once(book, chapter, format, opt)
     error(tostring(epub_error) .. "; TXT fallback: " .. tostring(ta))
 end
 
-function Reader:chapter(book, chapter, format, opt)
+function Reader:chapter(book,chapter,format,opt)
+    return require("miuread.api"):new(self.http,self.store,self):chapter(book,chapter,format,opt)
+end
+function Reader:web_chapter(book, chapter, format, opt)
     local last, renewed, empty_count = nil, false, 0
     local uid = chapter.chapterUid or chapter.uid
     for attempt = 1, 3 do
@@ -1450,6 +1457,9 @@ function Reader:chapter(book, chapter, format, opt)
 end
 
 function Reader:mp_content(review_id, book_id, options)
+    return require("miuread.api"):new(self.http,self.store,self):mp_content(review_id,book_id,options)
+end
+function Reader:web_mp_content(review_id, book_id, options)
     options = options or {}
     local auth = self.store:auth()
     local headers = {
@@ -1539,7 +1549,10 @@ function Reader:repair_login_session()
     end)()}
 end
 
-function Reader:report_payload(payload, referer, retries)
+function Reader:report_payload(payload,referer,retries)
+    return require("miuread.api"):new(self.http,self.store,self):report_payload(payload,referer,retries)
+end
+function Reader:web_report_payload(payload, referer, retries)
     local data, _, meta = self.http:post_json(BASE .. "/web/book/read", payload,
         {headers={Origin=BASE, Referer=referer or BASE .. "/",
             Accept="application/json, text/plain, */*"}, retries=tonumber(retries) or 0})

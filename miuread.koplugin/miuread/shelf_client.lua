@@ -1,4 +1,4 @@
--- Optional native credentials for shelf deletion. QR transport follows:
+-- Shared Native credentials for the E-Ink backend. QR transport follows:
 -- https://github.com/teng-lin/weread-omni/blob/main/src/auth/qrlogin.ts
 -- The existing Auth controller owns QR UI, cancellation and commit retries.
 local U=require("miuread.util")

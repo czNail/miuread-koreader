@@ -5,8 +5,10 @@ local U=require("miuread.util")
 local Http=require("miuread.http")
 local Protocol=require("miuread.protocol")
 local logger=require("logger")
-local M={}; M.__index=M
+local Transport=require("miuread.api_transport")
+local M=setmetatable({},{__index=Transport}); M.__index=M
 local FAILURE_STAGES={catalog="目录",chapter_download="章节包下载",refresh="客户端凭据续期",style="书籍样式",
+    book="书籍信息",
     annotations="划线与想法",translation="译文准备",
     client_download="客户端请求",decode="章节包解码",images="章节图片"}
 local FAILURE_FILES={"eink_client.lua","eink_crypto.lua","eink_archive.lua","reader.lua"}
@@ -19,7 +21,7 @@ local KNOWN_FAILURES={
     {"E-Ink 目录未确认章节免费或已购买","chapter_access","目录未确认章节免费或已购买","catalog"},
     {"E-Ink 书籍格式暂不支持","book_format","书籍格式暂不支持","catalog"},
     {"E-Ink 书籍版本缺失","book_version","未返回书籍版本","catalog"},
-    {"E-Ink 下载需要客户端授权","authorization","需要客户端授权","client_download"},
+    {"E-Ink 接口需要客户端授权","authorization","需要客户端授权","client_download"},
     {"E-Ink 未返回章节下载密钥","key_missing","未返回章节下载密钥","chapter_download"},
     {"E-Ink 账号标识无效","account_invalid","客户端账号标识无效","decode"},
     {"E-Ink 解密组件不可用","crypto_unavailable","设备解密组件不可用","decode"},
@@ -49,32 +51,14 @@ local KNOWN_FAILURES={
     {"客户端授权未返回完整登录凭证","refresh_incomplete","未返回完整客户端凭据","refresh"},
 }
 
-local function control_error(value)
-    local text=tostring(value)
-    return text:find("__MIUREAD_HIBERNATE__",1,true)
-        or text:lower():find("download cancelled",1,true)
-        or (type(Http.is_rate_limit_error)=="function" and Http.is_rate_limit_error(value))
-        or text:find("[MiuReadRateLimit]",1,true)
-end
-local function web_reason(reader,options,mode)
-    if mode=="web" then return "manual_web" end
-    if options.fresh_context then return "coordinate_source" end
-    local store=reader.store or {}
-    if type(store.auth)~="function" or not require("miuread.shelf_client").credentials(store:auth()) then return "authorization_required" end
-end
 function M.new(reader,options)
-    options=options or {}
-    local store=reader.store or {}
-    local prefs=type(store.preferences)=="function" and store:preferences() or {}
-    local mode=tostring(options.download_transport or prefs.download_transport or "auto")
-    if mode~="web" then mode="auto" end
-    local reason=web_reason(reader,options,mode)
-    return setmetatable({reader=reader,mode=mode,selected=reason and "web" or "eink",
-        reason=reason or "eink_preferred",web_chapters=0,eink_chapters=0,api_counts={eink={},web={}}},M)
+    local route=Transport.new(reader.store,options)
+    route.reader=reader
+    return setmetatable(route,M)
 end
 function M:native()
     local reader=self.reader
-    reader._eink_client=reader._eink_client or require("miuread.eink_client").new(reader.http,reader.store)
+    reader._eink_client=reader._eink_client or require("miuread.eink_client").new(reader.http,reader.store,reader)
     reader._eink_client.keepalive=true
     reader._eink_client.before_request=function(stage)
         if type(self.checkpoint)=="function" then self.checkpoint(stage) end
@@ -89,37 +73,7 @@ function M:use_web(value)
     if type(self.on_fallback)=="function" then self.on_fallback() end
 end
 function M:service(api)
-    local owner=self
-    local methods={underlines="annotations",readreviews="annotations",translation_member_summary="translation",
-        toggle_translate="translation",en_read="translation"}
-    return setmetatable({}, {__index=function(_,name)
-        local stage=methods[name]
-        if not stage then return function(_,...) return api[name](api,...) end end
-        return function(_,...)
-            local channel=owner.selected
-            owner.active_channel,owner.active_phase=channel,stage
-            if channel=="eink" then
-                local native=owner:native()
-                owner.api_counts.eink[stage]=(owner.api_counts.eink[stage] or 0)+1
-                local ok,value=pcall(native[name],native,...)
-                if ok then
-                    owner.active_channel,owner.active_phase=nil,nil
-                    return value
-                end
-                if control_error(value) then owner:note_rate_limit(value); error(value,0) end
-                owner:use_web(value)
-                -- An annotation source switch also requires a matching chapter
-                -- body. Let Downloader restart this chapter before fetching Web.
-                if stage=="annotations" then error("[MiuReadTransportChanged]",0) end
-            end
-            owner.active_channel,owner.active_phase="web",stage
-            owner.api_counts.web[stage]=(owner.api_counts.web[stage] or 0)+1
-            local ok,value=pcall(api[name],api,...)
-            if not ok then owner:note_rate_limit(value); error(value,0) end
-            owner.active_channel,owner.active_phase=nil,nil
-            return value
-        end
-    end})
+    return require("miuread.api").bind(api,self.reader,self)
 end
 function M:configure(format)
     if self.selected=="eink" and format and format~="epub" and format~="txt" then
@@ -182,21 +136,21 @@ function M:note_rate_limit(value)
 end
 
 function M:_chapter_once(book,chapter,format,opt)
+    if Protocol.is_mp(tostring(book.bookId or book.book_id or "")) then self.selected,self.reason="web","mp" end
     local function web()
         self:activity(opt,"web")
-        local a,b,c,d=self.reader:chapter(book,chapter,format,opt)
+        local read=self.reader.web_chapter or self.reader.chapter
+        local a,b,c,d=read(self.reader,book,chapter,format,opt)
         self.web_chapters=self.web_chapters+1
         return a,b,c,d
     end
-    if Protocol.is_mp(tostring(book.bookId or book.book_id or "")) then self.selected,self.reason="web","mp" end
-    if self.selected=="web" or opt.fresh_context then return web() end
-    self:native()
-    self:activity(opt,"eink")
-    local ok,a,b,c,d=pcall(self.reader.eink_chapter,self.reader,book,chapter,format,opt)
-    if ok then self.eink_chapters=self.eink_chapters+1; return a,b,c,d end
-    if control_error(a) then error(a,0) end
-    self:use_web(a)
-    return web()
+    return self:invoke("chapter",function()
+        self:native()
+        self:activity(opt,"eink")
+        local a,b,c,d=self.reader:eink_chapter(book,chapter,format,opt)
+        self.eink_chapters=self.eink_chapters+1
+        return a,b,c,d
+    end,web,{phase="download",web_only=opt.fresh_context==true})
 end
 function M:chapter(book,chapter,format,opt)
     local ok,a,b,c,d=pcall(self._chapter_once,self,book,chapter,format,opt or {})

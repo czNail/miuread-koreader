@@ -428,12 +428,12 @@ def main():
             Source.cacheChapter=function(_,_,_,_,body)
                 assert(body:find('Web fallback paragraph.',1,true)); return true
             end
-            r=Reader:new(http,store); r.chapter=web_chapter
+            r=Reader:new(http,store); r.web_chapter=web_chapter
             local interrupted=Downloader:new(r,{},nil,store,http); interrupted.catalog=d.catalog
             local ok,err=pcall(interrupted.book,interrupted,{bookId='b',title='Fallback integration',version=5},{images=true})
             assert(not ok and tostring(err):find('[MiuReadRateLimit]',1,true) and native_attempts==2 and web_attempts==1)
             assert(interrupted.last_transport_result.stopped_channel=='web' and interrupted.last_transport_result.failure)
-            r=Reader:new(http,store); r.chapter=web_chapter
+            r=Reader:new(http,store); r.web_chapter=web_chapter
             local resumed=Downloader:new(r,{},nil,store,http); resumed.catalog=d.catalog
             result=resumed:book({bookId='b',title='Fallback integration',version=5},{images=true})
             assert(result.complete and result.chapter_count==3 and result.image_count==1)
@@ -510,7 +510,7 @@ def main():
             Codec.decode_parts=original_decode
         ''')
         print("Native Reader, real EPUB installation, fallback resume and failure cleanup: PASS")
-    for name in ("test_download_transport.lua", "test_eink_client.lua", "test_shelf_client.lua", "test_reader_context.lua", "test_download_safety.lua", "test_http_keepalive.lua"):
+    for name in ("test_api_transports.lua", "test_download_transport.lua", "test_eink_client.lua", "test_shelf_client.lua", "test_reader_context.lua", "test_download_safety.lua", "test_http_keepalive.lua"):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.globals().arg = lua.table_from({0: f"tools/{name}"})
         lua.execute((ROOT / "tools" / name).read_text(encoding="utf-8"), name=name)

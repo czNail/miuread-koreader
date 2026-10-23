@@ -30,7 +30,7 @@ package.preload['miuread.protocol']=function() return {escape=tostring} end
 local source_file=assert(io.open('miuread.koplugin/main.lua','rb'))
 local source=source_file:read('*a'); source_file:close()
 local child_factory=assert(source:match('(local function interactive_child_store.-\nend)'))
-local child_method=assert(source:match('function Plugin:_interactive_child_store%(auth,data_dir,temp_dir%).-\nend'))
+local child_method=assert(source:match('function Plugin:_interactive_child_store%(auth,data_dir,temp_dir,api_mode%).-\nend'))
 local child_methods=assert(loadstring('local U=require("miuread.util"); local Plugin={}\n'
     ..child_factory..'\n'..child_method..'\nreturn Plugin'))()
 local views={}
@@ -418,7 +418,14 @@ assert(not p.settings.bookstore_shelf_pending.alice,'worker-start failure left a
 p=plugin(); p.offline=true
 assert(not M.add_to_shelf(p,{bookId='f',title='F'}) and not p.settings.bookstore_shelf_pending)
 p=plugin(); p.auth.cookies.wr_skey=nil
+api.present=false
+assert(M.add_to_shelf(p,{bookId='g',title='G'}) and p.job,'valid Native authorization was blocked by a missing Web cookie')
+p:finish()
+p=plugin(); p.auth.cookies.wr_skey=nil; p.auth.native_shelf=nil
 assert(not M.add_to_shelf(p,{bookId='g',title='G'}) and not p.job)
+p=plugin(); p.auth.cookies.wr_skey=nil
+function p.store:preferences() return {api_transport='web'} end
+assert(not M.add_to_shelf(p,{bookId='g',title='G'}) and not p.job,'manual Web mode ignored its missing Web credential')
 
 p=plugin()
 M.browse(p,{kind='category',category_id='all',rank=true,title='All'})

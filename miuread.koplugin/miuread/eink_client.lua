@@ -1,11 +1,14 @@
 local Client = require("miuread.shelf_client")
 local Http = require("miuread.http")
 local Protocol = require("miuread.protocol")
+local U = require("miuread.util")
 local M = {}
 M.__index = M
 local BASE = "https://i.weread.qq.com"
 
-function M.new(http,store) return setmetatable({http=http,store=store,catalogs={},resources={},translation_modes={}},M) end
+function M.new(http,store,reader)
+    return setmetatable({http=http,store=store,reader=reader,catalogs={},resources={},translation_modes={}},M)
+end
 function M:cache_key(id)
     local auth=self.store:auth()
     return tostring(auth.login_session_id)..":"..tostring((auth.account or {}).vid)..":"..tostring(id)
@@ -28,13 +31,13 @@ local function raise_request_error(value,stage)
     end
     error(tostring(value).." native_stage="..tostring(stage or "client_download"),0)
 end
-function M:authorized(fn,stage)
+function M:authorized(fn,stage,allow_recovery)
     if self.before_request then self.before_request(stage) end
     local credentials = Client.credentials(self.store:auth())
-    if not credentials then error("E-Ink 下载需要客户端授权") end
+    if not credentials then error("E-Ink 接口需要客户端授权") end
     local ok,a,b,c = pcall(fn,credentials)
     if ok then return a,b,c end
-    if Http.is_rate_limit_error(a) or not Http.is_auth_error(a) then raise_request_error(a,stage) end
+    if allow_recovery==false or Http.is_rate_limit_error(a) or not Http.is_auth_error(a) then raise_request_error(a,stage) end
     if self.before_request then self.before_request("refresh") end
     local renewed,value=pcall(Client.refresh,self.http,self.store)
     if not renewed then raise_request_error(value,"refresh") end
@@ -43,14 +46,16 @@ function M:authorized(fn,stage)
     if not retried then raise_request_error(x,stage) end
     return x,y,z
 end
-function M:request(method,path,parameters,stage)
+function M:request(method,path,parameters,stage,request_options)
     local value=self:authorized(function(credentials)
         local options=self:options(credentials,{5,20})
+        if request_options and request_options.timeout then options.timeout=request_options.timeout end
         if method=="GET" then
-            return self.http:get_json(BASE..path.."?"..Protocol.query(parameters or {}),options)
+            local query=next(parameters or {}) and ("?"..Protocol.query(parameters)) or ""
+            return self.http:get_json(BASE..path..query,options)
         end
         return self.http:post_json(BASE..path,parameters,options)
-    end,stage)
+    end,stage,not (request_options and request_options.no_auth_recovery==true))
     if type(value)~="table" then error("E-Ink 客户端响应无效 native_stage="..stage,0) end
     return value
 end
@@ -100,6 +105,7 @@ function M:en_read(id,uid,read)
     return value
 end
 function M:catalog(id)
+    id=tostring(id)
     local cache_key = self:cache_key(id)
     if self.catalogs[cache_key] then return self.catalogs[cache_key] end
     local data = self:authorized(function(credentials)
@@ -111,6 +117,8 @@ function M:catalog(id)
     end,"catalog")
     for _,record in ipairs(type(data)=="table" and (data.data or {}) or {}) do
         if tostring(record.bookId or "") == id and type(record.updated)=="table" then
+            if type(record.book)~="table" or not record.book.format then record.book=self:book(id) end
+            record.format=record.book.format
             self.catalogs[cache_key] = record
             return record
         end
@@ -166,5 +174,197 @@ function M:download(book,chapter,path,opt)
         self.resources[resource_key]=true
         return downloaded,envelope,credentials.vid
     end,"chapter_download")
+end
+function M:remove_from_shelf(id)
+    id=tostring(id or "")
+    if id=="" or Protocol.is_mp(id) or Protocol.is_mp_account(id) then error("invalid book id") end
+    local Client=require("miuread.shelf_client")
+    local credentials=Client.credentials(self.store:auth())
+    local preflight="[MiuReadShelfPreflight] "
+    if not credentials then error(preflight.."[MiuReadShelfAuthorization] 请先授权书架管理") end
+    local options=Client.request_options(credentials,{6,10})
+    local function check()
+        return self.http:get_json("https://i.weread.qq.com/shelf/sync",U.copy(options))
+    end
+    local ok,data=pcall(check)
+    if not ok and Http.is_auth_error(data) then
+        -- Renew native credentials only before a write, using their original
+        -- device ID. Never feed Web cookies into native login or replay DELETE.
+        local renewed,value=pcall(Client.refresh,self.http,self.store)
+        if not renewed then error(preflight..tostring(value)) end
+        options.headers=Client.headers(value)
+        ok,data=pcall(check)
+    end
+    if not ok then error(preflight..tostring(data)) end
+    if type(data)~="table" or type(data.books)~="table" then
+        error(preflight.."客户端书架接口未返回有效书架，未提交移除")
+    end
+    -- Never replay a mutation or use an unverified Web deletion route.
+    return self.http:post_json("https://i.weread.qq.com/shelf/delete",{bookIds={id}},options)
+end
+local function array(value,key,stage)
+    if type(value)~="table" or type(value[key])~="table" then
+        error("E-Ink 响应缺少 "..key.." native_stage="..stage,0)
+    end
+    return value
+end
+local function book_id(id)
+    id=tostring(id or "")
+    if id=="" then error("invalid book id",0) end
+    return id
+end
+local function writable_book_id(id)
+    id=book_id(id)
+    if Protocol.is_mp(id) or Protocol.is_mp_account(id) then error("invalid book id",0) end
+    return id
+end
+function M:book(id)
+    id=book_id(id)
+    local value=self:request("GET","/book/info",{bookId=id},"book")
+    if tostring(value.bookId or "")~=id or type(value.title)~="string" then error("E-Ink 书籍信息不完整",0) end
+    return value
+end
+function M:chapters(id) return self:catalog(book_id(id)) end
+function M:shelf(options)
+    return array(self:request("GET","/shelf/sync",{},"shelf",options),"books","shelf")
+end
+function M:shelf_stream(options)
+    if options and options.allow_full_fallback==false then error("E-Ink 暂不支持轻量书架索引",0) end
+    local value=self:shelf(options)
+    value._miuread_stream={enabled=false,source="eink_full"}
+    return value
+end
+function M:book_on_shelf(id)
+    local present=require("miuread.bookstore_data").shelf_state(self:shelf(),book_id(id),true)
+    if type(present)~="boolean" then error("E-Ink 书架状态无法确认",0) end
+    return present
+end
+function M:search(keyword,offset,count)
+    return array(self:request("GET","/store/search",{keyword=tostring(keyword or ""),scope=10,
+        maxIdx=offset or 0,count=count or 30},"search"),"books","search")
+end
+function M:recommend_books(offset,count)
+    return array(self:request("GET","/book/recommend",{maxIdx=offset or 0,count=count or 20},"store"),"books","store")
+end
+function M:similar_books(id,offset,count,session_id)
+    local value=self:request("GET","/book/detailinfo",{bookId=book_id(id),listtypes=2,synckey=0,
+        maxIdx=offset or 0,count=count or 20,sessionId=session_id},"store")
+    array(value.booksimilar,"books","store")
+    return value
+end
+function M:store_categories()
+    -- Native CategoryList carries `updated` on an initial sync; ranks use a
+    -- separate selector on the same endpoint. Preserve the complete Web shape.
+    local categories=self:request("GET","/market/categories",{recommend=0,synckey=0,subtype=0},"store")
+    local ranks=self:request("GET","/market/categories",{ranklist=1,synckey=0,subtype=0},"store")
+    local function rows(value)
+        local list=value.updated or value.data
+        if type(list)~="table" then error("E-Ink 分类列表不完整",0) end
+        return list
+    end
+    local value={data={{categories=rows(categories)},{categories=rows(ranks)}}}
+    local parsed=require("miuread.bookstore_data").categories(value)
+    if #parsed.categories==0 or #parsed.ranks==0 then error("E-Ink 分类与排行未能完整映射",0) end
+    return value
+end
+function M:category_books(id,offset,rank)
+    id=tostring(id or "")
+    if not id:match("^[%w_%-]+$") then error("invalid bookstore category",0) end
+    local value=self:request("GET","/market/category",{categoryId=id,maxIdx=offset or 0,count=20,
+        rank=rank and 1 or 0,synckey=0},"store")
+    local rows=value.updated or value.data
+    if type(rows)~="table" then error("E-Ink 分类书籍列表不完整",0) end
+    local result={books=rows,hasMore=value.hasMore,totalCount=value.totalCount or (value.category or {}).totalCount}
+    local page=require("miuread.bookstore_data").page("category",result,offset,20)
+    if (result.hasMore==true or tonumber(result.hasMore)==1 or (result.hasMore==nil and #rows>=20))
+        and page.next_cursor<=(tonumber(offset) or 0) then error("E-Ink 分类分页游标不完整",0) end
+    return result
+end
+function M:reading_stats(mode,base_time,options)
+    mode=tostring(mode or "monthly")
+    if mode~="weekly" and mode~="monthly" and mode~="annually" and mode~="overall" then error("invalid reading statistics mode",0) end
+    local value=self:request("GET","/readdata/detail",{mode=mode,baseTime=tonumber(base_time) or 0},"statistics",options)
+    if value.totalReadingTime==nil and value.totalReadTime==nil and value.readingTime==nil
+        and value.readStat==nil and value.readBookCount==nil then error("E-Ink 阅读统计不完整",0) end
+    return value
+end
+function M:notebooks(count,last_sort)
+    local value=array(self:request("GET","/user/notebooks",{count=count or 100,lastSort=last_sort},"annotations"),"books","annotations")
+    local rows,limit={},math.max(1,math.floor(tonumber(count) or 100))
+    for _,row in ipairs(value.books) do
+        if not tonumber(last_sort) or tonumber(last_sort)==0 or (tonumber(row.sort) and tonumber(row.sort)<tonumber(last_sort)) then
+            rows[#rows+1]=row
+        end
+    end
+    value.hasMore=#rows>limit and 1 or (value.hasMore or 0)
+    value.books={}; for i=1,math.min(limit,#rows) do value.books[i]=rows[i] end
+    return value
+end
+function M:bookmark_list(id)
+    return array(self:request("GET","/book/bookmarklist",{bookId=book_id(id),synckey=0},"annotations"),"updated","annotations")
+end
+function M:review_list_mine(id,synckey,count)
+    return array(self:request("GET","/review/list",{bookId=book_id(id),listType=1,listMode=0,mine=1,
+        synckey=synckey or 0,count=count or 100},"annotations"),"reviews","annotations")
+end
+function M:review_single(id)
+    id=tostring(id or ""); if id=="" then error("reviewId missing",0) end
+    local value=self:request("GET","/review/single",{reviewId=id,synckey=0,commentsCount=10,commentsDirection=0,
+        likesCount=10,likesDirection=0},"annotations")
+    if type(value.review)~="table" and type(value.data)~="table" then error("E-Ink 想法详情不完整",0) end
+    return value
+end
+function M:progress(id,options)
+    local value=self:request("GET","/book/getProgress",{bookId=book_id(id)},"progress",options)
+    local position=type(value.book)=="table" and value.book or value
+    if position.progress==nil and position.chapterUid==nil and position.readingProgress==nil then error("E-Ink 阅读进度不完整",0) end
+    value._progress_source="eink"; value._progress_fetched_at=os.time()
+    return value
+end
+function M:book_read_info(id)
+    local value=self:request("GET","/book/readinfo",{bookId=book_id(id),finishedBookCount=1,finishedBookIndex=1,finishedDate=1},"progress")
+    if value.finishedBookIndex==nil and value.finishedDate==nil and value.finished==nil then error("E-Ink 阅读状态不完整",0) end
+    return value
+end
+function M:write(path,payload,stage)
+    -- Renew credentials before sending. Never replay a possibly committed POST.
+    local ok,credentials=pcall(self.authorized,self,function(value)
+        local snapshot=self.http:get_json(BASE.."/shelf/sync",self:options(value,{5,10}))
+        array(snapshot,"books","shelf")
+        return value
+    end,stage)
+    if not ok then
+        if require("miuread.api_transport").control_error(credentials) then error(credentials,0) end
+        error("[MiuReadBeforeWrite] "..tostring(credentials),0)
+    end
+    if self.before_request then self.before_request(stage) end
+    return self.http:post_json(BASE..path,payload,self:options(credentials,{5,15}))
+end
+function M:add_to_shelf(id)
+    return self:write("/shelf/add",{bookIds={writable_book_id(id)}},"shelf")
+end
+function M:mark_book_finished(id,finished)
+    if type(finished)~="boolean" then error("invalid reading status",0) end
+    return self:write("/book/markstatus",{bookId=writable_book_id(id),auto=0,finishInfo=0,isCancel=finished and 0 or 1,status=4},"progress")
+end
+function M:add_bookmark(payload) return self:write("/book/addBookmark",payload,"annotations") end
+function M:add_review(payload) return self:write("/review/add",payload,"annotations") end
+function M:remove_bookmark(id)
+    id=tostring(id or ""); if id=="" then error("bookmarkId missing",0) end
+    return self:write("/book/removeBookmark",{bookmarkIds={id}},"annotations")
+end
+function M:remove_review(payload)
+    local id=tostring((payload or {}).reviewId or (payload or {}).review_id or "")
+    if id=="" then error("reviewId missing",0) end
+    return self:write("/review/delete",{reviewId=id},"annotations")
+end
+function M:like_review(id,unlike)
+    id=tostring(id or ""); if id=="" then error("reviewId missing",0) end
+    return self:write("/review/like",{reviewId=id,isUnlike=unlike and 1 or 0},"annotations")
+end
+function M:chapter(book,chapter,format,options)
+    assert(self.reader,"Native chapter reader missing")
+    self.reader._eink_client=self
+    return self.reader:eink_chapter(book,chapter,format,options)
 end
 return M

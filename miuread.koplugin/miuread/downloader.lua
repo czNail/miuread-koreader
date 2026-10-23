@@ -433,8 +433,11 @@ local function cache_save(cache)
     if not ok then error("无法保存下载断点：" .. tostring(err)) end
 end
 
+local function cache_root(store,book,opt)
+    return store:book_dir(book.bookId).."/.miuread-partial-"..option_key(opt)
+end
 local function cache_new(store, book, opt, selected, format)
-    local root = store:book_dir(book.bookId) .. "/.miuread-partial-" .. option_key(opt)
+    local root = cache_root(store,book,opt)
     local path = DownloadDatabase.partial_path(root)
     local signature = catalog_signature(selected)
     local manifest = DownloadDatabase.load_manifest(root)
@@ -843,12 +846,16 @@ end
 
 function Downloader:catalog(id, request_options)
     request_options = type(request_options) == "table" and request_options or {}
-    local catalog = self.reader:catalog(id, request_options)
+    local catalog = self._download_api and self._download_api:catalog(id,request_options)
+        or self.reader:catalog(id, request_options)
     local source = catalog.updated or catalog.chapterInfos or catalog.chapters or {}
     -- chapterInfos does not reliably expose the book format. Use the reader
     -- page context when available; on failure keep the source titles unchanged.
-    local book_format
-    local ok_state, state = pcall(self.reader.chapter_state, self.reader, id, nil, request_options.keepalive)
+    local book_format=tostring((catalog.book or {}).format or catalog.format or ""):lower()
+    local ok_state, state = true,{book={format=book_format}}
+    if book_format=="" then
+        ok_state,state=pcall(self.reader.chapter_state,self.reader,id,nil,request_options.keepalive)
+    end
     if not ok_state and Http.is_rate_limit_error(state) then error(state,0) end
     if ok_state and type(state) == "table" and type(state.book) == "table" then
         book_format = tostring(state.book.format or ""):lower()
@@ -1497,6 +1504,11 @@ function Downloader:_book_once(input, opt, progress)
     transport.checkpoint=respect_reader_priority
     local book = normalized_book(input)
     if book.bookId == "" then error("bookId missing") end
+    -- Restore the route before the catalog request, which now also uses the
+    -- common API. A resumed Web task must not probe a failed Native route.
+    local prior=DownloadDatabase.load_manifest(cache_root(self.store,book,opt))
+    if prior and tonumber(prior.schema)==CACHE_SCHEMA and tostring(prior.book_id)==book.bookId
+        and prior.option_key==option_key(opt) then transport:restore(prior.download_transport) end
 
     local chapters, assets, failures = {}, {}, {}
     local annotation_summary = {underlines=0, thoughts=0, chapters_ok=0, chapters_failed=0, errors={}}
@@ -1620,6 +1632,7 @@ function Downloader:_book_once(input, opt, progress)
         cache.manifest.download_transport=transport:result()
         cache_save(cache)
     end
+    if transport.reason=="eink_failed" then transport.on_fallback() end
     local translation_generation=opt.generate_translation_uid and require("miuread.translation_generation")
     if opt.generate_translation_uid then
         -- Explicit reader action only. Ordinary downloads keep their existing

@@ -68,6 +68,7 @@ end
 
 function M.sync_download(plugin)
     return {
+        {text="接口通道",post_text=require("miuread.api_transport").preference(plugin.store)=="web" and "Web" or "自动（E-Ink 优先）",sub_item_table_func=function() return plugin:api_transport_menu() end},
         {text="同步",post_text="时间 进度 批注",sub_item_table_func=function() return plugin:sync_settings_menu() end},
         {text="下载",post_text=plugin:_download_settings_summary(),sub_item_table_func=function() return plugin:download_settings_menu() end},
         {text="存储",post_text="缓存与清理",sub_item_table_func=function() return plugin:storage_management_menu() end},
