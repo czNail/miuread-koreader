@@ -87,6 +87,13 @@ function Api:new(http, store, reader)
     return setmetatable({http = http, store = store, reader = reader, web_annotation_auth_dead=false}, self)
 end
 
+local function propagate_annotation_control(value)
+    local text=tostring(value or "")
+    if (type(Http.is_rate_limit_error)=="function" and Http.is_rate_limit_error(value))
+        or text:find("[MiuReadRateLimit]",1,true) or text:find("__MIUREAD_HIBERNATE__",1,true)
+        or text:lower():find("download cancelled",1,true) then error(value,0) end
+end
+
 function Api:_note_web_annotation_failure(value)
     local code=tonumber(Http.auth_error_code(value))
     if code==-2012 then
@@ -623,6 +630,7 @@ function Api:_web_underlines(id,chapter_uid)
             return value
         end
         last=ok and "web underlines returned invalid data" or value
+        if not ok then propagate_annotation_control(value) end
     end
     error(last or "web underlines failed")
 end
@@ -779,6 +787,7 @@ function Api:underlines(id, chapter_uid)
     end
     local ok,value=pcall(self._web_underlines,self,id,chapter_uid)
     if ok then self.web_annotation_auth_dead=false; return value end
+    propagate_annotation_control(value)
     self:_note_web_annotation_failure(value)
     logger.warn("[MiuRead][API] web underlines unavailable; using Skill Gateway",
         "book=",tostring(id),"chapter=",tostring(chapter_uid),"error=",tostring(value))
@@ -819,6 +828,7 @@ function Api:_web_readreviews(id,chapter_uid,batch)
             return value
         end
         last=ok and "web readReviews returned invalid data" or value
+        if not ok then propagate_annotation_control(value) end
     end
     error(last or "web readReviews failed")
 end
@@ -838,6 +848,7 @@ function Api:readreviews(id, chapter_uid, batch)
     end
     local ok,value=pcall(self._web_readreviews,self,id,chapter_uid,batch)
     if ok then self.web_annotation_auth_dead=false; return value end
+    propagate_annotation_control(value)
     self:_note_web_annotation_failure(value)
     -- Batch-shape failures must go back to the adaptive splitter. Falling
     -- through to the Skill Gateway would repeat the same rejected payload and

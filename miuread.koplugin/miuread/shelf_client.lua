@@ -29,7 +29,7 @@ function M.request_options(credentials,timeout)
     return {auth=false,redirects=0,retries=0,rate_limit_retries=0,rate_limit_fail_fast=true,
         timeout=timeout or {5,10},headers=M.headers(credentials)}
 end
-local function request(http,method,url,body,opt)
+local function request(http,method,url,body,opt,stage)
     local ok,value
     if method=="POST" then ok,value=pcall(http.post_json,http,url,body,opt)
     else ok,value=pcall(http.get_json,http,url,opt) end
@@ -38,8 +38,16 @@ local function request(http,method,url,body,opt)
         local status=tostring(value):match("HTTP (%d+)")
         local code=tonumber(Http.auth_error_code(value))
             or tonumber(tostring(value):lower():match('"errcode"%s*:%s*(%-?%d+)'))
+        local limited=Http.rate_limit_details(value)
+        if limited then
+            error("客户端授权请求受限 [MiuReadRateLimit]"
+                ..(limited.local_cooldown and " [MiuReadLocalCooldown]" or "")
+                .." native_stage="..tostring(stage or "unknown")
+                ..(limited.code and (" error_code="..tostring(limited.code)) or "")
+                ..(limited.wait_seconds and (" wait_seconds="..tostring(limited.wait_seconds)) or ""),0)
+        end
         error("客户端授权请求失败"..(status and (" HTTP "..status) or "")
-            ..(code and (" error_code="..tostring(code)) or ""))
+            ..(code and (" error_code="..tostring(code)) or "").." native_stage="..tostring(stage or "unknown"),0)
     end
     if type(value)~="table" then error("客户端授权响应无效") end
     return value
@@ -70,7 +78,7 @@ function M.refresh(http,store)
     if not credential then error("书架管理尚未授权") end
     local body=login_body(credential.deviceId)
     body.refreshToken=credential.refreshToken; body.inBackground=0; body.kickType=1; body.refCgi=""
-    local data=request(http,"POST",BASE.."/login",body,M.request_options())
+    local data=request(http,"POST",BASE.."/login",body,M.request_options(),"refresh")
     local renewed=tokens(data,credential)
     if renewed.vid~=credential.vid then error("客户端续期返回了其他账号，已忽略") end
     local current=store:auth()
@@ -96,12 +104,12 @@ function M.new(http,store)
         device_id=previous and previous.deviceId or "eink334691225"..digits(19)},Client)
 end
 function Client:uid()
-    local ticket=request(self.http,"GET",BASE.."/wxticket?nonceStr=weread",nil,M.request_options())
+    local ticket=request(self.http,"GET",BASE.."/wxticket?nonceStr=weread",nil,M.request_options(),"qr_ticket")
     if not nonempty(ticket.signature) or not tonumber(ticket.timeStamp) then error("客户端二维码票据无效") end
     local url="https://open.weixin.qq.com/connect/sdk/qrconnect?appid=wxab9b71ad2b90ff34&noncestr=weread"
         .."&timestamp="..Protocol.escape(ticket.timeStamp).."&scope="..Protocol.escape("snsapi_userinfo,snsapi_timeline,snsapi_friend")
         .."&signature="..Protocol.escape(ticket.signature)
-    local data=request(self.http,"GET",url,nil,M.request_options())
+    local data=request(self.http,"GET",url,nil,M.request_options(),"qr_connect")
     if tonumber(data.errcode)~=0 or not nonempty(data.uuid) then error("微信未返回客户端授权二维码") end
     self.last=nil
     return data.uuid
@@ -112,7 +120,7 @@ end
 function Client:poll(uid)
     local url="https://long.open.weixin.qq.com/connect/l/qrconnect?f=json&uuid="..Protocol.escape(uid)
     if self.last then url=url.."&last="..Protocol.escape(self.last) end
-    local data=request(self.http,"GET",url,nil,M.request_options(nil,{3,9}))
+    local data=request(self.http,"GET",url,nil,M.request_options(nil,{3,9}),"qr_poll")
     local code=tonumber(data.wx_errcode)
     if code==405 then
         if not nonempty(data.wx_code) then error("微信确认未返回客户端授权码") end
@@ -146,10 +154,10 @@ function Client:finish(data)
     local body=login_body(self.device_id)
     body.code=data.wx_code; body.appFirstInstall=1; body.installId="eink31"..digits(26)
     body.isAutoLogout=0; body.isFromQrcode=1
-    local result=request(self.http,"POST",BASE.."/login",body,M.request_options())
+    local result=request(self.http,"POST",BASE.."/login",body,M.request_options(),"login")
     local credential=tokens(result,{deviceId=self.device_id})
     if credential.vid~=self.vid then error("扫码账号与觅阅当前账号不同，请使用同一账号授权") end
-    local shelf=request(self.http,"GET",BASE.."/shelf/sync",nil,M.request_options(credential))
+    local shelf=request(self.http,"GET",BASE.."/shelf/sync",nil,M.request_options(credential),"shelf_verify")
     if type(shelf.books)~="table" then error("客户端书架验证失败，未保存授权") end
     -- Merge with the current Web session, allowing ordinary cookie renewal
     -- during the QR scan without overwriting it with an older snapshot.

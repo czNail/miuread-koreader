@@ -354,11 +354,12 @@ local function shelf_error_message(plugin,value,desired)
     return error_message(plugin,value,"书架确认")
 end
 
-local function authorize_shelf(plugin,detail)
+local function authorize_shelf(plugin,detail,download)
     local vid,session=identity(plugin)
     local dialog
     dialog=ButtonDialog:new{
-        title="书架管理需要客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权后，再重新选择移除。"
+        title=(download and "E-Ink 下载需要客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权与书架管理共用，下次下载时生效。"
+            or "书架管理需要客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权后，再重新选择移除。")
             ..(detail and ("\n\n接口错误："..shelf_error_summary(detail)) or ""),title_align="center",
         buttons={{{text="微信扫码授权",callback=function()
             UIManager:close(dialog)
@@ -375,7 +376,7 @@ local function authorize_shelf(plugin,detail)
                 toast=function(_,text,duration) plugin:toast(text,duration) end,
                 info=function(_,text) plugin:info(text) end,
                 on_auth_success=function()
-                    plugin:info("书架管理授权已保存。请重新选择要移除的书籍。")
+                    plugin:info(download and "E-Ink 客户端授权已保存。自动模式下，原文、划线与想法及译文下载将优先使用 E-Ink。" or "书架管理授权已保存。请重新选择要移除的书籍。")
                 end,
             }
             local Client=require("miuread.shelf_client")
@@ -388,6 +389,11 @@ local function authorize_shelf(plugin,detail)
     TransientGuard.close_all()
     UIManager:show(dialog)
     return true
+end
+
+function M.authorize_download(plugin)
+    if not plugin:require_login() then return false end
+    return authorize_shelf(plugin,nil,true)
 end
 
 local function change_shelf(plugin,book,desired,confirmed)

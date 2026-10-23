@@ -19006,6 +19006,8 @@ function Plugin:_download_summary(rec,opt)
     local lines={heading}
     local annotation_note=DownloadResult.summary_note(rec)
     if annotation_note then lines[#lines+1]=annotation_note end
+    local transport_note=require("miuread.download_transport").summary(rec and rec.download_transport)
+    if transport_note then lines[#lines+1]="下载通道："..transport_note end
     lines[#lines+1]="保存位置："..tostring(rec.file or "")
     lines[#lines+1]="打开一次后会出现在 KOReader 最近阅读中"
     if rec and rec.partial_range==true then
@@ -19115,6 +19117,9 @@ function Plugin:_finish_download_runtime(runtime,result)
     if self._download_runtime~=runtime then return end
     local b=runtime.book or {}
     local opt=runtime.options or {}
+    if result and result.ok~=true and opt.prefetch_hidden~=true and type(result.download_transport)=="table" then
+        self.store:set("download_transport_result",{title=tostring(b.title or ""),at=os.time(),result=result.download_transport})
+    end
     local done=runtime.done
     local open_after=runtime.open_after==true
     local was_background=runtime.background==true
@@ -19145,13 +19150,13 @@ function Plugin:_finish_download_runtime(runtime,result)
             return
         end
         local auth_required=Http.is_auth_error(err)
-        local rate_limited=Http.is_rate_limit_error(err)
+        local rate_limited=(result and result.error_kind=="rate_limit") or Http.is_rate_limit_error(err)
         local network_failed=Http.is_network_error and Http.is_network_error(err)
         local content_pending=tostring(err):find("[MiuReadAnnotationPending]",1,true)~=nil
         local image_missing=tostring(err):find("[MiuReadImageMissing]",1,true)~=nil
             or tostring(err):find("[MiuReadImageExternal]",1,true)~=nil
         local validation_failed=tostring(err):find("EPUB 完整性验证失败",1,true)~=nil
-        local wait_seconds=tonumber(tostring(err):match("wait_seconds=(%d+)"))
+        local wait_seconds=tonumber(result and result.wait_seconds) or tonumber(tostring(err):match("wait_seconds=(%d+)"))
         if auth_required then self:_mark_auth_problem("download",err,true) end
         self:_write_download_state("failed",{
             title=b.title,book_id=b.bookId,book=U.copy(b),options=U.copy(opt),
@@ -19174,6 +19179,8 @@ function Plugin:_finish_download_runtime(runtime,result)
             first="微信读书登录凭证暂时未能自动恢复。下载断点已经保留，可稍后继续；若账号状态检查也失败，再重新扫码。"
         elseif rate_limited then
             first="微信读书暂时限制了请求频率。插件已停止继续请求，正文和断点均已保留，请稍后继续下载。"
+            local transport_note=require("miuread.download_transport").summary(result and result.download_transport)
+            if transport_note then first=first.."\n\n"..transport_note end
         elseif network_failed then
             first="网络连接暂时中断。已完成章节和下载断点均已保留，网络恢复后可继续下载。"
         elseif image_missing then
@@ -19590,6 +19597,11 @@ function Plugin:_merge_download_result(result,book,opt)
             end
             merged_cookies=Cookies.sanitize(merged_cookies)
             current.cookies=merged_cookies
+            -- The child may renew Native credentials during a download. The
+            -- same-login/revision fence above also protects revocation or a
+            -- new QR authorization in the parent while that child was running.
+            local native=require("miuread.shelf_client").credentials(result.auth)
+            if native then current.native_shelf=native end
             if tostring(result.auth.api_key or "")~="" then current.api_key=result.auth.api_key end
             if child_ticket_time>=current_ticket_time then
                 if tostring(result.auth.wr_ticket or "")~="" then current.wr_ticket=result.auth.wr_ticket end
@@ -19615,6 +19627,9 @@ function Plugin:_merge_download_result(result,book,opt)
     end
 
     local rec=result.value or {}
+    if opt.prefetch_hidden~=true and type(rec.download_transport)=="table" then
+        self.store:set("download_transport_result",{title=tostring(book.title or ""),at=os.time(),result=rec.download_transport})
+    end
     local kind=rec.variant or (opt.annotations and "notes" or "clean")
     if opt.prefetch_hidden==true and opt.chapter_uid then
         self.store:save_hidden_prefetch(book.bookId,opt.chapter_uid,kind,rec)
@@ -27285,10 +27300,39 @@ function Plugin:toggle_memory_mode()
     })
 end
 
+function Plugin:download_transport_menu()
+    local function set(mode)
+        local prefs=self.store:preferences()
+        prefs.download_transport=mode
+        self.store:save_preferences(prefs)
+        self:toast("下载通道设置将在下次下载时生效")
+    end
+    return {
+        {text="自动（E-Ink 优先）",post_text="原文、批注及译文优先 E-Ink",checked_func=function()
+            return self.store:preferences().download_transport~="web"
+        end,callback=function() set("auto") end},
+        {text="Web",post_text="始终使用网页下载",checked_func=function()
+            return self.store:preferences().download_transport=="web"
+        end,callback=function() set("web") end},
+        {text="E-Ink 客户端授权",post_text=require("miuread.shelf_client").credentials(self.store:auth()) and "已授权" or "需微信扫码",callback=function()
+            require("miuread.bookstore").authorize_download(self)
+        end},
+        {text="最近下载的通道结果",callback=function()
+            local last=self.store:get("download_transport_result",{}) or {}
+            local summary=require("miuread.download_transport").summary(last.result)
+            self:info(summary and (tostring(last.title or "").."\n\n"..summary) or "尚无正式下载通道记录。完成原文下载后可在这里查看。")
+        end},
+        {text="通道使用规则",callback=function()
+            self:info("原文、划线与想法版、译文和自动准备章节均优先使用 E-Ink，整本、范围和单章下载均适用。译文仍需微信读书会员及服务支持。没有客户端授权或不支持该书时使用 Web。\n\n批注使用同通道正文的位置坐标，无法确认时连同本章正文一起回退 Web。译文会检查实际章节包，不把原文当成已完成译文。首次章节包同时获取公共资源，后续复用样式；缺少样式时可从 Web 补取。\n\nE-Ink 普通失败后，本次剩余任务固定使用 Web，断点继续下载也保留此决定。限频、取消或休眠时直接停止。公众号和精确进度坐标校验继续使用 Web。\n\n可以选择“Web”固定使用网页下载。实际正文通道、批注与译文接口调用及回退原因可在“最近下载的通道结果”查看。")
+        end},
+    }
+end
+
 function Plugin:download_settings_menu()
     local policy=tostring(self.store:preferences().download_reader_policy or "ask")
     local policy_label=policy=="allow" and "允许后台下载" or (policy=="after_reading" and "退出阅读后下载" or "每次询问")
     local items={
+        {text="书籍下载通道",post_text=self.store:preferences().download_transport=="web" and "Web" or "自动（E-Ink 优先）",sub_item_table_func=function() return self:download_transport_menu() end},
         {text="阅读时下载策略",post_text=policy_label,sub_item_table_func=function() return self:download_reader_policy_menu() end},
         {text="自动准备下一章",post_text="单章节阅读 · 隐藏缓存，不提前加入本地书架",checked_func=function() return self.store:preferences().chapter_prefetch_enabled==true end,keep_menu_open=true,callback=function() self:_toggle_chapter_prefetch() end},
         {text="章节末尾连续阅读",post_text="最后一页继续翻进入下一章",checked_func=function() return self.store:preferences().chapter_continuous_enabled~=false end,keep_menu_open=true,callback=function() self:_toggle_chapter_continuous() end},
