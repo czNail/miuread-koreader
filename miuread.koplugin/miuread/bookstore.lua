@@ -28,10 +28,11 @@ end
 
 local function state(plugin)
     local vid,session=identity(plugin)
+    local mode=require("miuread.api_transport").preference(plugin.store)
     local current=plugin._bookstore
-    if not current or current.vid~=vid or current.session~=session then
+    if not current or current.vid~=vid or current.session~=session or current.mode~=mode then
         M.reset(plugin)
-        current={vid=vid,session=session,cache={},order={},generation=0}
+        current={vid=vid,session=session,mode=mode,cache={},order={},generation=0}
         plugin._bookstore=current
     end
     return current
@@ -146,6 +147,7 @@ local function category_rows(plugin,entries)
         local current=entry
         local function browse()
             M.browse(plugin,{kind="category",category_id=current.id,rank=current.rank,title=current.title,
+                channel=current.channel,
                 on_back=function() M.categories(plugin,current.rank) end})
         end
         if #current.children>0 then
@@ -196,6 +198,7 @@ end
 local function show_page(plugin,s,spec,page,cached)
     TransientGuard.close_all()
     close_view(plugin)
+    spec.channel=page.channel or spec.channel
     local books=U.copy(page.books)
     local show_covers=not plugin._shelf_covers_enabled or plugin:_shelf_covers_enabled()
     local cover_index=plugin.store:get("cover_index",{})
@@ -263,6 +266,10 @@ end
 function M.browse(plugin,spec,force)
     local s=state(plugin)
     spec=U.copy(spec)
+    if spec.channel=="eink" and s.mode=="web" then
+        plugin:info("接口设置已变化，请重新打开书城后重试。")
+        return false
+    end
     spec.cursor=spec.cursor or 0
     spec.page=spec.page or 1
     local key=Data.key(spec)
@@ -272,8 +279,11 @@ function M.browse(plugin,spec,force)
         return true
     end
     local query={kind=spec.kind,category_id=spec.category_id,rank=spec.rank,book_id=spec.book_id,
-        cursor=spec.cursor,session_id=spec.session_id}
+        cursor=spec.cursor,session_id=spec.session_id,channel=spec.channel}
     return request(plugin,"page:"..key,spec.title,function(api)
+        -- Category IDs, cursors and recommendation sessions belong to the
+        -- source that produced them. A fresh list can choose another source.
+        if query.channel then api=api:for_channel(query.channel) end
         local raw
         if query.kind=="recommend" then raw=api:recommend_books(query.cursor,Data.PAGE_SIZE)
         elseif query.kind=="similar" then raw=api:similar_books(query.book_id,query.cursor,Data.PAGE_SIZE,query.session_id)

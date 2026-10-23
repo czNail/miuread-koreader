@@ -1,7 +1,6 @@
 local Client = require("miuread.shelf_client")
 local Http = require("miuread.http")
 local Protocol = require("miuread.protocol")
-local U = require("miuread.util")
 local M = {}
 M.__index = M
 local BASE = "https://i.weread.qq.com"
@@ -178,29 +177,10 @@ end
 function M:remove_from_shelf(id)
     id=tostring(id or "")
     if id=="" or Protocol.is_mp(id) or Protocol.is_mp_account(id) then error("invalid book id") end
-    local Client=require("miuread.shelf_client")
-    local credentials=Client.credentials(self.store:auth())
-    local preflight="[MiuReadShelfPreflight] "
-    if not credentials then error(preflight.."[MiuReadShelfAuthorization] 请先授权书架管理") end
-    local options=Client.request_options(credentials,{6,10})
-    local function check()
-        return self.http:get_json("https://i.weread.qq.com/shelf/sync",U.copy(options))
+    if not Client.credentials(self.store:auth()) then
+        error("[MiuReadShelfPreflight] [MiuReadShelfAuthorization] 请先授权书架管理",0)
     end
-    local ok,data=pcall(check)
-    if not ok and Http.is_auth_error(data) then
-        -- Renew native credentials only before a write, using their original
-        -- device ID. Never feed Web cookies into native login or replay DELETE.
-        local renewed,value=pcall(Client.refresh,self.http,self.store)
-        if not renewed then error(preflight..tostring(value)) end
-        options.headers=Client.headers(value)
-        ok,data=pcall(check)
-    end
-    if not ok then error(preflight..tostring(data)) end
-    if type(data)~="table" or type(data.books)~="table" then
-        error(preflight.."客户端书架接口未返回有效书架，未提交移除")
-    end
-    -- Never replay a mutation or use an unverified Web deletion route.
-    return self.http:post_json("https://i.weread.qq.com/shelf/delete",{bookIds={id}},options)
+    return self:write("/shelf/delete",{bookIds={id}},"shelf","[MiuReadShelfPreflight] ")
 end
 local function array(value,key,stage)
     if type(value)~="table" or type(value[key])~="table" then
@@ -316,8 +296,7 @@ function M:review_single(id)
 end
 function M:progress(id,options)
     local value=self:request("GET","/book/getProgress",{bookId=book_id(id)},"progress",options)
-    local position=type(value.book)=="table" and value.book or value
-    if position.progress==nil and position.chapterUid==nil and position.readingProgress==nil then error("E-Ink 阅读进度不完整",0) end
+    if not require("miuread.shelf_progress").parse(value,id) then error("E-Ink 阅读进度不完整",0) end
     value._progress_source="eink"; value._progress_fetched_at=os.time()
     return value
 end
@@ -326,7 +305,7 @@ function M:book_read_info(id)
     if value.finishedBookIndex==nil and value.finishedDate==nil and value.finished==nil then error("E-Ink 阅读状态不完整",0) end
     return value
 end
-function M:write(path,payload,stage)
+function M:write(path,payload,stage,preflight_marker)
     -- Renew credentials before sending. Never replay a possibly committed POST.
     local ok,credentials=pcall(self.authorized,self,function(value)
         local snapshot=self.http:get_json(BASE.."/shelf/sync",self:options(value,{5,10}))
@@ -335,10 +314,12 @@ function M:write(path,payload,stage)
     end,stage)
     if not ok then
         if require("miuread.api_transport").control_error(credentials) then error(credentials,0) end
-        error("[MiuReadBeforeWrite] "..tostring(credentials),0)
+        error((preflight_marker or "[MiuReadBeforeWrite] ")..tostring(credentials),0)
     end
     if self.before_request then self.before_request(stage) end
-    return self.http:post_json(BASE..path,payload,self:options(credentials,{5,15}))
+    local value=self.http:post_json(BASE..path,payload,self:options(credentials,{5,15}))
+    if type(value)~="table" then error("E-Ink 写入结果无法确认",0) end
+    return value
 end
 function M:add_to_shelf(id)
     return self:write("/shelf/add",{bookIds={writable_book_id(id)}},"shelf")

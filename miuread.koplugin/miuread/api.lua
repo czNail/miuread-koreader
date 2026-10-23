@@ -18,6 +18,7 @@ local capabilities={
     remove_bookmark={phase="annotations",write=true},remove_review={phase="annotations",write=true},
     like_review={phase="annotations",write=true},
     progress={phase="progress"},web_progress={phase="progress",web_only=true},
+    progress_sources={phase="progress",web_only=true},
     book_read_info={phase="progress"},mark_book_finished={phase="progress",write=true},
     translation_member_summary={phase="translation"},toggle_translate={phase="translation"},en_read={phase="translation"},
     chapter={phase="download"},report_payload={phase="reading_report",web_only=true,write=true},
@@ -28,12 +29,15 @@ function Api:new(http,store,reader)
     return setmetatable({http=http,store=store,reader=reader,web_backend=Web:new(http,store,reader)},self)
 end
 function Api.bind(api,reader,transport)
-    return setmetatable({http=api.http or reader.http,store=api.store or reader.store,reader=reader,
-        web_backend=api.web_backend or api,_transport=transport},Api)
+    reader=reader or api.reader
+    local http,store=api.http or (reader and reader.http),api.store or (reader and reader.store)
+    local web=api.web_backend or api
+    if api.web_backend and web.reader~=reader then web=Web:new(http,store,reader) end
+    return setmetatable({http=http,store=store,reader=reader,web_backend=web,_transport=transport},Api)
 end
 function Api:for_channel(channel)
     assert(channel=="web" or channel=="eink","invalid API channel")
-    local view=Api.bind(self,self.reader or {http=self.http,store=self.store})
+    local view=Api.bind(self,self.reader)
     view.coordinate_source,view._channel=channel,channel
     return view
 end
@@ -41,8 +45,8 @@ function Api:scope(options)
     if self._transport then return self end
     options=options or {}
     local route=Transport.new(self.store,{channel=self._channel or options.channel,download_transport=options.download_transport})
-    local view=Api.bind(self,self.reader or {http=self.http,store=self.store},route)
-    view.coordinate_source=self.coordinate_source
+    local view=Api.bind(self,self.reader,route)
+    view.coordinate_source,view._channel=self.coordinate_source,self._channel
     return view
 end
 function Api:_native(transport)
@@ -60,10 +64,10 @@ function Api:_invoke(name,...)
     if type(request_options)~="table" then request_options={} end
     if request_options.fresh_context==true then policy.web_only=true end
     if name=="chapter" and Protocol.is_mp(tostring((arguments[1] or {}).bookId or "")) then policy.web_only=true end
+    if self._channel=="eink" and not policy.web_only then policy.native_only=true end
     local transport=self._transport or Transport.new(self.store,{channel=self._channel or request_options.channel,
         download_transport=request_options.download_transport,fresh_context=request_options.fresh_context})
     local function invoke(backend)
-        if backend==self.web_backend then backend.reader=self.reader end
         local fn=backend[name]
         if type(fn)~="function" then error("unsupported API operation: "..name,0) end
         return fn(backend,unpack(arguments,1,arguments.n))
@@ -72,7 +76,7 @@ function Api:_invoke(name,...)
     if not policy.web_only and type(require("miuread.eink_client")[name])=="function" then
         native=function() return invoke(self:_native(transport)) end
     end
-    policy.restart_on_fallback=self._transport and transport.reader~=nil and policy.phase=="annotations"
+    policy.restart_on_fallback=transport.restart_annotations and policy.phase=="annotations"
     local a,b,c,d=transport:invoke(name,native,function() return invoke(self.web_backend) end,policy)
     if type(a)=="table" then
         a._api_channel=transport.last_channel

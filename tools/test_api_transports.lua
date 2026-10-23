@@ -44,7 +44,7 @@ end
 function http:get_json(url,options)
     local native=record('GET',url,options)
     if not native then
-        if self.web_error then error(self.web_error,0) end
+        if self.web_error or self.cookie_error then error(self.web_error or self.cookie_error,0) end
         if url:find('/memberCardSummary',1,true) then return {isPaying=true} end
         if url:find('/getProgress',1,true) then return {progress=42} end
         return {data={}}
@@ -52,7 +52,9 @@ function http:get_json(url,options)
     if self.malformed then return {} end
     if url:find('/shelf/sync',1,true) then return {books={{bookId='b'}},archive={},mp={}} end
     if url:find('/book/info?',1,true) then return {bookId='b',title='Fixture',format='epub'} end
-    if url:find('/book/getProgress?',1,true) then return {bookId='b',book={progress=42,chapterUid=2,updateTime=123}} end
+    if url:find('/book/getProgress?',1,true) then
+        return self.progress_response or {bookId='b',book={progress=42,chapterUid=2,updateTime=123}}
+    end
     if url:find('/book/readinfo?',1,true) then return {finishedBookIndex=0} end
     if url:find('/book/detailinfo?',1,true) then return {booksimilar={books={},hasMore=0}} end
     if url:find('/market/categories?',1,true) then
@@ -71,13 +73,17 @@ function http:post_json(url,body,options)
     local native=record('POST',url,options,body)
     if not native then
         if self.web_error then error(self.web_error,0) end
-        if url:find('/agent/gateway',1,true) then return {books={},hasMore=0} end
+        if url:find('/agent/gateway',1,true) then
+            if body.api_name=='/book/getprogress' then return {bookId='b',progress=36} end
+            return {books={},hasMore=0}
+        end
         return {succ=true}
     end
     if url:find('/chapterInfos',1,true) then return {data={{bookId='b',book={format='epub'},synckey=1,updated={}}}} end
     if url:find('/book/readreviews',1,true) then return {reviews={}} end
     if url:find('/review/like',1,true) then assert(body.isUnlike==0 or body.isUnlike==1,'Native like flag must be an integer') end
     if self.write_error then error(self.write_error,0) end
+    if self.invalid_write_result then return false end
     return {succ=true}
 end
 local api=Api:new(http,store)
@@ -137,14 +143,30 @@ assert(not ok and tostring(limited):find('[MiuReadRateLimit]',1,true) and #reque
 local second_stage=Api:new(http,store,{repair_login_session=function() return true end,
     _recover_login_session=function() return false,'[MiuReadRateLimit] error_code=499' end}):for_channel('web'):scope()
 start=#requests
-ok,limited=pcall(second_stage.progress,second_stage,'b')
+ok,limited=pcall(second_stage.progress_sources,second_stage,'b')
 assert(not ok and tostring(limited):find('[MiuReadRateLimit]',1,true) and #requests==start+2,
     'second-stage Web recovery hid a rate limit or replayed the request')
 http.web_error=nil
 start=#requests
-web_view:progress('b'); web_view:web_progress('b')
+local sources=web_view:progress_sources('b')
 assert(requests[start+1].url:find('/agent/gateway',1,true) and requests[start+2].url:find('/web/book/getProgress',1,true),
     'precise synchronization lost its independent progress observations')
+assert(sources.agent.progress==36 and sources.web.progress==42)
+start=#requests
+assert(web_view:progress('b').progress==42 and #requests==start+1,
+    'ordinary Web progress bypassed the cookie source or read both sync observations')
+http.cookie_error='HTTP 404'; start=#requests
+assert(web_view:progress('b').progress==36 and #requests==start+2,'Web progress lost its legacy read fallback')
+http.cookie_error='[MiuReadRateLimit] error_code=499'; start=#requests
+assert(not pcall(web_view.progress,web_view,'b') and #requests==start+1,'limited Web progress used the gateway')
+http.cookie_error=nil
+http.progress_response={bookId='other',book={progress=42}}
+start=#requests
+assert(api:progress('b').progress==42 and #requests==start+2,'another book\'s Native progress suppressed Web fallback')
+http.progress_response={bookId='b',book={chapterUid=2}}
+start=#requests
+assert(api:progress('b').progress==42 and #requests==start+2,'missing Native percentage suppressed Web fallback')
+http.progress_response=nil
 local Auth=require('miuread.shelf_client')
 local old_refresh,refreshes=Auth.refresh,0
 Auth.refresh=function() refreshes=refreshes+1; error('unexpected renewal') end
@@ -182,6 +204,10 @@ for _,mutate in ipairs(mutations) do
     http.write_error='network request failed: lost response'
     assert(not pcall(mutate,api) and #requests==before+4 and count_web()==web,'uncertain Native write replayed through Web')
     http.write_error=nil
+    http.invalid_write_result=true; before=#requests
+    assert(not pcall(mutate,api) and #requests==before+2 and count_web()==web,
+        'unrecognized Native write result was accepted or replayed')
+    http.invalid_write_result=nil
 end
 http.native_error='HTTP 404'; before=#requests
 assert(api:add_to_shelf('b')._api_channel=='web' and #requests==before+2)
@@ -204,6 +230,22 @@ local saved=store.account.native_shelf; store.account.native_shelf=nil; before=#
 assert(not pcall(function() api:for_channel('eink'):add_bookmark(payload) end) and #requests==before,
     'unauthorized Native coordinates reached Web')
 store.account.native_shelf=saved
+local Transport=require('miuread.api_transport')
+local route=Transport.new(store)
+route:invoke('unsupported',nil,function() return true end)
+assert(route.selected=='web')
+route:invoke('next',function() error('unsupported route was not pinned') end,function() return true end)
+local pinned=api:for_channel('eink'):scope()
+http.native_error='HTTP 404'; local web=count_web()
+assert(not pcall(pinned.category_books,pinned,'native-category',20,false) and count_web()==web,
+    'source-bound category IDs or cursors crossed to Web')
+http.native_error=nil
+local reader_a={web_catalog=function() return {bookId='a'} end}
+local reader_b={web_catalog=function() return {bookId='b'} end}
+local original=Api:new(http,store,reader_a):for_channel('web')
+local bound=Api.bind(original,reader_b):for_channel('web')
+assert(bound:catalog('b').bookId=='b' and original.web_backend.reader==reader_a and original:catalog('a').bookId=='a',
+    'binding a scoped reader mutated a different API view')
 for _,name in ipairs({'annotation_coord','annotations.posmap','annotations.range','local_annotation_database','thought_database','json','config'}) do
     local module=name
     package.preload['miuread.'..module]=function() return {} end
@@ -217,4 +259,37 @@ setfenv(factory,setmetatable({U={copy=copy}},{__index=_G}))
 local child=factory()(store:auth(),'data','temp','web')
 assert(child:preferences().api_transport=='web' and Api:new(http,child):book('b')._api_channel=='web',
     'background worker ignored the parent channel preference')
+-- Run the actual search worker: the parent may change settings while it waits,
+-- and refreshed child credentials must return through the normal auth merge.
+local search=assert(source:match('(function Plugin:search%(q%).-)\nfunction Plugin:_variant_exists'))
+local Plugin={}
+local worker={available=function() return true end,busy=function() return false end}
+function worker:run(_,fn,done) self.fn,self.done=fn,done; return true end
+local ui={show=function() end,close=function() end}
+local env=setmetatable({Plugin=Plugin,U={copy=copy},interactive_child_store=factory(),
+    UIManager=ui,ButtonDialog={new=function(_,value) return value end},normalize=function(v) return v end,
+    _=function(v) return v end},{__index=_G})
+local chunk=assert(loadstring(search)); setfenv(chunk,env); chunk()
+local plugin=setmetatable({store=store,search_async=worker},{__index=Plugin})
+function plugin:require_login() return true end
+function plugin:is_online() return true end
+function plugin:list() end
+function plugin:info(value) error(value) end
+function plugin:_friendly_remote_error(value) return tostring(value) end
+function plugin:_apply_interactive_auth(value) self.applied_auth=value end
+local Http=require('miuread.http'); Http.new=function() return http end
+store.prefs.api_transport='web'; plugin:search('manual Web'); store.prefs.api_transport='auto'; start=#requests
+worker.done({ok=true,value=worker.fn()})
+assert(#requests==start+1 and requests[#requests].url:find('/agent/gateway',1,true),
+    'search worker ignored its captured Web preference')
+Auth.refresh=function(_,child_store)
+    http.native_error=nil
+    local current=child_store:auth(); current.api_key='refreshed'; assert(child_store:save_auth(current))
+    return current.native_shelf
+end
+plugin:search('renewal'); http.native_error='[MiuReadAuth] error_code=-2012'
+worker.done({ok=true,value=worker.fn()})
+assert(plugin.applied_auth and plugin.applied_auth.auth.api_key=='refreshed' and store.account.api_key=='fixture',
+    'search lost a child credential refresh or wrote through the parent store')
+Auth.refresh=old_refresh
 print('unified API: Native reads, Web fallback, scoped controls, preferences and non-replaying writes PASS')

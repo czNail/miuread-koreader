@@ -2421,12 +2421,7 @@ function Sync:remote(book_id, callback, options)
     } or nil
     local reader_snapshot=self.reader
     local ok, err = self.async:run("remote_progress", function()
-        local api=type(self.api.scope)=="function" and self.api:scope() or self.api
-        local out={}
-        local agent_ok,agent=pcall(api.progress,api,book_id)
-        if agent_ok then out.agent=agent else out.agent_error=tostring(agent) end
-        local web_ok,web=pcall(api.web_progress,api,book_id)
-        if web_ok then out.web=web else out.web_error=tostring(web) end
+        local out=self.api:progress_sources(book_id)
 
         local function normalize_native(value,source)
             local progress=sourced_progress(value,book_id,source)

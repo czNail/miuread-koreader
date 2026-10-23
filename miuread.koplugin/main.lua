@@ -18469,7 +18469,13 @@ function Plugin:search(q)
             self:info(self:_friendly_remote_error(result and result.error or "未知错误","搜索"))
             return
         end
-        local data=result.value or {}
+        local payload=result.value or {}
+        if payload.auth_changed then self:_apply_interactive_auth{auth=payload.auth,changed=true} end
+        if payload.request_ok==false then
+            self:info(self:_friendly_remote_error(payload.error,"搜索"))
+            return
+        end
+        local data=payload.value or payload
         local items={}
         local function add(r)
             local b=normalize(r)
@@ -18497,16 +18503,17 @@ function Plugin:search(q)
     end
 
     local auth=U.copy(self.store:auth())
+    local api_mode=require("miuread.api_transport").preference(self.store)
+    local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     local started,err=self.search_async:run("book_search",function()
         local HttpChild=require("miuread.http")
         local ApiChild=require("miuread.api")
-        local UtilChild=require("miuread.util")
-        local child_store={
-            auth=function() return UtilChild.copy(auth) end,
-            save_auth=function() end,
-        }
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local api=ApiChild:new(HttpChild:new(child_store),child_store)
-        return api:search(q,0,40)
+        local ok,value=pcall(api.search,api,q,0,40)
+        local current,changed=child_store:snapshot()
+        return {request_ok=ok,value=ok and value or nil,error=not ok and tostring(value) or nil,
+            auth=current,auth_changed=changed}
     end,finish,32)
     if not started then
         logger.warn("[MiuRead][Search] async unavailable; falling back",tostring(err or "worker busy"))

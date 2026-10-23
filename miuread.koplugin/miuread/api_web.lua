@@ -443,9 +443,25 @@ function Api:remove_from_shelf()
 end
 function Api:book(id) return self:call("/book/info", {bookId=tostring(id)}) end
 function Api:chapters(id) return self:call("/book/chapterinfo", {bookId=tostring(id)}) end
--- Keep the independent gateway snapshot used by precise synchronization's
--- Web view; web_progress is the separate, authoritative cookie observation.
-function Api:progress(id,options) return self:call("/book/getprogress", {bookId=tostring(id), _t=os.time()},options) end
+function Api:_gateway_progress(id,options)
+    return self:call("/book/getprogress", {bookId=tostring(id), _t=os.time()},options)
+end
+function Api:progress(id,options)
+    local ok,value=pcall(self.web_progress,self,id,options)
+    if ok and require("miuread.shelf_progress").parse(value,id) then return value end
+    if not ok then propagate_control_error(value) end
+    return self:_gateway_progress(id,options)
+end
+-- Precise sync compares two independent observations. Keep that operation
+-- separate from the percentage display's single, preferred progress read.
+function Api:progress_sources(id,options)
+    local out={}
+    local ok,value=pcall(self._gateway_progress,self,id,options)
+    if ok then out.agent=value else propagate_control_error(value); out.agent_error=tostring(value) end
+    ok,value=pcall(self.web_progress,self,id,options)
+    if ok then out.web=value else propagate_control_error(value); out.web_error=tostring(value) end
+    return out
+end
 function Api:web_progress(id,options)
     options=type(options)=="table" and options or {}
     id=tostring(id or "")

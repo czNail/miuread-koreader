@@ -54,6 +54,8 @@ local KNOWN_FAILURES={
 function M.new(reader,options)
     local route=Transport.new(reader.store,options)
     route.reader=reader
+    route.web_chapters,route.eink_chapters=0,0
+    route.restart_annotations=true
     return setmetatable(route,M)
 end
 function M:native()

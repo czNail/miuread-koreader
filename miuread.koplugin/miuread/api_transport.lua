@@ -24,7 +24,7 @@ function M.new(store,options)
     local reason=mode=="web" and "manual_web" or options.fresh_context and "coordinate_source"
         or not authorized and "authorization_required" or "eink_preferred"
     return setmetatable({mode=mode,selected=reason=="eink_preferred" and "eink" or "web",reason=reason,
-        web_chapters=0,eink_chapters=0,api_counts={eink={},web={}}},M)
+        api_counts={eink={},web={}}},M)
 end
 function M:use_web(_,operation)
     self.selected,self.reason="web","eink_failed"
@@ -35,7 +35,8 @@ function M:invoke(name,native,web,options)
     options=options or {}
     local channel=options.web_only and "web" or self.selected
     if options.native_only and (channel~="eink" or not native) then
-        error("[MiuReadCoordinateSource] E-Ink 批注坐标需要同源接口，未发送写入",0)
+        if options.coordinates then error("[MiuReadCoordinateSource] E-Ink 批注坐标需要同源接口，未发送写入",0) end
+        error("E-Ink 来源暂不可用，请重新打开列表后重试",0)
     end
     local phase=options.phase or name
     local function call(fn,selected)
@@ -49,6 +50,7 @@ function M:invoke(name,native,web,options)
         self.active_channel,self.active_phase=nil,nil
         return ok,a,b,c,d
     end
+    if channel=="eink" and not native then self:use_web("unsupported API operation",name) end
     if channel=="eink" and native then
         local ok,a,b,c,d=call(native,"eink")
         if ok then return a,b,c,d end
