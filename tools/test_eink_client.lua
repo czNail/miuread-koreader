@@ -1,4 +1,5 @@
 package.path='miuread.koplugin/?.lua;'..package.path
+package.preload['logger']=function() return {info=function() end,warn=function() end} end
 local function copy(v) if type(v)~='table' then return v end; local o={}; for k,x in pairs(v) do o[k]=copy(x) end; return o end
 package.preload['miuread.util']=function() return {copy=copy} end
 local error_file=assert(io.open('miuread.koplugin/miuread/http.lua','rb'))
@@ -83,7 +84,6 @@ assert(not ok and reads==1 and tostring(err):find('[MiuReadRateLimit]',1,true)
 -- to Web. Run the actual transport and client together, with no live HTTP.
 local clock=0
 package.preload['socket']=function() return {gettime=function() return clock end,sleep=function() end} end
-package.preload['logger']=function() return {info=function() end} end
 local Transport=require('miuread.download_transport')
 for _,stage in ipairs({'catalog','chapter_download','refresh'}) do
     for _,cached in ipairs({false,true}) do
@@ -121,7 +121,6 @@ for _,stage in ipairs({'catalog','chapter_download','refresh'}) do
         assert(result.web_chapters==0 and result.eink_chapters==0)
         assert(result.native_stage==stage and result.limit_code==499 and result.wait_seconds==300 and result.local_cooldown==cached)
         assert(result.stopped_channel=='eink' and result.stopped_phase=='download')
-        assert(Transport.summary(result):find('步骤',1,true))
         assert(not tostring(failure):find('private-response-token',1,true),'raw rate-limit response leaked through client')
     end
 end

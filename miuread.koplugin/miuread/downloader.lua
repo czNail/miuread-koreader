@@ -1284,7 +1284,6 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         book_id=book.bookId, title=book.title, author=book.author, cover=book.cover,
         file=path, directory=dir, variant=storage_kind, base_variant=kind, downloaded_at=now,
         content_type="book",
-        download_transport=self._download_transport and self._download_transport:result() or nil,
         sync_enabled=true,
         progress_sync_enabled=true,
         read_report_enabled=true,
@@ -1629,7 +1628,7 @@ function Downloader:_book_once(input, opt, progress)
     local cache = cache_new(self.store, book, opt, selected, format)
     transport:restore(cache.manifest.download_transport)
     transport.on_fallback=function()
-        cache.manifest.download_transport=transport:result()
+        cache.manifest.download_transport=transport:resume_state()
         cache_save(cache)
     end
     if transport.reason=="eink_failed" then transport.on_fallback() end
@@ -2165,7 +2164,7 @@ function Downloader:_book_once(input, opt, progress)
                 return transport:chapter(book,chapter,format,read_options)
             end
             local ok, downloaded, downloaded_style, downloaded_assets, state = pcall(read_chapter)
-            cache.manifest.download_transport=transport:result()
+            cache.manifest.download_transport=transport:resume_state()
             if not ok then
                 if tostring(downloaded):find("[MiuReadTranslationContentPending]",1,true) then error(downloaded) end
                 if Http.is_rate_limit_error(downloaded) then error(downloaded) end
@@ -2609,11 +2608,17 @@ end
 -- here, so none of them survives into a screen-off, a network change or the
 -- next task.
 function Downloader:book(input, opt, progress)
+    local started=now()
     self._download_transport,self.last_transport_result,self._download_api=nil,nil,nil
     local ok, result = pcall(self._book_once, self, input, opt, progress)
     if self._download_transport then
         if not ok then self._download_transport:note_rate_limit(result) end
         self.last_transport_result=self._download_transport:result()
+        local text=tostring(result or "")
+        local outcome=ok and "success" or (self.last_transport_result.stopped and "rate_limited"
+            or (text:find("__MIUREAD_HIBERNATE__",1,true) and "hibernated"
+            or (text:lower():find("download cancelled",1,true) and "cancelled" or "error")))
+        self._download_transport:log_result(outcome,now()-started)
         self._download_transport=nil
     end
     self._download_api=nil

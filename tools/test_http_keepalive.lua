@@ -200,17 +200,14 @@ assert(Http.is_rate_limit_error('微信读书暂时限制了请求频率。插�
 assert(Http.rate_limit_details('客户端授权请求失败 error_code=499').code==499)
 assert(not Http.is_rate_limit_error('error_code=4990'))
 assert(Http.rate_limit_details('ordinary failure')==nil)
--- Friendly UI copy must not erase the machine-readable cooldown or the latest
--- comparison result when the download child passes an error to the parent.
+-- Friendly UI copy preserves the cooldown needed by the parent scheduler.
 local task_file=assert(io.open(ROOT..'miuread/download_task.lua','rb'))
 local task_source=task_file:read('*a'); task_file:close()
 local helpers=assert(task_source:match('(local function display_error.-)\n%s*local last_progress_percent'))
-local payload_builder=assert(loadstring('local Http,serializable_copy=...\n'..helpers..'\nreturn failure_payload'))(Http,function(v) return v end)
-local payload=payload_builder('[MiuReadRateLimit] wait_seconds=123\nstack traceback: test',{
-    last_transport_result={reason='rate_limited',stopped_channel='eink',stopped_phase='annotations'},
-})
+local payload_builder=assert(loadstring('local Http=...\n'..helpers..'\nreturn failure_payload'))(Http)
+local payload=payload_builder('[MiuReadRateLimit] wait_seconds=123\nstack traceback: test')
 assert(payload.ok==false and payload.error_kind=='rate_limit' and payload.wait_seconds==123)
-assert(payload.download_transport.reason=='rate_limited' and Http.is_rate_limit_error(payload.error))
+assert(payload.download_transport==nil and Http.is_rate_limit_error(payload.error))
 local ordinary=payload_builder('ordinary failure')
 assert(ordinary.error_kind==nil and ordinary.wait_seconds==nil)
 print('Web/Native shared pacing, no rate-limit retries and shared cooldown: PASS')

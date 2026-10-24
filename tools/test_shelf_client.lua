@@ -261,6 +261,10 @@ for _,case in ipairs({
         assert(not passed and error_helpers.is_rate_limit_error(raw))
         local detail=error_helpers.rate_limit_details(raw)
         assert(detail.code==499 and detail.wait_seconds==123 and detail.local_cooldown==local_cooldown and detail.native_stage==case.stage)
+        local event=logs[#logs]
+        assert(event:find('operation=client_authorization',1,true) and event:find('native_stage='..case.stage,1,true)
+            and event:find('outcome=rate_limited',1,true) and event:find('code=499',1,true),
+            'authorization failure did not reach the shared operation log')
         assert(not tostring(raw):find('shelf_client.lua:',1,true))
         for _,secret in ipairs({'uuid-secret','code-secret','ticket-secret','native-token','native-refresh'}) do
             assert(not tostring(raw):find(secret,1,true),'native authorization error leaked a secret')
@@ -282,7 +286,8 @@ for _,stage in ipairs({'ticket','poll','login'}) do
     if stage=='login' then table.remove(h.online_queue,1)() end
     assert(not flow.active and #queue==0 and #h.online_queue==0 and store.writes==0)
     local notice=shown[#shown]
-    assert(notice.title:find('授权暂时受限',1,true) and notice.title:find('499',1,true) and notice.title:find('123',1,true))
+    assert(notice.title:find('授权暂时受限',1,true) and notice.title:find('约 3 分钟',1,true))
+    assert(not notice.title:find('499',1,true) and not notice.title:find('发生阶段',1,true))
     assert(#notice.buttons==1 and #notice.buttons[1]==1 and notice.buttons[1][1].text=='关闭')
     assert(not notice.title:find('重新获取',1,true))
     local requests=#http.gets+#http.posts
@@ -292,7 +297,8 @@ end
 http.limit_at=nil; clear_queue()
 store=new_store(); backend=Client.new(http,store); h=host(); flow=Auth:new(http,store,h,backend)
 assert(flow:_stop_if_rate_limited('[MiuReadRateLimit] [MiuReadLocalCooldown] native_stage=qr_ticket error_code=499 wait_seconds=88'))
-assert(shown[#shown].title:find('本次未再次发送请求',1,true) and shown[#shown].title:find('上次限制代码',1,true))
+assert(shown[#shown].title:find('约 2 分钟',1,true) and shown[#shown].title:find('当前登录状态已保留',1,true))
+assert(not shown[#shown].title:find('499',1,true) and not shown[#shown].title:find('发生阶段',1,true))
 flow:cancel(); clear_queue()
 
 -- Same-account Web re-login preserves the independently granted Native shelf

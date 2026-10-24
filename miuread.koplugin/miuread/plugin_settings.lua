@@ -166,6 +166,7 @@ end
 
 function M.system_maintenance(plugin)
     return {
+        {text="导出运行日志",callback=function() plugin:export_runtime_log() end},
         {text="同步诊断",sub_item_table_func=function() return plugin:sync_diagnostics_menu() end},
         {text="时间诊断",callback=function()
             local rows=plugin:diagnostics_menu()

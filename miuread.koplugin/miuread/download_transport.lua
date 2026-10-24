@@ -4,51 +4,48 @@
 local U=require("miuread.util")
 local Http=require("miuread.http")
 local Protocol=require("miuread.protocol")
-local logger=require("logger")
 local Transport=require("miuread.api_transport")
+local Log=require("miuread.diagnostic_log")
 local M=setmetatable({},{__index=Transport}); M.__index=M
-local FAILURE_STAGES={catalog="目录",chapter_download="章节包下载",refresh="客户端凭据续期",style="书籍样式",
-    book="书籍信息",
-    annotations="划线与想法",translation="译文准备",
-    client_download="客户端请求",decode="章节包解码",images="章节图片"}
+local FAILURE_STAGES={catalog=true,chapter_download=true,refresh=true,style=true,book=true,
+    annotations=true,translation=true,client_download=true,decode=true,images=true}
 local FAILURE_FILES={"eink_client.lua","eink_crypto.lua","eink_archive.lua","reader.lua"}
--- Only fixed local messages and numeric status codes may be persisted. HTTP
--- errors and native library failures can contain response data or file paths.
+-- Classify fixed local failures without copying response data into logs.
 local KNOWN_FAILURES={
-    {"E-Ink 与 Web 目录版本不同","catalog_version","目录版本不一致","catalog"},
-    {"E-Ink 未返回对应书籍目录","catalog_missing","未返回本书目录","catalog"},
-    {"E-Ink 目录中不存在当前章节","chapter_missing","目录中没有当前章节","catalog"},
-    {"E-Ink 目录未确认章节免费或已购买","chapter_access","目录未确认章节免费或已购买","catalog"},
-    {"E-Ink 书籍格式暂不支持","book_format","书籍格式暂不支持","catalog"},
-    {"E-Ink 书籍版本缺失","book_version","未返回书籍版本","catalog"},
-    {"E-Ink 接口需要客户端授权","authorization","需要客户端授权","client_download"},
-    {"E-Ink 未返回章节下载密钥","key_missing","未返回章节下载密钥","chapter_download"},
-    {"E-Ink 账号标识无效","account_invalid","客户端账号标识无效","decode"},
-    {"E-Ink 解密组件不可用","crypto_unavailable","设备解密组件不可用","decode"},
-    {"E-Ink 解压组件不可用","inflate_unavailable","设备解压组件不可用","decode"},
-    {"E-Ink 下载密钥","key_decode","章节下载密钥解码或校验失败","decode"},
-    {"E-Ink ZIP 密码","zip_password","章节包密码校验失败","decode"},
-    {"E-Ink ZIP","archive_invalid","章节包解压或完整性校验失败","decode"},
-    {"E-Ink 章节包大小无效","archive_size","章节包大小无效","decode"},
-    {"E-Ink 书籍样式未能获取","style_missing","书籍样式未能获取","style"},
-    {"E-Ink 章节清单","chapter_manifest","章节文件清单无效或缺失正文","decode"},
-    {"E-Ink 未返回唯一章节正文","body_missing","章节包中没有唯一可用正文","decode"},
-    {"E-Ink 章节正文为空","body_empty","章节正文为空","decode"},
-    {"无法读取 E-Ink 章节包","archive_read","设备无法读取章节包","decode"},
-    {"E-Ink 图片格式无效","image_format","章节图片格式无效","images"},
-    {"无法保存 E-Ink 章节图片","image_save","设备无法保存章节图片","images"},
-    {"E-Ink 正文图片未完整获取","image_missing","章节图片未完整获取","images"},
-    {"E-Ink 批注位置未能验证","annotation_alignment","批注位置未能验证","annotations"},
-    {"E-Ink 划线响应不完整","annotation_underlines","划线响应不完整","annotations"},
-    {"E-Ink 想法响应不完整","annotation_reviews","想法响应不完整","annotations"},
-    {"E-Ink 会员响应不完整","translation_member","会员状态响应不完整","translation"},
-    {"E-Ink 译文模式未能开启","translation_mode","译文模式切换未成功","translation"},
-    {"E-Ink 译文状态响应无效","translation_status","译文状态响应无效","translation"},
-    {"E-Ink 未返回译文正文","translation_body","章节包尚无可用译文","chapter_download"},
-    {"客户端续期返回了其他账号","refresh_account","续期返回了其他账号","refresh"},
-    {"登录账号或凭据已变更","auth_changed","登录账号或凭据已变更","refresh"},
-    {"客户端续期凭证未保存","refresh_save","续期凭据未保存","refresh"},
-    {"客户端授权未返回完整登录凭证","refresh_incomplete","未返回完整客户端凭据","refresh"},
+    {"E-Ink 与 Web 目录版本不同","catalog_version","catalog"},
+    {"E-Ink 未返回对应书籍目录","catalog_missing","catalog"},
+    {"E-Ink 目录中不存在当前章节","chapter_missing","catalog"},
+    {"E-Ink 目录未确认章节免费或已购买","chapter_access","catalog"},
+    {"E-Ink 书籍格式暂不支持","book_format","catalog"},
+    {"E-Ink 书籍版本缺失","book_version","catalog"},
+    {"E-Ink 接口需要客户端授权","authorization","client_download"},
+    {"E-Ink 未返回章节下载密钥","key_missing","chapter_download"},
+    {"E-Ink 账号标识无效","account_invalid","decode"},
+    {"E-Ink 解密组件不可用","crypto_unavailable","decode"},
+    {"E-Ink 解压组件不可用","inflate_unavailable","decode"},
+    {"E-Ink 下载密钥","key_decode","decode"},
+    {"E-Ink ZIP 密码","zip_password","decode"},
+    {"E-Ink ZIP","archive_invalid","decode"},
+    {"E-Ink 章节包大小无效","archive_size","decode"},
+    {"E-Ink 书籍样式未能获取","style_missing","style"},
+    {"E-Ink 章节清单","chapter_manifest","decode"},
+    {"E-Ink 未返回唯一章节正文","body_missing","decode"},
+    {"E-Ink 章节正文为空","body_empty","decode"},
+    {"无法读取 E-Ink 章节包","archive_read","decode"},
+    {"E-Ink 图片格式无效","image_format","images"},
+    {"无法保存 E-Ink 章节图片","image_save","images"},
+    {"E-Ink 正文图片未完整获取","image_missing","images"},
+    {"E-Ink 批注位置未能验证","annotation_alignment","annotations"},
+    {"E-Ink 划线响应不完整","annotation_underlines","annotations"},
+    {"E-Ink 想法响应不完整","annotation_reviews","annotations"},
+    {"E-Ink 会员响应不完整","translation_member","translation"},
+    {"E-Ink 译文模式未能开启","translation_mode","translation"},
+    {"E-Ink 译文状态响应无效","translation_status","translation"},
+    {"E-Ink 未返回译文正文","translation_body","chapter_download"},
+    {"客户端续期返回了其他账号","refresh_account","refresh"},
+    {"登录账号或凭据已变更","auth_changed","refresh"},
+    {"客户端续期凭证未保存","refresh_save","refresh"},
+    {"客户端授权未返回完整登录凭证","refresh_incomplete","refresh"},
 }
 
 function M.new(reader,options)
@@ -70,7 +67,9 @@ end
 function M:use_web(value)
     self:note_eink_failure(value)
     self.selected,self.reason="web","eink_failed"
-    logger.info("[MiuRead][Transport] fallback","channel=","web","reason=",self.failure.code)
+    self.fallback=true
+    Log.record(self.store,{operation="download",channel="web",outcome="fallback",
+        reason=self.failure.code,native_stage=self.failure.stage,status=self.failure.status,code=self.failure.error_code})
     self.reader:cleanup_transient_images()
     if type(self.on_fallback)=="function" then self.on_fallback() end
 end
@@ -85,11 +84,14 @@ end
 function M:restore(prior)
     -- A partial download must not hammer a failed Native route after a worker
     -- restart. This cannot grant Native access or override explicit Web mode.
-    if self.selected=="eink" and type(prior)=="table" and prior.schema==2
-        and prior.selected=="web" and type(prior.failure)=="table" then
+    if self.selected=="eink" and type(prior)=="table"
+        and prior.selected=="web" and prior.reason=="eink_failed" then
         self.selected,self.reason="web","eink_failed"
-        self.failure=U.copy(prior.failure)
+        self.fallback=true
     end
+end
+function M:resume_state()
+    if self.selected=="web" and self.fallback then return {selected="web",reason="eink_failed"} end
 end
 function M:activity(opt,channel)
     self.active_channel,self.active_phase=channel,"download"
@@ -99,10 +101,10 @@ function M:note_eink_failure(value)
     local text=tostring(value or "")
     local stage=text:match("native_stage=([%w_]+)")
     if not FAILURE_STAGES[stage] then stage=nil end
-    local failure={code="unknown",message="未识别的客户端错误",stage=stage}
+    local failure={code="unknown",stage=stage}
     for _,known in ipairs(KNOWN_FAILURES) do
         if text:find(known[1],1,true) then
-            failure.code,failure.message,failure.stage=known[2],known[3],known[4]
+            failure.code,failure.stage=known[2],known[3]
             break
         end
     end
@@ -110,18 +112,16 @@ function M:note_eink_failure(value)
         local status=tonumber(text:match("HTTP (%d%d%d)"))
         local code=tonumber(text:match("error_code=(%-?%d+)"))
         local lower=text:lower()
-        if status then failure.code,failure.message,failure.status="http_status","客户端请求被服务拒绝",status
-        elseif code then failure.code,failure.message,failure.error_code="service_error","客户端服务返回错误",code
+        if status then failure.code,failure.status="http_status",status
+        elseif code then failure.code,failure.error_code="service_error",code
         elseif lower:find("network request failed",1,true) or lower:find("timed out",1,true)
-            or lower:find("timeout",1,true) then failure.code,failure.message="network","客户端请求连接失败或超时" end
+            or lower:find("timeout",1,true) then failure.code="network" end
     end
     for _,file in ipairs(FAILURE_FILES) do
         local line=tonumber(text:match(file:gsub("%.","%%.")..":(%d+):"))
         if line then failure.file,failure.line=file,line; break end
     end
     self.failure=failure
-    logger.info("[MiuRead][Transport] native failure","stage=",failure.stage or "unknown","reason=",failure.code,
-        "status=",tostring(failure.status or failure.error_code or ""))
 end
 function M:note_rate_limit(value)
     if not tostring(value):find("[MiuReadRateLimit]",1,true) then return end
@@ -162,54 +162,23 @@ function M:chapter(book,chapter,format,opt)
     return a,b,c,d
 end
 function M:result()
-    return {schema=2,mode=self.mode,selected=self.selected,reason=self.reason,
+    return {mode=self.mode,selected=self.selected,reason=self.reason,
         web_chapters=self.web_chapters,eink_chapters=self.eink_chapters,
         stopped=self.stopped,stopped_channel=self.stopped_channel,
         stopped_phase=self.stopped_phase,limit_code=self.limit_code,
         wait_seconds=self.wait_seconds,local_cooldown=self.local_cooldown,
         native_stage=self.native_stage,failure=self.failure,api_counts=U.copy(self.api_counts)}
 end
-function M.failure_summary(failure)
-    if type(failure)~="table" then return "未识别的客户端错误" end
-    local message="未识别的客户端错误"
-    for _,known in ipairs(KNOWN_FAILURES) do if known[2]==failure.code then message=known[3]; break end end
-    if failure.code=="http_status" then message="客户端请求被服务拒绝"
-    elseif failure.code=="service_error" then message="客户端服务返回错误"
-    elseif failure.code=="network" then message="客户端请求连接失败或超时" end
-    message=(FAILURE_STAGES[failure.stage] and (FAILURE_STAGES[failure.stage].." · ") or "")..message
-    if tonumber(failure.status) then message=message.."（HTTP "..tostring(tonumber(failure.status)).."）"
-    elseif tonumber(failure.error_code) then message=message.."（代码 "..tostring(tonumber(failure.error_code)).."）" end
-    for _,file in ipairs(FAILURE_FILES) do
-        local line=tonumber(failure.line)
-        if failure.file==file and line and line>0 and line<100000 then
-            message=message.."（"..file..":"..tostring(math.floor(line)).."）"; break
-        end
-    end
-    return message
-end
-
-function M.summary(value)
-    -- Old experimental measurements are not production download results.
-    if type(value)~="table" or value.schema~=2 then return nil end
-    local reasons={eink_preferred="优先使用 E-Ink",manual_web="已选择 Web",
-        annotations="划线与想法使用 Web",translation="译文使用 Web",prefetch="自动准备章节使用 Web",
-        coordinate_source="精确位置校验使用 Web",unsupported_format="此格式使用 Web",mp="公众号使用 Web",
-        authorization_required="未授权 E-Ink，使用 Web",eink_failed="E-Ink 未能完成，本次后续使用 Web"}
-    local text=reasons[value.reason] or (value.selected=="eink" and "使用 E-Ink" or "使用 Web")
-    if value.reason=="eink_failed" and value.failure then text=text.."；原因："..M.failure_summary(value.failure) end
-    if value.reason=="rate_limited" then
-        text=(value.stopped_channel=="eink" and "E-Ink" or value.stopped_channel=="web" and "Web" or "下载").."请求受限，已停止"
-        if FAILURE_STAGES[value.native_stage] then text=text.."；步骤："..FAILURE_STAGES[value.native_stage] end
-        if value.local_cooldown then text=text.."（本地冷却，本次未再次发送请求）" end
-        if tonumber(value.limit_code) then text=text.."；限制代码 "..tostring(tonumber(value.limit_code)) end
-        if tonumber(value.wait_seconds) then text=text.."；本地冷却剩余约 "..tostring(tonumber(value.wait_seconds)).." 秒" end
-    end
-    text=text..string.format("；本次获取 E-Ink %d 章 / Web %d 章",tonumber(value.eink_chapters) or 0,tonumber(value.web_chapters) or 0)
-    for _,stage in ipairs({"annotations","translation"}) do
-        local counts=value.api_counts or {}
-        local native,web=tonumber((counts.eink or {})[stage]) or 0,tonumber((counts.web or {})[stage]) or 0
-        if native+web>0 then text=text..string.format("；%s接口调用 E-Ink %d 次 / Web %d 次",FAILURE_STAGES[stage],native,web) end
-    end
-    return text
+function M:log_result(outcome,elapsed)
+    local counts=self.api_counts
+    local failure=self.failure or {}
+    Log.record(self.store,{operation="download",channel=self.stopped_channel or self.selected,outcome=outcome,
+        reason=self.reason,elapsed_ms=math.floor(math.max(0,elapsed or 0)*1000),
+        code=self.limit_code or failure.error_code,status=failure.status,
+        wait_seconds=self.wait_seconds,local_cooldown=self.local_cooldown,
+        native_stage=self.native_stage or failure.stage,native_chapters=self.eink_chapters,web_chapters=self.web_chapters,
+        failure_file=failure.file,failure_line=failure.line,
+        native_annotations=counts.eink.annotations or 0,web_annotations=counts.web.annotations or 0,
+        native_translation=counts.eink.translation or 0,web_translation=counts.web.translation or 0})
 end
 return M

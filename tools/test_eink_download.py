@@ -397,8 +397,8 @@ def main():
                 {chapterUid=4,chapterIdx=3,title='Third'}} end
             local result=d:book({bookId='b',title='Native integration',version=5},{images=true},function() end)
             assert(result.complete and result.chapter_count==3 and result.image_count==3)
-            assert(result.download_transport.selected=='eink' and result.download_transport.eink_chapters==3)
-            assert(store.record.download_transport.eink_chapters==3)
+            assert(d.last_transport_result.selected=='eink' and d.last_transport_result.eink_chapters==3)
+            assert(result.download_transport==nil and store.record.download_transport==nil,'diagnostics leaked into book records')
             assert(not result.progress_source_complete and result.progress_source_cached_count==0)
             assert(http.catalogs==1 and http.packages==3 and http.contexts==0 and http.shards==0 and http.closed)
             assert(next(r._transient_image_roots)==nil)
@@ -438,7 +438,7 @@ def main():
             result=resumed:book({bookId='b',title='Fallback integration',version=5},{images=true})
             assert(result.complete and result.chapter_count==3 and result.image_count==1)
             assert(native_attempts==2 and web_attempts==3,'resuming replayed the failed Native route')
-            assert(result.download_transport.reason=='eink_failed' and result.download_transport.web_chapters==2)
+            assert(resumed.last_transport_result.reason=='eink_failed' and resumed.last_transport_result.web_chapters==2)
             assert(result.progress_source_cached_count==2 and not result.progress_source_complete)
             Source.cacheChapter=cache_source
             http.download_to_file=native_download
@@ -510,7 +510,7 @@ def main():
             Codec.decode_parts=original_decode
         ''')
         print("Native Reader, real EPUB installation, fallback resume and failure cleanup: PASS")
-    for name in ("test_api_transports.lua", "test_download_transport.lua", "test_eink_client.lua", "test_shelf_client.lua", "test_reader_context.lua", "test_download_safety.lua", "test_http_keepalive.lua"):
+    for name in ("test_api_transports.lua", "test_diagnostic_log.lua", "test_download_transport.lua", "test_eink_client.lua", "test_shelf_client.lua", "test_reader_context.lua", "test_download_safety.lua", "test_http_keepalive.lua"):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.globals().arg = lua.table_from({0: f"tools/{name}"})
         lua.execute((ROOT / "tools" / name).read_text(encoding="utf-8"), name=name)

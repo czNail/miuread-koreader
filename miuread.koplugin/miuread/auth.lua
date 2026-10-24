@@ -425,19 +425,11 @@ function Auth:_stop_if_rate_limited(value)
     local detail=require("miuread.http").rate_limit_details(value)
     if not detail then return false end
     self:cancel()
-    local stages={qr_ticket="获取客户端二维码票据",qr_connect="获取微信授权二维码",qr_poll="等待微信扫码确认",
-        login="兑换客户端登录凭据",refresh="续期客户端凭据",shelf_verify="验证客户端书架"}
-    local title="E-Ink 客户端授权暂时受限"
-    if stages[detail.native_stage] then title=title.."\n\n发生阶段："..stages[detail.native_stage] end
-    if detail.local_cooldown then
-        title=title.."\n\n尚在上一次限制的本地冷却中，本次未再次发送请求。"
-        if detail.code then title=title.."上次限制代码："..tostring(detail.code).."。" end
-    else
-        title=title.."\n\n服务拒绝了本次请求"..(detail.code and ("（代码 "..tostring(detail.code).."）") or "").."。"
+    local title="E-Ink 客户端授权暂时受限\n\n扫码已停止，请稍后重新授权。"
+    if detail.wait_seconds and detail.wait_seconds>0 then
+        title=title.."\n约 "..tostring(math.ceil(detail.wait_seconds/60)).." 分钟后可重试。"
     end
-    if detail.wait_seconds then title=title.."\n本地冷却剩余约 "..tostring(detail.wait_seconds).." 秒。" end
-    title=title.."\n\n已停止扫码轮询和自动刷新，请等待服务恢复后再手动授权。冷却结束不代表服务已恢复。"
-    title=title.."现有网页登录状态会保留。"
+    title=title.."\n\n当前登录状态已保留。"
     local dialog
     dialog=ButtonDialog:new{title=title,title_align="center",close_callback=function()
         if self.retry_dialog==dialog then self.retry_dialog=nil end

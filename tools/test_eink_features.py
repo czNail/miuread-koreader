@@ -242,7 +242,7 @@ def run_case(folder, scenario, zlib_path):
     lua.globals().want_translation = translation
     lua.execute(b'''
         options={images=true,annotations=want_notes}
-        if scenario=='web_cached_resume' or scenario=='web_refresh_limit' then options.download_transport='web' end
+        if scenario=='web_cached_resume' or scenario=='web_refresh_limit' then options.channel='web' end
         if want_translation then
             options.generate_translation_uid='2'; options.translation_batch_size='all'; options.translation_mode='bilingual'
         end
@@ -261,7 +261,7 @@ def run_case(folder, scenario, zlib_path):
     if scenario == 'web_cached_resume':
         lua.execute(b'''
             assert(not passed and http.native_packages==0 and http.web_bodies==1)
-            http.resuming=true; options.download_transport=nil
+            http.resuming=true; options.channel=nil
             passed,result=pcall(d.book,d,book,options)
             assert(passed,tostring(result))
             assert(http.native_packages==3,'pending Web body was reused with Native annotation coordinates')
@@ -286,7 +286,7 @@ def run_case(folder, scenario, zlib_path):
     if limited:
         lua.execute(b'''
             assert(not passed,'control error unexpectedly produced a book: '
-                ..require('miuread.download_transport').summary(d.last_transport_result))
+                ..tostring(d.last_transport_result.reason))
             assert(http.web_api==0 and http.web_bodies==0,'control error fell back to Web')
             if scenario=='member_required' then assert(tostring(result):find('[MiuReadTranslationMemberRequired]',1,true))
             elseif scenario=='cancel' then assert(tostring(result):find('download cancelled',1,true))
@@ -308,13 +308,13 @@ def run_case(folder, scenario, zlib_path):
             if scenario=='notes' or scenario=='combined' or scenario=='no_quotes' or scenario=='web_cached_resume' or scenario=='native_catalog' then
                 local resumed_web=scenario=='web_cached_resume' and 1 or 0
                 assert(http.native_packages==3 and http.web_api==resumed_web and http.web_bodies==resumed_web,
-                    require('miuread.download_transport').summary(result.download_transport)
+                    tostring(d.last_transport_result.reason)
                     ..' packages='..http.native_packages..' web_api='..http.web_api..' web_bodies='..http.web_bodies)
-                assert(result.download_transport.eink_chapters==3 and not result.progress_source_complete)
+                assert(d.last_transport_result.eink_chapters==3 and not result.progress_source_complete)
                 assert(thought_groups['2'][1].texts[1].content=='Native thought')
                 if scenario=='native_catalog' then assert(http.native_catalogs==1 and not http.web_catalogs) end
             else
-                assert(result.download_transport.reason=='eink_failed' and http.web_bodies==3)
+                assert(d.last_transport_result.reason=='eink_failed' and http.web_bodies==3)
             end
             if scenario=='notes_unavailable' then
                 assert(http.native_packages==1 and http.web_api==6,'partial Native annotations leaked into Web checkpoints')

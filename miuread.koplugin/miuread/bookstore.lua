@@ -369,7 +369,7 @@ local function authorize_shelf(plugin,detail,client_access)
     local vid,session=identity(plugin)
     local dialog
     dialog=ButtonDialog:new{
-        title=(client_access and "E-Ink 接口需要客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权与书架管理共用，下次操作时生效。"
+        title=(client_access and "E-Ink 客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权后，在自动模式下优先使用 E-Ink。"
             or "书架管理需要客户端授权\n\n请使用微信扫描二维码，并选择与觅阅相同的微信读书账号。授权后，再重新选择移除。")
             ..(detail and ("\n\n接口错误："..shelf_error_summary(detail)) or ""),title_align="center",
         buttons={{{text="微信扫码授权",callback=function()

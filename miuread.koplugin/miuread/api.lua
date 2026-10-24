@@ -44,7 +44,7 @@ end
 function Api:scope(options)
     if self._transport then return self end
     options=options or {}
-    local route=Transport.new(self.store,{channel=self._channel or options.channel,download_transport=options.download_transport})
+    local route=Transport.new(self.store,{channel=self._channel or options.channel})
     local view=Api.bind(self,self.reader,route)
     view.coordinate_source,view._channel=self.coordinate_source,self._channel
     return view
@@ -66,7 +66,7 @@ function Api:_invoke(name,...)
     if name=="chapter" and Protocol.is_mp(tostring((arguments[1] or {}).bookId or "")) then policy.web_only=true end
     if self._channel=="eink" and not policy.web_only then policy.native_only=true end
     local transport=self._transport or Transport.new(self.store,{channel=self._channel or request_options.channel,
-        download_transport=request_options.download_transport,fresh_context=request_options.fresh_context})
+        fresh_context=request_options.fresh_context})
     local function invoke(backend)
         local fn=backend[name]
         if type(fn)~="function" then error("unsupported API operation: "..name,0) end

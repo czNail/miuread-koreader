@@ -2300,16 +2300,14 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
             return display
         end
 
-        local function failure_payload(raw,downloader)
+        local function failure_payload(raw)
             local limited=Http.is_rate_limit_error(raw)
             return {ok=false,error=display_error(raw),error_kind=limited and "rate_limit" or nil,
-                wait_seconds=limited and tonumber(tostring(raw):match("wait_seconds=(%d+)")) or nil,
-                download_transport=downloader and serializable_copy(downloader.last_transport_result) or nil}
+                wait_seconds=limited and tonumber(tostring(raw):match("wait_seconds=(%d+)")) or nil}
         end
 
         local last_progress_percent = 0
         local function run_download()
-            local current_downloader
             local ok, value = xpcall(function()
                 local store = Store:new{
                     settings_path = worker_settings_path,
@@ -2326,7 +2324,6 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
                 local library = Library:new(api, http, store)
                 local annotations = Annotations:new(api)
                 local downloader = Downloader:new(reader, api, annotations, store, http)
-                current_downloader=downloader
                 clean_options.cancelled = function()
                     return UChild.file_exists(cancel_path)
                 end
@@ -2462,7 +2459,7 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
                     local friendly=display_error(raw_error)
                     emit{stage = UChild.file_exists(cancel_path) and "cancelled" or "error",
                         percent = last_progress_percent, chapter = clean_book.title or "", message = friendly}
-                    payload = failure_payload(raw_error,current_downloader)
+                    payload = failure_payload(raw_error)
                     append_diagnostic("download_failed",raw_error)
                 end
             end

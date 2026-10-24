@@ -102,7 +102,7 @@ ok('AuthCompare' not in main and 'AuthBridge' not in main,'one-off auth diagnost
 ok('new_auth.native_shelf=Util.copy(old_auth.native_shelf)' in auth,'same-account Web re-login preserves Native shelf authorization')
 ok('new_vid==old_vid and native_vid==new_vid' in auth,'Native shelf authorization preservation is account-scoped')
 ok('function Store:clear_native_shelf_auth()' in store,'Native shelf authorization can be revoked independently')
-ok('书架管理授权' in main and '取消书架管理授权' in main,'account status exposes Native shelf authorization state and revoke action')
+ok('E-Ink 客户端授权' in main and '取消 E-Ink 客户端授权' in main,'account status exposes Native shelf authorization state and revoke action')
 ok('微信读书 · 书城' in bookstore and '总榜 · 飙升 · 新书 · 热门' in bookstore,'bookstore root copy polished without structural rewrite')
 ok('第 "..tostring(spec.page or 1).." 页' in bookstore and 'label="上一页"' in bookstore,'bookstore pagination copy normalized')
 ok('if elapsed_ms>=250 then' in store and 'if elapsed_ms>=250 or reason=="set:auth" then' in store,'successful StorePerf logging is rate-limited by cost/relevance')

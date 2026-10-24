@@ -182,8 +182,8 @@ for _,control in ipairs({'[MiuReadRateLimit] error_code=499','download cancelled
 end
 http.native_error=nil
 
--- Existing manual-Web preferences migrate without changing their meaning.
-store.prefs.download_transport='web'
+-- The global preference applies to each independent operation.
+store.prefs.api_transport='web'
 assert(api:book('b')._api_channel=='web')
 store.prefs.api_transport='auto'
 assert(api:book('b')._api_channel=='eink')

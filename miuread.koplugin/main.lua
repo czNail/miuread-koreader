@@ -1861,11 +1861,11 @@ function Plugin:_shelf_management_authorized()
 end
 function Plugin:confirm_clear_shelf_management_auth()
     if not self:_shelf_management_authorized() then
-        self:toast("当前没有书架管理授权",3)
+        self:toast("当前没有 E-Ink 客户端授权",3)
         return
     end
     UIManager:show(ConfirmBox:new{
-        text="取消书架管理授权？\n\n不会退出微信读书主账号。之后再次从微信书架移除书籍时，需要重新扫码授权。",
+        text="取消 E-Ink 客户端授权？\n\n不会退出微信读书主账号。自动模式将使用 Web；从微信书架移除书籍前，需要重新授权。",
         ok_text="取消授权",
         ok_callback=function()
             if self._bookstore_shelf_auth then
@@ -1874,9 +1874,9 @@ function Plugin:confirm_clear_shelf_management_auth()
             end
             local saved,err=self.store:clear_native_shelf_auth()
             if saved==true then
-                self:status_toast("书架管理","授权已取消",4)
+                self:status_toast("账号","客户端授权已取消",4)
             else
-                self:info("取消书架管理授权失败："..tostring(err or "无法保存设置"))
+                self:info("取消 E-Ink 客户端授权失败："..tostring(err or "无法保存设置"))
             end
         end,
     })
@@ -1892,7 +1892,7 @@ function Plugin:_account_details_text()
         return table.concat(lines,"\n")
     end
     lines[#lines+1]="基础登录：正常"
-    lines[#lines+1]="书架管理授权："..(self:_shelf_management_authorized() and "已授权" or "未授权")
+    lines[#lines+1]="E-Ink 客户端授权："..(self:_shelf_management_authorized() and "已授权" or "未授权")
     lines[#lines+1]="在线功能："..(health.state=="ok" and "全部正常" or (health.state=="partial" and "部分暂时异常" or "等待实际使用验证"))
     lines[#lines+1]=""
     for _,channel in ipairs(AUTH_CHANNEL_ORDER) do
@@ -2014,7 +2014,7 @@ function Plugin:show_account_status()
         }
         if self:logged_in() then
             local shelf_authorized=self:_shelf_management_authorized()
-            rows[#rows+1]={text="书架管理授权",post_text=shelf_authorized and "已授权" or "未授权",enabled=false}
+            rows[#rows+1]={text="E-Ink 客户端授权",post_text=shelf_authorized and "已授权" or "未授权",enabled=false}
             local online_label=health.state=="ok" and "全部正常" or (health.state=="partial" and "部分暂时异常" or "等待实际使用验证")
             rows[#rows+1]={text="在线功能",post_text=online_label,enabled=false}
             for _,channel in ipairs(AUTH_CHANNEL_ORDER) do
@@ -2025,7 +2025,7 @@ function Plugin:show_account_status()
             rows[#rows+1]={text="重新检查状态",callback=function() self:check_account_status() end}
             rows[#rows+1]={text="重新扫码登录",callback=function() self.auth_flow:start() end}
             if shelf_authorized then
-                rows[#rows+1]={text="取消书架管理授权",callback=function() self:confirm_clear_shelf_management_auth() end}
+                rows[#rows+1]={text="取消 E-Ink 客户端授权",callback=function() self:confirm_clear_shelf_management_auth() end}
             end
             rows[#rows+1]={text="退出登录",callback=function() self:confirm_logout() end}
         else
@@ -2041,7 +2041,7 @@ function Plugin:show_account_status()
         buttons[#buttons+1]={{text="重新检查状态",callback=function() UIManager:close(dialog); self:check_account_status() end}}
         buttons[#buttons+1]={{text="重新扫码登录",callback=function() UIManager:close(dialog); self.auth_flow:start() end}}
         if self:_shelf_management_authorized() then
-            buttons[#buttons+1]={{text="取消书架管理授权",callback=function()
+            buttons[#buttons+1]={{text="取消 E-Ink 客户端授权",callback=function()
                 UIManager:close(dialog); self:confirm_clear_shelf_management_auth()
             end}}
         end
@@ -2267,6 +2267,9 @@ function Plugin:account_menu()
         {text=self:logged_in() and "重新扫码登录" or "扫码登录",callback=self:safe("login",function() self.auth_flow:start() end)},
     }
     if self:logged_in() then
+        out[#out+1]={text="E-Ink 客户端授权",post_text=self:_shelf_management_authorized() and "已授权" or "需微信扫码",callback=function()
+            require("miuread.bookstore").authorize_client(self)
+        end}
         out[#out+1]={text="退出登录",callback=function() self:confirm_logout() end}
     end
     return out
@@ -2296,6 +2299,11 @@ function Plugin:_friendly_remote_error(err, context)
     end
     if text:find("[MiuReadMPInvalidAccount]",1,true) then
         return "公众号信息无效，请刷新微信读书书架。"
+    end
+    if Http.is_rate_limit_error(text) then
+        local wait=tonumber(text:match("wait_seconds=(%d+)"))
+        return "微信读书暂时限制了请求频率，"..(wait and wait>0
+            and ("请约 "..tostring(math.ceil(wait/60)).." 分钟后重试。") or "请稍后重试。")
     end
     if lower:find("参数格式错误",1,true) or lower:find("params error",1,true)
         or lower:find("parameter format",1,true) then
@@ -12458,6 +12466,10 @@ end
 function Plugin:maintenance_menu()
     return PluginSettings.system_maintenance(self)
 end
+function Plugin:export_runtime_log()
+    local path,err=require("miuread.diagnostic_log").export(self.store)
+    self:info(path and ("运行日志已导出：\n"..path) or err)
+end
 
 function Plugin:show_home_quick_panel(more_expanded)
     local started=monotonic_wall_time()
@@ -19021,8 +19033,6 @@ function Plugin:_download_summary(rec,opt)
     local lines={heading}
     local annotation_note=DownloadResult.summary_note(rec)
     if annotation_note then lines[#lines+1]=annotation_note end
-    local transport_note=require("miuread.download_transport").summary(rec and rec.download_transport)
-    if transport_note then lines[#lines+1]="下载通道："..transport_note end
     lines[#lines+1]="保存位置："..tostring(rec.file or "")
     lines[#lines+1]="打开一次后会出现在 KOReader 最近阅读中"
     if rec and rec.partial_range==true then
@@ -19132,9 +19142,6 @@ function Plugin:_finish_download_runtime(runtime,result)
     if self._download_runtime~=runtime then return end
     local b=runtime.book or {}
     local opt=runtime.options or {}
-    if result and result.ok~=true and opt.prefetch_hidden~=true and type(result.download_transport)=="table" then
-        self.store:set("download_transport_result",{title=tostring(b.title or ""),at=os.time(),result=result.download_transport})
-    end
     local done=runtime.done
     local open_after=runtime.open_after==true
     local was_background=runtime.background==true
@@ -19194,8 +19201,7 @@ function Plugin:_finish_download_runtime(runtime,result)
             first="微信读书登录凭证暂时未能自动恢复。下载断点已经保留，可稍后继续；若账号状态检查也失败，再重新扫码。"
         elseif rate_limited then
             first="微信读书暂时限制了请求频率。插件已停止继续请求，正文和断点均已保留，请稍后继续下载。"
-            local transport_note=require("miuread.download_transport").summary(result and result.download_transport)
-            if transport_note then first=first.."\n\n"..transport_note end
+            if wait_seconds and wait_seconds>0 then first=first.."\n约 "..tostring(math.ceil(wait_seconds/60)).." 分钟后可重试。" end
         elseif network_failed then
             first="网络连接暂时中断。已完成章节和下载断点均已保留，网络恢复后可继续下载。"
         elseif image_missing then
@@ -19642,9 +19648,6 @@ function Plugin:_merge_download_result(result,book,opt)
     end
 
     local rec=result.value or {}
-    if opt.prefetch_hidden~=true and type(rec.download_transport)=="table" then
-        self.store:set("download_transport_result",{title=tostring(book.title or ""),at=os.time(),result=rec.download_transport})
-    end
     local kind=rec.variant or (opt.annotations and "notes" or "clean")
     if opt.prefetch_hidden==true and opt.chapter_uid then
         self.store:save_hidden_prefetch(book.bookId,opt.chapter_uid,kind,rec)
@@ -27329,17 +27332,6 @@ function Plugin:api_transport_menu()
         {text="Web",post_text="使用 Web 后端",checked_func=function()
             return require("miuread.api_transport").preference(self.store)=="web"
         end,callback=function() set("web") end},
-        {text="E-Ink 客户端授权",post_text=require("miuread.shelf_client").credentials(self.store:auth()) and "已授权" or "需微信扫码",callback=function()
-            require("miuread.bookstore").authorize_client(self)
-        end},
-        {text="最近下载的通道结果",callback=function()
-            local last=self.store:get("download_transport_result",{}) or {}
-            local summary=require("miuread.download_transport").summary(last.result)
-            self:info(summary and (tostring(last.title or "").."\n\n"..summary) or "尚无正式下载通道记录。完成原文下载后可在这里查看。")
-        end},
-        {text="通道使用规则",callback=function()
-            self:info("书架、书籍信息、目录、搜索、推荐、分类、批注读取和书籍下载统一优先使用 E-Ink，未授权或不支持时使用 Web。译文仍需微信读书会员及服务支持。\n\n普通读取失败后回退 Web，同一下载任务及断点恢复保持已确定的通道。限频、取消和休眠立即停止，不换通道继续请求。\n\n写入前可以续期授权；写入发出后，超时等结果不明确的情况不会换通道重发。批注上传与精确位置校验使用同源的 Web 坐标，阅读上报保留 Web 协议。\n\n选择 Web 可固定使用 Web 后端。尚无经过验证的 Web 书架移除接口，该操作需要自动模式及 E-Ink 授权。")
-        end},
     }
 end
 
