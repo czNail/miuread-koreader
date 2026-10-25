@@ -244,6 +244,41 @@ local function normalized_title(value)
     return U.trim(tostring(value or "")):lower():gsub("%s+", " ")
 end
 
+-- Part dividers and picture pages have no body text to anchor against: every
+-- position in them is the chapter start. Only chapters the catalog counts as
+-- tiny are read, so ordinary chapters never pay for a full-chapter text read,
+-- and the decision never depends on how the current CSS paginates.
+local TITLE_ONLY_MAX_WORDS = 64
+
+local function visible_chars(value)
+    local text = tostring(value or ""):gsub("%s", "")
+    -- NBSP, soft hyphen, ideographic space, zero-width spaces/joiners, BOM.
+    text = text:gsub("\194[\160\173]", ""):gsub("\227\128\128", "")
+        :gsub("\226\128[\139-\141]", ""):gsub("\239\187\191", "")
+    return text
+end
+
+local function chapter_title_only(document, toc, toc_index, catalog_words, titles)
+    if (tonumber(catalog_words) or 0) > TITLE_ONLY_MAX_WORDS then return false end
+    local start_xp, end_xp = chapter_bounds(document, toc, toc_index)
+    if not start_xp then return false end
+    if type(document.getTextFromXPointers) ~= "function" then return false end
+    -- An empty extraction is a valid answer here (embedded CSS may collapse a
+    -- whitespace-only heading to nothing); only a failed call is not.
+    local ok, text = pcall(document.getTextFromXPointers, document, start_xp, end_xp, false)
+    if not ok then return false end
+    if type(text) == "table" then text = text.text or text[1] end
+    local body = visible_chars(text)
+    for _, title in ipairs(titles) do
+        local wanted = visible_chars(title)
+        if wanted ~= "" and body:sub(1, #wanted) == wanted then
+            body = body:sub(#wanted + 1)
+            break
+        end
+    end
+    return body == ""
+end
+
 local function catalog_neighbor_candidates(catalog, primary_index, total_words, local_title)
     catalog = type(catalog) == "table" and catalog or {}
     primary_index = tonumber(primary_index)
@@ -447,9 +482,10 @@ function M.capture(ui, record, catalog)
     local local_toc_title = tostring(type(toc.toc[toc_index]) == "table"
         and (toc.toc[toc_index].title or toc.toc[toc_index].text) or "")
     local chapter_title = tostring(catalog_row.chapter.title or local_row.title or local_toc_title or "")
+    local title_only = chapter_title_only(document, toc, toc_index, catalog_row.words, {local_toc_title, chapter_title})
     local anchor_candidates = capture_source_anchors(document, toc, xp, chapter_title)
-    if #anchor_candidates == 0 then return nil, "anchor_unavailable" end
-    local primary_anchor = anchor_candidates[1]
+    if #anchor_candidates == 0 and not title_only then return nil, "anchor_unavailable" end
+    local primary_anchor = anchor_candidates[1] or {}
 
     return {
         xpointer = xp,
@@ -476,6 +512,7 @@ function M.capture(ui, record, catalog)
         anchor_cross_chapter = primary_anchor.anchor_cross_chapter == true,
         anchor_contains_chapter_title = primary_anchor.anchor_contains_chapter_title == true,
         anchor_candidates = anchor_candidates,
+        chapter_title_only = title_only,
         book_version = tonumber(record.record and record.record.progress_source_book_version)
             or tonumber(record.book and (record.book.version or record.book.bookVersion))
             or tonumber(record.record and (record.record.book_version or record.record.bookVersion)) or 0,

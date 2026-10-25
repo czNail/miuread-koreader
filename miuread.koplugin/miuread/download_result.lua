@@ -43,6 +43,7 @@ function Result.state(record, pending_install)
 end
 
 function Result.shelf_status(record, pending_install)
+    if pending_install == true and record and record.translation_mode then return "译文待应用" end
     if pending_install == true then return "等待关闭后更新" end
     if Result.annotation_pending(record) then return "批注待修复" end
     return "已生成"
@@ -50,6 +51,9 @@ end
 
 function Result.notice(title, record, pending_install)
     title = tostring(title or "未命名")
+    if pending_install == true and record and record.translation_mode then
+        return title .. "译文已就绪，可在翻译设置中应用"
+    end
     if pending_install == true then
         return title .. "新版本已下载，关闭当前书籍后更新"
     end

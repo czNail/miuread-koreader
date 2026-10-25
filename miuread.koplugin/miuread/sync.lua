@@ -395,6 +395,7 @@ local function catalog_progress_from_remote(remote, chapters)
 end
 
 function Sync:new(reader, api, store, host, async, identity_async)
+    if api and type(api.for_channel)=="function" then api=api:for_channel("web") end
     local object = setmetatable({
         reader=reader, api=api, store=store, host=host, async=async,
         identity_async=identity_async,
@@ -2420,11 +2421,7 @@ function Sync:remote(book_id, callback, options)
     } or nil
     local reader_snapshot=self.reader
     local ok, err = self.async:run("remote_progress", function()
-        local out={}
-        local agent_ok,agent=pcall(self.api.progress,self.api,book_id)
-        if agent_ok then out.agent=agent else out.agent_error=tostring(agent) end
-        local web_ok,web=pcall(self.api.web_progress,self.api,book_id)
-        if web_ok then out.web=web else out.web_error=tostring(web) end
+        local out=self.api:progress_sources(book_id)
 
         local function normalize_native(value,source)
             local progress=sourced_progress(value,book_id,source)
@@ -5357,10 +5354,32 @@ end
 -- made the final progress transaction miss its close window and become UNSENT.
 -- Preempt the time service instead. Any unconfirmed tail seconds are dropped;
 -- they are never replayed, so this cannot double-count reading time.
-function Sync:preempt_reading_time_for_progress(reason, callback)
+-- stop_fast() has usually already asked the service to submit the final tail.
+-- Give that request a short bounded window to return before preempting: once
+-- its result is imported nothing is in flight, so stopping the service can
+-- neither drop those seconds nor send them twice. On timeout the drop policy
+-- above applies unchanged.
+local FINAL_FLUSH_GRACE_POLLS = 24 -- 24 x 0.25 s
+function Sync:preempt_reading_time_for_progress(reason, callback, flush_settled)
     callback=type(callback)=="function" and callback or function() end
     reason=tostring(reason or "progress_priority")
     local daemon=self.daemon
+    if flush_settled~=true and daemon and daemon.final_flush_pending==true then
+        local polls=0
+        local function wait()
+            if self.daemon==daemon then pcall(self._import_daemon_status,self,false) end
+            polls=polls+1
+            if self.daemon~=daemon or daemon.final_flush_pending~=true or polls>=FINAL_FLUSH_GRACE_POLLS then
+                logger.info("[MiuRead][ReadReport] final flush before progress priority",
+                    "result=",(self.daemon==daemon and daemon.final_flush_pending==true) and "timeout" or "settled",
+                    "waited_ms=",tostring((polls-1)*250),"reason=",reason)
+                return self:preempt_reading_time_for_progress(reason,callback,true)
+            end
+            UIManager:scheduleIn(.25,wait)
+        end
+        wait()
+        return true
+    end
     self:cancel_writer_barrier_waits(reason)
     self.progress_write_fence=false
     self.progress_write_fence_seq=0

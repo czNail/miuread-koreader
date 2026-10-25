@@ -19,10 +19,24 @@ local Runes = require("miuread.annotations.runes")
 
 local PosMap = {}
 
+-- TXT chapters are addressed by WeRead on the decrypted text itself, where
+-- paragraphs are indented with ideographic spaces. Only plain-text maps treat
+-- that space as formatting; markup maps keep their exact behaviour.
+local IDEOGRAPHIC_SPACE = "\227\128\128"
+local function plain_space(plain, r)
+    return plain == true and r == IDEOGRAPHIC_SPACE
+end
+local function strip_plain_spaces(plain, s)
+    if plain ~= true then return s end
+    return (s:gsub(IDEOGRAPHIC_SPACE, ""))
+end
+
 --- 从坐标 HTML 构建映射。
 -- @string html coord_html（建议已 normalizeMarkup；本函数会剥 BOM）
+-- @tparam[opt] bool plain_text treat the input as literal text (no markup)
 -- @treturn table map
-function PosMap.build(html)
+function PosMap.build(html, plain_text)
+    plain_text = plain_text == true
     html = Runes.stripLeadingBOM(html or "")
     local runes = Runes.toRunes(html)
     local text_runes = {}
@@ -32,9 +46,9 @@ function PosMap.build(html)
     local in_tag = false
     for i = 1, #runes do
         local r = runes[i]
-        if r == "<" then
+        if not plain_text and r == "<" then
             in_tag = true
-        elseif r == ">" then
+        elseif not plain_text and r == ">" then
             in_tag = false
         elseif not in_tag then
             local t = #text_runes + 1
@@ -55,7 +69,7 @@ function PosMap.build(html)
     local norm_bytes = 1
     for i = 1, #text_runes do
         local r = text_runes[i]
-        if not r:match("%s") and r ~= "*" then
+        if not r:match("%s") and r ~= "*" and not plain_space(plain_text, r) then
             norm_runes[#norm_runes + 1] = r
             norm_map[#norm_runes] = i
             norm_byte_map[norm_bytes] = #norm_runes
@@ -64,6 +78,7 @@ function PosMap.build(html)
     end
 
     return {
+        plain_text = plain_text,
         html = html,
         runes = runes,
         text_runes = text_runes,
@@ -129,12 +144,12 @@ end
 -- 解决 CREngine selected_text 的换行/空白与正文文本流（\r\n、多空格）
 -- 不一致导致的 not_found。命中位置经 norm_map 映射回原 text_runes 下标。
 -- @treturn table rune 下标列表（1-index）
-local function findAllNorm(norm_text, norm_byte_map, norm_map, needle)
+local function findAllNorm(norm_text, norm_byte_map, norm_map, needle, plain)
     local hits = {}
     if needle == nil or needle == "" or norm_text == nil or norm_text == "" then
         return hits
     end
-    local stripped = needle:gsub("%s", ""):gsub("%*", "")
+    local stripped = strip_plain_spaces(plain, (needle:gsub("%s", ""):gsub("%*", "")))
     if stripped == "" or #stripped > #norm_text then
         return hits
     end
@@ -156,8 +171,8 @@ local function findAllNorm(norm_text, norm_byte_map, norm_map, needle)
 end
 
 --- 删除所有空白字符（用于空白不敏感比较）。
-local function stripWS(s)
-    return (s:gsub("%s", ""))
+local function stripWS(s, plain)
+    return strip_plain_spaces(plain, (s:gsub("%s", "")))
 end
 
 --- 从命中 rune 起点解析出文本半开区间 [text_start, text_end_pos)。
@@ -175,7 +190,7 @@ local function resolveHitToSpan(map, rune_i, mark_text)
     local nclean = {}
     for i = 1, #needle_runes do
         local r = needle_runes[i]
-        if not r:match("%s") and r ~= "*" then
+        if not r:match("%s") and r ~= "*" and not plain_space(map.plain_text, r) then
             nclean[#nclean + 1] = r
         end
     end
@@ -184,7 +199,7 @@ local function resolveHitToSpan(map, rune_i, mark_text)
     local last_consumed = text_start
     while consumed < #nclean and pos <= #map.text_runes do
         local r = map.text_runes[pos]
-        if not r:match("%s") and r ~= "*" then
+        if not r:match("%s") and r ~= "*" and not plain_space(map.plain_text, r) then
             if r == nclean[consumed + 1] then
                 consumed = consumed + 1
                 last_consumed = pos
@@ -202,7 +217,7 @@ local function resolveHitToSpan(map, rune_i, mark_text)
     -- 选区会被扩大到下一段之前，生成过长的服务端 range。
     local text_end_pos = last_consumed + 1
     local got = table.concat(map.text_runes, "", text_start, text_end_pos - 1)
-    if stripWS(got):gsub("%*", "") ~= stripWS(mark_text):gsub("%*", "") then
+    if stripWS(got, map.plain_text):gsub("%*", "") ~= stripWS(mark_text, map.plain_text):gsub("%*", "") then
         return nil
     end
     return text_start, text_end_pos
@@ -227,8 +242,8 @@ local function pickHit(hits, map, needle, context_before, context_after)
     end
 
     local runes = map.text_runes
-    local expect_b = context_before:gsub("%s", ""):gsub("%*", "")
-    local expect_a = context_after:gsub("%s", ""):gsub("%*", "")
+    local expect_b = strip_plain_spaces(map.plain_text, (context_before:gsub("%s", ""):gsub("%*", "")))
+    local expect_a = strip_plain_spaces(map.plain_text, (context_after:gsub("%s", ""):gsub("%*", "")))
     local before_need = #Runes.toRunes(expect_b)
     local after_need = #Runes.toRunes(expect_a)
     local scored = {}
@@ -241,7 +256,7 @@ local function pickHit(hits, map, needle, context_before, context_after)
             local k = rune_i - 1
             while k >= 1 and seen < before_need do
                 local r = runes[k]
-                if not r:match("%s") and r ~= "*" then
+                if not r:match("%s") and r ~= "*" and not plain_space(map.plain_text, r) then
                     table.insert(before, 1, r)
                     seen = seen + 1
                 end
@@ -253,7 +268,7 @@ local function pickHit(hits, map, needle, context_before, context_after)
             k = text_end_pos
             while k <= #runes and seen < after_need do
                 local r = runes[k]
-                if not r:match("%s") and r ~= "*" then
+                if not r:match("%s") and r ~= "*" and not plain_space(map.plain_text, r) then
                     after[#after + 1] = r
                     seen = seen + 1
                 end
@@ -292,7 +307,7 @@ function PosMap.locate(map, mark_text, opts)
     end
 
     -- 统一归一化匹配：norm 流（去空白+去 star）定位，命中映射回原 rune 下标
-    local hits = findAllNorm(map.norm_text, map.norm_byte_map, map.norm_map, mark_text)
+    local hits = findAllNorm(map.norm_text, map.norm_byte_map, map.norm_map, mark_text, map.plain_text)
     local rune_i, err = pickHit(hits, map, mark_text, opts.context_before, opts.context_after)
     if not rune_i then
         return nil, err or "not_found"
@@ -664,7 +679,7 @@ function PosMap.locateInjected(bridge, mark_text, opts)
     end
 
     local injected = bridge.injected
-    local hits = findAllNorm(injected.norm_text, injected.norm_byte_map, injected.norm_map, mark_text)
+    local hits = findAllNorm(injected.norm_text, injected.norm_byte_map, injected.norm_map, mark_text, injected.plain_text)
     local rune_i, err = pickHit(hits, injected, mark_text, opts.context_before, opts.context_after)
     if not rune_i then
         return nil, err or "not_found"

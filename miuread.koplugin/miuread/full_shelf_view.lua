@@ -270,7 +270,7 @@ function GridShelfWidget:_change_page(delta)
     if next_page == self.page then return true end
     self.page = next_page
     self:_build()
-    UIManager:setDirty(self, "full")
+    UIManager:setDirty(self, "ui")
     self:_notify_page()
     return true
 end
@@ -407,7 +407,7 @@ end
 function GridShelfWidget:updateItems()
     if self._miu_closed then return false end
     self:_build()
-    UIManager:setDirty(self, "full")
+    UIManager:setDirty(self, "ui")
     return true
 end
 

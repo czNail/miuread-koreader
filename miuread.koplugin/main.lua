@@ -1268,11 +1268,12 @@ function Plugin:_network_radio_hint()
 end
 function Plugin:online(label,fn) if not self:is_online() then self:info(_("Network unavailable")); return end; UIManager:scheduleIn(.05,self:safe(label,fn)) end
 
-local function interactive_child_store(auth,data_dir,temp_dir)
+local function interactive_child_store(auth,data_dir,temp_dir,api_mode)
     local current=U.copy(type(auth)=="table" and auth or {})
     local changed=false
     local store={data_dir=tostring(data_dir or ""),temp_dir=tostring(temp_dir or "")}
     function store:auth() return U.copy(current) end
+    function store:preferences() return {api_transport=api_mode or "auto"} end
     -- The isolated child deliberately keeps the parent's starting revision.
     -- The parent performs the real compare-and-swap when this snapshot returns.
     function store:save_auth(value) current=U.copy(type(value)=="table" and value or {}); changed=true; return true end
@@ -1280,8 +1281,8 @@ local function interactive_child_store(auth,data_dir,temp_dir)
     return store
 end
 
-function Plugin:_interactive_child_store(auth,data_dir,temp_dir)
-    return interactive_child_store(auth,data_dir,temp_dir)
+function Plugin:_interactive_child_store(auth,data_dir,temp_dir,api_mode)
+    return interactive_child_store(auth,data_dir,temp_dir,api_mode)
 end
 
 function Plugin:_interactive_network_context()
@@ -1409,12 +1410,13 @@ function Plugin:_pump_finished_status(force)
     if self:_network_radio_hint()==false then self:_schedule_finished_status(60); return false end
     local started=status:pump(function(mode,book_id,finished)
         local auth=U.copy(self.store:auth())
+        local api_mode=require("miuread.api_transport").preference(self.store)
         local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
         return function()
-            local child_store=interactive_child_store(auth,data_dir,temp_dir)
+            local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
             local child_http=Http:new(child_store)
             local child_reader=Reader:new(child_http,child_store)
-            local api=Api:new(child_http,child_store,child_reader)
+            local api=Api:new(child_http,child_store,child_reader):scope()
             if mode=="write" then
                 local ok,err=pcall(api.mark_book_finished,api,book_id,finished)
                 if not ok then logger.warn("[MiuRead][FinishedStatus] write outcome unconfirmed",U.first_line(err,160)) end
@@ -1536,6 +1538,7 @@ function Plugin:_request_catalog(book,label,on_ready,options)
     local id=tostring(book and (book.bookId or book.book_id) or "")
     if id=="" then return false,"missing book id" end
     local auth=U.copy(self.store:auth())
+    local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     label=tostring(label or "catalog")
     local key="catalog:"..id..":"..label
@@ -1543,7 +1546,7 @@ function Plugin:_request_catalog(book,label,on_ready,options)
         local HttpChild=require("miuread.http")
         local ReaderChild=require("miuread.reader")
         local DownloaderChild=require("miuread.downloader")
-        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local child_http=HttpChild:new(child_store)
         local child_reader=ReaderChild:new(child_http,child_store)
         local child_downloader=DownloaderChild:new(child_reader,nil,nil,child_store,child_http)
@@ -1858,11 +1861,11 @@ function Plugin:_shelf_management_authorized()
 end
 function Plugin:confirm_clear_shelf_management_auth()
     if not self:_shelf_management_authorized() then
-        self:toast("当前没有书架管理授权",3)
+        self:toast("当前没有 E-Ink 客户端授权",3)
         return
     end
     UIManager:show(ConfirmBox:new{
-        text="取消书架管理授权？\n\n不会退出微信读书主账号。之后再次从微信书架移除书籍时，需要重新扫码授权。",
+        text="取消 E-Ink 客户端授权？\n\n不会退出微信读书主账号。自动模式将使用 Web；从微信书架移除书籍前，需要重新授权。",
         ok_text="取消授权",
         ok_callback=function()
             if self._bookstore_shelf_auth then
@@ -1871,9 +1874,9 @@ function Plugin:confirm_clear_shelf_management_auth()
             end
             local saved,err=self.store:clear_native_shelf_auth()
             if saved==true then
-                self:status_toast("书架管理","授权已取消",4)
+                self:status_toast("账号","客户端授权已取消",4)
             else
-                self:info("取消书架管理授权失败："..tostring(err or "无法保存设置"))
+                self:info("取消 E-Ink 客户端授权失败："..tostring(err or "无法保存设置"))
             end
         end,
     })
@@ -1889,7 +1892,7 @@ function Plugin:_account_details_text()
         return table.concat(lines,"\n")
     end
     lines[#lines+1]="基础登录：正常"
-    lines[#lines+1]="书架管理授权："..(self:_shelf_management_authorized() and "已授权" or "未授权")
+    lines[#lines+1]="E-Ink 客户端授权："..(self:_shelf_management_authorized() and "已授权" or "未授权")
     lines[#lines+1]="在线功能："..(health.state=="ok" and "全部正常" or (health.state=="partial" and "部分暂时异常" or "等待实际使用验证"))
     lines[#lines+1]=""
     for _,channel in ipairs(AUTH_CHANNEL_ORDER) do
@@ -1912,13 +1915,14 @@ end
 function Plugin:check_account_status()
     if not self:logged_in() then self.auth_flow:start(); return end
     local auth=U.copy(self.store:auth())
+    local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     local context=self:_interactive_network_context()
     self:_run_interactive_network("account-status","account-status-check",function()
         local HttpChild=require("miuread.http")
         local ApiChild=require("miuread.api")
         local ReaderChild=require("miuread.reader")
-        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local child_http=HttpChild:new(child_store)
         local child_reader=ReaderChild:new(child_http,child_store)
         local child_api=ApiChild:new(child_http,child_store,child_reader)
@@ -2010,7 +2014,7 @@ function Plugin:show_account_status()
         }
         if self:logged_in() then
             local shelf_authorized=self:_shelf_management_authorized()
-            rows[#rows+1]={text="书架管理授权",post_text=shelf_authorized and "已授权" or "未授权",enabled=false}
+            rows[#rows+1]={text="E-Ink 客户端授权",post_text=shelf_authorized and "已授权" or "未授权",enabled=false}
             local online_label=health.state=="ok" and "全部正常" or (health.state=="partial" and "部分暂时异常" or "等待实际使用验证")
             rows[#rows+1]={text="在线功能",post_text=online_label,enabled=false}
             for _,channel in ipairs(AUTH_CHANNEL_ORDER) do
@@ -2021,7 +2025,7 @@ function Plugin:show_account_status()
             rows[#rows+1]={text="重新检查状态",callback=function() self:check_account_status() end}
             rows[#rows+1]={text="重新扫码登录",callback=function() self.auth_flow:start() end}
             if shelf_authorized then
-                rows[#rows+1]={text="取消书架管理授权",callback=function() self:confirm_clear_shelf_management_auth() end}
+                rows[#rows+1]={text="取消 E-Ink 客户端授权",callback=function() self:confirm_clear_shelf_management_auth() end}
             end
             rows[#rows+1]={text="退出登录",callback=function() self:confirm_logout() end}
         else
@@ -2037,7 +2041,7 @@ function Plugin:show_account_status()
         buttons[#buttons+1]={{text="重新检查状态",callback=function() UIManager:close(dialog); self:check_account_status() end}}
         buttons[#buttons+1]={{text="重新扫码登录",callback=function() UIManager:close(dialog); self.auth_flow:start() end}}
         if self:_shelf_management_authorized() then
-            buttons[#buttons+1]={{text="取消书架管理授权",callback=function()
+            buttons[#buttons+1]={{text="取消 E-Ink 客户端授权",callback=function()
                 UIManager:close(dialog); self:confirm_clear_shelf_management_auth()
             end}}
         end
@@ -2263,6 +2267,9 @@ function Plugin:account_menu()
         {text=self:logged_in() and "重新扫码登录" or "扫码登录",callback=self:safe("login",function() self.auth_flow:start() end)},
     }
     if self:logged_in() then
+        out[#out+1]={text="E-Ink 客户端授权",post_text=self:_shelf_management_authorized() and "已授权" or "需微信扫码",callback=function()
+            require("miuread.bookstore").authorize_client(self)
+        end}
         out[#out+1]={text="退出登录",callback=function() self:confirm_logout() end}
     end
     return out
@@ -2292,6 +2299,11 @@ function Plugin:_friendly_remote_error(err, context)
     end
     if text:find("[MiuReadMPInvalidAccount]",1,true) then
         return "公众号信息无效，请刷新微信读书书架。"
+    end
+    if Http.is_rate_limit_error(text) then
+        local wait=tonumber(text:match("wait_seconds=(%d+)"))
+        return "微信读书暂时限制了请求频率，"..(wait and wait>0
+            and ("请约 "..tostring(math.ceil(wait/60)).." 分钟后重试。") or "请稍后重试。")
     end
     if lower:find("参数格式错误",1,true) or lower:find("params error",1,true)
         or lower:find("parameter format",1,true) then
@@ -2407,13 +2419,15 @@ function Plugin:_refresh_shelf_async(on_ready,silent,request_options)
     end
 
     local auth=U.copy(self.store:auth())
+
+    local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     logger.info("[MiuRead][Shelf] refresh started","mode=subprocess")
     local started,err=self.shelf_async:run("shelf_refresh",function()
         local HttpChild=require("miuread.http")
         local ApiChild=require("miuread.api")
         local ReaderChild=require("miuread.reader")
-        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local child_http=HttpChild:new(child_store)
         local child_reader=ReaderChild:new(child_http,child_store)
         local api=ApiChild:new(child_http,child_store,child_reader)
@@ -5127,14 +5141,15 @@ function Plugin:_home_schedule_progress()
     local generation=tonumber(self._home_progress_generation) or 0
     local shelf_generation=self._shelf_refresh_generation
     local auth=U.copy(self.store:auth())
+    local api_mode=require("miuread.api_transport").preference(self.store)
     local sessions=self.store:get("sessions",{})
     local verified={}
     for _,id in ipairs(ids) do verified[id]=ShelfProgress.verification_key(sessions[id]) end
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     local started=self.home_progress_async:run("home-shelf-progress",function()
-        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local child_http=Http:new(child_store)
-        local api=Api:new(child_http,child_store)
+        local api=Api:new(child_http,child_store):scope()
         local updates={}
         for _,id in ipairs(ids) do
             local progress=ShelfProgress.fetch(api,id)
@@ -12451,6 +12466,10 @@ end
 function Plugin:maintenance_menu()
     return PluginSettings.system_maintenance(self)
 end
+function Plugin:export_runtime_log()
+    local path,err=require("miuread.diagnostic_log").export(self.store)
+    self:info(path and ("运行日志已导出：\n"..path) or err)
+end
 
 function Plugin:show_home_quick_panel(more_expanded)
     local started=monotonic_wall_time()
@@ -13702,7 +13721,7 @@ function Plugin:_apply_reader_translation_mode(mode,font_scale)
     local st=ui and ui.styletweak
     if not (settings and st and type(ui.handleEvent)=="function") then return false end
     local profile=self:_reader_translation_profile()
-    if not profile or profile.blocks==0 or (mode=="translation" and not profile.separable) then return false end
+    if not profile or profile.blocks==0 or (mode=="translation" and not require("miuread.translation").translation_only_status(profile).available) then return false end
     if not self:_install_marks_getCssText_wrapper(st) then return false end
     mode=require("miuread.translation").normalize_mode(mode)
     local previous=settings:readSetting("miuread_translation_mode")
@@ -13746,36 +13765,207 @@ function Plugin:_show_reader_translation_font_scale_panel(back_callback)
     }
 end
 
+function Plugin:_reader_translation_record(current)
+    if not (current and current.book and current.record) then return nil end
+    local record=current.record
+    local book_id=current.book.book_id or current.book.bookId
+    local kind=current.variant or record.variant
+    if self.store and kind then
+        local finder=record.chapter_uid and self.store.chapter_variant or self.store.variant
+        if finder then
+            record=(record.chapter_uid and finder(self.store,book_id,record.chapter_uid,kind)
+                or finder(self.store,book_id,kind)) or record
+        end
+    end
+    return record
+end
+
+function Plugin:_reader_translation_context(profile,current)
+    current=current or (self._current_book_record and self:_current_book_record())
+    local record=self:_reader_translation_record(current) or {}
+    local book_id=tostring(current and current.book and (current.book.book_id or current.book.bookId) or "")
+    local function matches(job)
+        local options=job and job.options or {}
+        local id=tostring(job and (job.book_id or (job.book and (job.book.bookId or job.book.book_id))) or "")
+        local target=options.translation_target_file or options.active_document_path
+        return book_id~="" and id==book_id and options.generate_translation_uid~=nil
+            and (not target or tostring(target)==tostring(record.file))
+    end
+    local task
+    local runtime=self._download_runtime
+    if matches(runtime) then
+        task=U.copy(runtime.last_state or {})
+        task.status="active"
+        task.options=runtime.options
+        task.paused=self.download_task and type(self.download_task.is_paused)=="function" and self.download_task:is_paused() or task.paused
+    elseif self.store and type(self.store.download_state)=="function" then
+        local saved=self.store:download_state()
+        if matches(saved) and (saved.status=="active" or saved.status=="failed" or saved.status=="interrupted") then task=saved end
+    end
+    if not task and self.store and type(self.store.download_queue)=="function" then
+        for _,queued in ipairs(self.store:download_queue() or {}) do
+            if matches(queued) then task={status="queued",options=queued.options}; break end
+        end
+    end
+    local displayed=U.copy(record)
+    if displayed.pending_install and not U.file_exists(displayed.pending_file) then displayed.pending_install=nil end
+    local state=require("miuread.translation_ui").describe(profile,displayed,task)
+    if state.kind=="idle" and not task and runtime and self.download_task and self.download_task:busy() then
+        state.primary.label="加入下载队列"
+        state.primary.value="当前任务完成后自动开始"
+        state.more=false
+    end
+    return {current=current,record=record,task=task,state=state,book_id=book_id}
+end
+
+function Plugin:_apply_reader_translation_update()
+    if self._reader_translation_applying then return false end
+    local current=self:_current_book_record()
+    local record=self:_reader_translation_record(current)
+    if not (record and record.pending_install and record.translation_mode and U.file_exists(record.pending_file)) then
+        self:toast("暂无需要应用的译文",2)
+        return false
+    end
+    local ui=self.ui
+    if not (ui and type(ui.reloadDocument)=="function") then
+        self:info("译文已就绪。关闭本书后会自动应用，再次打开即可阅读。")
+        return false
+    end
+    local path,pending=tostring(record.file),tostring(record.pending_file)
+    local book_id=current.book.book_id or current.book.bookId
+    local kind=current.variant or record.variant
+    local attempted,applied,failure,fallback=false,false,nil,false
+    self._reader_translation_applying=true
+    self:status_toast("外文翻译","正在应用译文…",2)
+    -- KOReader's reload callback runs after SaveSettings and document release,
+    -- before reopening. Never replace the file while CRE still holds it.
+    local ok,err=pcall(ui.reloadDocument,ui,function(file)
+        attempted=true
+        if tostring(file)~=path or ui.document~=nil then
+            failure="书籍尚未安全关闭，请稍后重试。"
+            return
+        end
+        local latest=self:_reader_translation_record(current)
+        if not latest or tostring(latest.file)~=path or tostring(latest.pending_file)~=pending or not latest.pending_install then
+            failure="书籍更新状态已变化，请重新打开翻译设置。"
+            return
+        end
+        local updated=U.copy(latest)
+        updated.translation_follow_display=true
+        local installed,result,detail=pcall(self._install_pending_record,self,book_id,kind,updated.chapter_uid,updated)
+        applied=installed and result==true
+        fallback=applied and type(detail)=="table" and detail.translation_display_fallback==true
+        if not applied then failure=tostring(detail or result) end
+        self._reader_translation_cache=nil
+    end,true,function()
+        if applied then self:toast(fallback and "译文已应用，当前格式使用双语阅读" or "译文已应用",fallback and 4 or 2)
+        else
+            logger.warn("[MiuRead][Translation] apply failed",tostring(failure))
+            self:info("暂时无法应用译文，现有阅读记录已保留。请稍后再试。")
+        end
+    end)
+    self._reader_translation_applying=nil
+    if not ok then
+        logger.warn("[MiuRead][Translation] reload failed",tostring(err))
+        self:info(applied and "译文已应用，请重新打开本书继续阅读。" or "暂时无法重新载入本书，译文已保留，可稍后再试。")
+        return false
+    end
+    if not attempted then
+        self:info("译文已就绪。当前版本需关闭本书后再打开以应用译文。")
+        return false
+    end
+    return applied
+end
+
+function Plugin:_reader_translation_download_action(context,mode,batch)
+    local action=context.state.primary.action
+    if action=="apply" then return self:_apply_reader_translation_update() end
+    if action=="manage" then return self:show_download_status() end
+    if action=="resume" then
+        if self.download_task and type(self.download_task.resume)=="function" then
+            if self.download_task:resume("manual") then
+                self:toast("译文已继续下载",2)
+                return true
+            end
+        end
+        return self:show_download_status()
+    end
+    local size=batch or (action=="retry" and context.task and context.task.options and context.task.options.translation_batch_size) or "all"
+    return self:_request_reader_translation_mode(mode,true,size)
+end
+
+function Plugin:_show_reader_translation_only_help(status)
+    status=status or require("miuread.translation").translation_only_status(self:_reader_translation_profile())
+    local message
+    if status.reason=="inspection" then
+        message="暂时无法检查本书的译文格式。原文可以继续阅读，请重新打开本书后再试。"
+    elseif status.reason=="missing" then
+        message="先下载并应用译文，才能检查是否支持仅译文。"
+    elseif status.reason=="unpaired" then
+        message="本书已有译文，但当前格式无法确认原文与译文的逐段对应，因此暂不能只显示译文。\n\n可以使用双语阅读。以后下载并应用的译文若能确认对应关系，此选项会自动可用。"
+    elseif status.reason=="partial" then
+        message="本书有 "..status.blocks.." 段译文，其中 "..status.pairs.." 段能确认与原文对应。\n\n仅译文会隐藏这些已对应的原文。无法对应的部分保留双语，尚未翻译的部分保留原文，避免漏掉内容。"
+    else
+        message="译文已下载并能确认与原文对应，可以使用仅译文。尚未翻译的部分仍会保留原文。"
+    end
+    if status.reason=="inspection" or status.reason=="missing" then
+        message=message.."\n\n只有能够确认对应关系的原文才会隐藏；未翻译或无法对应的部分会继续保留。"
+    end
+    self:info(message)
+    return true
+end
+
 function Plugin:_show_reader_translation_panel(back_callback)
     local profile,err=self:_reader_translation_profile()
     if not profile then
         logger.warn("[MiuRead][Translation] inspection unavailable",tostring(err))
     end
+    local context=self:_reader_translation_context(profile)
+    local only=require("miuread.translation").translation_only_status(profile)
+    if only.reason=="missing" and context.state.kind=="ready" and context.record.translation_only_available==false then
+        only={available=false,reason="unpaired"}
+    end
     ReaderSettingsDialog.show{
         title="外文翻译",
-        subtitle=profile and profile.blocks>0 and "使用微信读书译文；尚无译文的段落保留原文"
-            or "将尝试微信读书官方译文；生成新译文需要付费会员",
+        subtitle=context.state.subtitle,
         on_back=back_callback or function() self:show_reader_control_center("reading") end,
         on_home=function() return self:_reader_home_action("reader surface") end,
-        rows=function()
+        sections=function()
             local rows={}
             local selected=self:_reader_typography_pending_value("translation_mode") or self:_reader_translation_mode()
             for _,mode in ipairs({"original","bilingual","translation"}) do
                 local target=mode
+                local value=selected==target and "已选择" or ""
+                local explain=target=="translation" and not only.available and only.reason~="missing"
+                if target=="translation" then
+                    if explain then value=only.reason=="inspection" and "暂无法确认" or "暂不可用 · 查看原因"
+                    elseif only.reason=="missing" then value=context.state.kind=="ready" and "需应用译文" or "需下载译文"
+                    elseif only.reason=="partial" then value=selected==target and "已选择 · 部分双语" or "部分段落可用" end
+                end
                 rows[#rows+1]={label=require("miuread.translation").label(target),
-                    value=selected==target and "已选择" or "",value_bold=selected==target,
-                    enabled=target~="translation" or not profile or profile.blocks==0 or profile.separable,keep_open=false,callback=function()
-                        self:_request_reader_translation_mode(target)
+                    value=value,value_bold=selected==target,arrow=explain,keep_open=false,callback=function()
+                        if explain then self:_show_reader_translation_only_help(only)
+                        else self:_request_reader_translation_mode(target) end
                     end}
             end
-            if profile and profile.blocks>0 and not profile.separable then
-                rows[#rows+1]={label="部分译文无法单独分离",value="可使用原文或双语",enabled=false}
+            if only.reason=="partial" then
+                rows[#rows+1]={label="未对应的部分保留双语",value="了解原因",arrow=true,callback=function()
+                    self:_show_reader_translation_only_help(only)
+                end}
             end
             rows[#rows+1]={label="译文正文大小",value=tostring(self:_reader_translation_font_scale_value()).."%",
                 enabled=profile~=nil and profile.blocks>0,arrow=true,callback=function()
                     self:_show_reader_translation_font_scale_panel(back_callback)
                 end}
-            return rows
+            local primary=U.copy(context.state.primary)
+            if primary.action then primary.callback=function() self:_reader_translation_download_action(context,selected) end end
+            local downloads={primary}
+            if context.state.more then
+                downloads[#downloads+1]={label="先下载接下来几章",value="较快开始阅读",callback=function()
+                    self:_request_reader_translation_mode(selected,true,"auto")
+                end}
+            end
+            return {{title="阅读方式",rows=rows},{title="离线译文",rows=downloads}}
         end,
     }
     return true
@@ -13791,11 +13981,17 @@ function Plugin:_reader_translation_current_uid()
     return tostring(position and position.chapter_uid or map[1] and (map[1].uid or map[1].chapterUid) or ""),current
 end
 
-function Plugin:_request_reader_translation_mode(mode)
+function Plugin:_request_reader_translation_mode(mode,download_ahead,batch_override)
     mode=require("miuread.translation").normalize_mode(mode)
     local profile=self:_reader_translation_profile()
     local uid,current=self:_reader_translation_current_uid()
-    if mode=="original" then
+    local settings=self.ui and self.ui.doc_settings
+    local previous_mode=settings and settings:readSetting("miuread_translation_mode")
+    if mode=="translation" and not download_ahead and profile and profile.blocks>0 then
+        local status=require("miuread.translation").translation_only_status(profile)
+        if not status.available then self:_show_reader_translation_only_help(status); return false end
+    end
+    if mode=="original" and not download_ahead then
         if profile and profile.blocks>0 then return self:_reader_queue_typography("translation_mode",mode) end
         if self.ui and self.ui.doc_settings then
             self.ui.doc_settings:saveSetting("miuread_translation_mode",mode)
@@ -13805,7 +14001,7 @@ function Plugin:_request_reader_translation_mode(mode)
         return true
     end
     for _,chapter in ipairs(profile and profile.chapters or {}) do
-        if chapter.chapter_uid==uid and chapter.blocks>0 then
+        if not download_ahead and chapter.chapter_uid==uid and chapter.blocks>0 then
             return self:_reader_queue_typography("translation_mode",mode)
         end
     end
@@ -13813,30 +14009,38 @@ function Plugin:_request_reader_translation_mode(mode)
         self:info("暂时无法确定当前章节，原文可以继续阅读。请重新打开本书后再试。")
         return false
     end
+    if not download_ahead and self.ui and self.ui.doc_settings then
+        self.ui.doc_settings:saveSetting("miuread_translation_mode",mode)
+    end
     if self.download_task and self.download_task:busy() then
-        self:info("已有下载任务正在进行，请完成后再生成本章译文。")
-        return false
+        local context=self:_reader_translation_context(profile,current)
+        if context.task then self:toast("译文任务已在后台，可以继续阅读",2); return true end
+        if not self._download_runtime then
+            self:info("已有下载任务正在进行，可在下载中查看进度。")
+            return false
+        end
     end
     local book_id=current.book.book_id or current.book.bookId
     local kind=current.variant or current.record.variant
-    local record=current.record
-    if self.store and kind then
-        local finder=record.chapter_uid and self.store.chapter_variant or self.store.variant
-        if finder then
-            record=(record.chapter_uid and finder(self.store,book_id,record.chapter_uid,kind)
-                or finder(self.store,book_id,kind)) or record
-        end
-    end
+    local record=self:_reader_translation_record(current)
     if record.pending_install and U.file_exists(record.pending_file) then
         local pending=require("miuread.translation").inspect(record.pending_file)
+        if not download_ahead and mode=="translation" and pending then
+            local status=require("miuread.translation").translation_only_status(pending)
+            if not status.available then
+                if settings then settings:saveSetting("miuread_translation_mode",previous_mode) end
+                self:_show_reader_translation_only_help(status)
+                return false
+            end
+        end
         for _,chapter in ipairs(pending and pending.chapters or {}) do
             if tostring(pending.book_id)==tostring(book_id) and chapter.chapter_uid==uid and chapter.blocks>0 then
                 local updated=U.copy(record)
                 updated.translation_mode=mode
+                updated.translation_follow_display=true
                 if updated.chapter_uid then self.store:save_chapter_variant(book_id,updated.chapter_uid,kind,updated)
                 else self.store:save_variant(book_id,kind,updated) end
-                self:info("当前章译文已生成，正在等待安装。请关闭本书，等待“新版本已安装”提示后重新打开，显示“"
-                    ..require("miuread.translation").label(mode).."”。")
+                self:status_toast("外文翻译","译文已就绪，可在翻译设置中应用",3)
                 return true
             end
         end
@@ -13846,18 +14050,41 @@ function Plugin:_request_reader_translation_mode(mode)
     local options=BookIntegrity.repair_options(record)
     options.generate_translation_uid=uid
     options.translation_mode=mode
-    local book={bookId=current.book.book_id or current.book.bookId,title=current.book.title,author=current.book.author,cover=current.book.cover}
-    self:status_toast("外文翻译","正在检查会员状态并申请生成当前章译文",3)
-    return self:download(book,options,false,function(record)
+    options.translation_batch_size=require("miuread.translation_generation").normalize_batch_size(batch_override)
+    options.translation_follow_display=true
+    options.translation_target_file=record.file
+    options.translation_cached_uids={}
+    for _,chapter in ipairs(profile and profile.chapters or {}) do
+        if chapter.blocks>0 then options.translation_cached_uids[tostring(chapter.chapter_uid)]=true end
+    end
+    local local_chapters=record.chapter_map or {}
+    if #local_chapters>0 then
+        local ok,plan=pcall(require("miuread.translation_generation").plan,local_chapters,uid,{
+            batch_size=options.translation_batch_size,cached_uids=options.translation_cached_uids})
+        if not ok then self:info(tostring(plan)); return false end
+        if not plan.required_uid then self:info("当前下载范围没有可翻译的正文章节。"); return false end
+        if #plan.pending==0 then
+            self:toast("译文已下载，可离线阅读",2)
+            return self:_reader_queue_typography("translation_mode",mode)
+        end
+    end
+    local book={bookId=current.book.book_id or current.book.bookId,title=current.book.title,author=current.book.author,
+        cover=current.book.cover,version=current.book.version}
+    return self:download(book,options,false,function(record,was_background)
         if not record then return end
         self._reader_translation_cache=nil
-        if record.pending_install then
-            self:info("当前章译文已生成。请关闭本书，等待“新版本已安装”提示后重新打开，显示“"
-                ..require("miuread.translation").label(mode).."”。")
-        else
-            self:info("当前章译文已更新，重新打开本书即可显示“"..require("miuread.translation").label(mode).."”。")
+        local summary=record.translation_batch_summary
+        local message="译文已下载"
+        if summary and summary.available<summary.total then
+            message="已下载 "..summary.available.." / "..summary.total.." 章译文，剩余章节可稍后继续"
         end
-    end,false)
+        if record.pending_install then
+            message=message.."，可在翻译设置中应用"
+        else
+            message=message.."，可离线阅读"
+        end
+        self:status_toast("外文翻译",message,4)
+    end,true)
 end
 
 function Plugin:_install_marks_getCssText_wrapper(st)
@@ -17153,14 +17380,20 @@ function Plugin:_complete_reader_close(generation,reason)
     self:_set_foreground("home_pending")
 
     local shown=false
+    local home_plugin=self
     if HomeView.is_shown() then
-        local recent_owner=home_owner() or self
+        home_plugin=home_owner() or self
+        home_plugin._desktop_frozen=false
+        home_plugin._home_background_stopped_for_reader=false
+        home_plugin:_home_clear_lockscreen_visual_hold("reader close completed")
+        logger.info("[MiuRead][ReaderClose] retained home owner thawed","separate_instance=",tostring(home_plugin~=self))
+        local recent_owner=home_plugin
         if recent_owner and type(recent_owner._home_apply_recent_snapshot_to_home)=="function" then
             local ok_recent,recent_err=pcall(recent_owner._home_apply_recent_snapshot_to_home,recent_owner,"reader_close_first_frame")
             if not ok_recent then logger.warn("[MiuRead][Recent] first-frame apply failed",tostring(recent_err)) end
         end
         HomeView.unpark(true,{
-            on_interaction=function(first,kind) self:_home_note_interaction(first,kind) end,
+            on_interaction=function(first,kind) home_plugin:_home_note_interaction(first,kind) end,
         })
         HomeView.raise(true)
         UIManager:setDirty(HomeView.current(),"ui")
@@ -17189,8 +17422,8 @@ function Plugin:_complete_reader_close(generation,reason)
     self._home_book_open_lock=nil
     self:_close_reader_recovery_surface()
     self:_release_reader_transition_guard("home restored after stable close")
-    self:_home_enter_post_reader_priority_window(4.0,"stable reader close")
-    self:_resume_home_preferences_flush(4.6)
+    home_plugin:_home_enter_post_reader_priority_window(4.0,"stable reader close")
+    home_plugin:_resume_home_preferences_flush(4.6)
     self:_finish_page_transition(.18,"home restored after stable close")
     -- Queue/install/download maintenance must not race the first usable Home
     -- surface. Let the interaction quiet window release before post-reader work.
@@ -17732,12 +17965,16 @@ function Plugin:_restore_home_after_reader_close(attempt,generation)
         -- snapshot before the first Home repaint, then restore the parked surface
         -- with one bounded UI repaint instead of rebuilding/full-refreshing.
         local recent_owner=home_owner() or self
+        recent_owner._desktop_frozen=false
+        recent_owner._home_background_stopped_for_reader=false
+        recent_owner:_home_clear_lockscreen_visual_hold("home revealed after reader close")
+        logger.info("[MiuRead][ReaderClose] retained home owner thawed","separate_instance=",tostring(recent_owner~=self))
         if recent_owner and type(recent_owner._home_apply_recent_snapshot_to_home)=="function" then
             local ok_recent,recent_err=pcall(recent_owner._home_apply_recent_snapshot_to_home,recent_owner,"home_reveal_first_frame")
             if not ok_recent then logger.warn("[MiuRead][Recent] reveal apply failed",tostring(recent_err)) end
         end
         HomeView.unpark(true,{
-            on_interaction=function(first,kind) self:_home_note_interaction(first,kind) end,
+            on_interaction=function(first,kind) recent_owner:_home_note_interaction(first,kind) end,
         })
         HomeView.raise(true)
         UIManager:setDirty(HomeView.current(),"ui")
@@ -17747,10 +17984,11 @@ function Plugin:_restore_home_after_reader_close(attempt,generation)
         persist_home_session()
         self:_set_foreground("home")
         self._home_book_open_lock=nil
-        self:_home_schedule_clock()
+        recent_owner:_home_schedule_clock()
         self:_close_reader_recovery_surface()
         self:_release_reader_transition_guard("home already visible")
-        self:_home_enter_post_reader_priority_window(4.0,"home revealed")
+        recent_owner:_home_enter_post_reader_priority_window(4.0,"home revealed")
+        recent_owner:_resume_home_preferences_flush(4.6)
         self:_finish_page_transition(.18,"home revealed")
         self:_resume_pending_post_reader_work("home revealed",2.0)
         HOME_SESSION.home_restore_active=false
@@ -18243,7 +18481,13 @@ function Plugin:search(q)
             self:info(self:_friendly_remote_error(result and result.error or "未知错误","搜索"))
             return
         end
-        local data=result.value or {}
+        local payload=result.value or {}
+        if payload.auth_changed then self:_apply_interactive_auth{auth=payload.auth,changed=true} end
+        if payload.request_ok==false then
+            self:info(self:_friendly_remote_error(payload.error,"搜索"))
+            return
+        end
+        local data=payload.value or payload
         local items={}
         local function add(r)
             local b=normalize(r)
@@ -18271,16 +18515,17 @@ function Plugin:search(q)
     end
 
     local auth=U.copy(self.store:auth())
+    local api_mode=require("miuread.api_transport").preference(self.store)
+    local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     local started,err=self.search_async:run("book_search",function()
         local HttpChild=require("miuread.http")
         local ApiChild=require("miuread.api")
-        local UtilChild=require("miuread.util")
-        local child_store={
-            auth=function() return UtilChild.copy(auth) end,
-            save_auth=function() end,
-        }
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local api=ApiChild:new(HttpChild:new(child_store),child_store)
-        return api:search(q,0,40)
+        local ok,value=pcall(api.search,api,q,0,40)
+        local current,changed=child_store:snapshot()
+        return {request_ok=ok,value=ok and value or nil,error=not ok and tostring(value) or nil,
+            auth=current,auth_changed=changed}
     end,finish,32)
     if not started then
         logger.warn("[MiuRead][Search] async unavailable; falling back",tostring(err or "worker busy"))
@@ -18646,12 +18891,13 @@ function Plugin:book_details(b)
     local id=tostring(b.bookId or b.book_id or "")
     if id=="" then self:info("当前书籍缺少可查询的图书编号。") return false end
     local auth=U.copy(self.store:auth())
+    local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     local context=self:_interactive_network_context()
     return self:_run_interactive_network("book-details:"..id,"details",function()
         local HttpChild=require("miuread.http")
         local ApiChild=require("miuread.api")
-        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local child_api=ApiChild:new(HttpChild:new(child_store),child_store)
         local request_ok,detail=pcall(child_api.book,child_api,id)
         local child_auth,auth_changed=child_store:snapshot()
@@ -18926,13 +19172,13 @@ function Plugin:_finish_download_runtime(runtime,result)
             return
         end
         local auth_required=Http.is_auth_error(err)
-        local rate_limited=Http.is_rate_limit_error(err)
+        local rate_limited=(result and result.error_kind=="rate_limit") or Http.is_rate_limit_error(err)
         local network_failed=Http.is_network_error and Http.is_network_error(err)
         local content_pending=tostring(err):find("[MiuReadAnnotationPending]",1,true)~=nil
         local image_missing=tostring(err):find("[MiuReadImageMissing]",1,true)~=nil
             or tostring(err):find("[MiuReadImageExternal]",1,true)~=nil
         local validation_failed=tostring(err):find("EPUB 完整性验证失败",1,true)~=nil
-        local wait_seconds=tonumber(tostring(err):match("wait_seconds=(%d+)"))
+        local wait_seconds=tonumber(result and result.wait_seconds) or tonumber(tostring(err):match("wait_seconds=(%d+)"))
         if auth_required then self:_mark_auth_problem("download",err,true) end
         self:_write_download_state("failed",{
             title=b.title,book_id=b.bookId,book=U.copy(b),options=U.copy(opt),
@@ -18955,6 +19201,7 @@ function Plugin:_finish_download_runtime(runtime,result)
             first="微信读书登录凭证暂时未能自动恢复。下载断点已经保留，可稍后继续；若账号状态检查也失败，再重新扫码。"
         elseif rate_limited then
             first="微信读书暂时限制了请求频率。插件已停止继续请求，正文和断点均已保留，请稍后继续下载。"
+            if wait_seconds and wait_seconds>0 then first=first.."\n约 "..tostring(math.ceil(wait_seconds/60)).." 分钟后可重试。" end
         elseif network_failed then
             first="网络连接暂时中断。已完成章节和下载断点均已保留，网络恢复后可继续下载。"
         elseif image_missing then
@@ -19371,6 +19618,11 @@ function Plugin:_merge_download_result(result,book,opt)
             end
             merged_cookies=Cookies.sanitize(merged_cookies)
             current.cookies=merged_cookies
+            -- The child may renew Native credentials during a download. The
+            -- same-login/revision fence above also protects revocation or a
+            -- new QR authorization in the parent while that child was running.
+            local native=require("miuread.shelf_client").credentials(result.auth)
+            if native then current.native_shelf=native end
             if tostring(result.auth.api_key or "")~="" then current.api_key=result.auth.api_key end
             if child_ticket_time>=current_ticket_time then
                 if tostring(result.auth.wr_ticket or "")~="" then current.wr_ticket=result.auth.wr_ticket end
@@ -19528,11 +19780,13 @@ function Plugin:show_download_status()
         return
     end
     local title=tostring(state.title or "未命名")
+    local translation_update=state.status=="pending_install" and state.options and state.options.generate_translation_uid~=nil
     local lines={}
     if state.status=="completed" then lines[#lines+1]="下载完成"
     elseif state.status=="annotation_pending" then lines[#lines+1]="正文已生成，划线与想法待补全"
     elseif state.status=="pending_install" then
-        if state.annotation_pending==true then lines[#lines+1]="新版本已下载完成"
+        if translation_update then lines[#lines+1]="译文已就绪"
+        elseif state.annotation_pending==true then lines[#lines+1]="新版本已下载完成"
         elseif state.annotation_fallback==true then lines[#lines+1]="新版本已下载完成"
         else lines[#lines+1]="新版本已下载完成" end
     elseif state.status=="failed" and state.auth_required==true then lines[#lines+1]="等待登录恢复"
@@ -19544,10 +19798,26 @@ function Plugin:show_download_status()
     else lines[#lines+1]=tostring(state.status) end
     lines[#lines+1]="《"..title.."》"
     if state.current and state.total and tonumber(state.total)>0 then lines[#lines+1]="章节 "..tostring(state.current).." / "..tostring(state.total) end
-    if state.error and state.error~="" then lines[#lines+1]="\n"..U.first_line(state.error) end
-    if state.status=="pending_install" then lines[#lines+1]="\n关闭当前书籍后会自动安装新版本。" end
+    if state.error and state.error~="" then
+        local friendly=state.options and state.options.generate_translation_uid and require("miuread.translation_generation").friendly_error(state.error)
+        lines[#lines+1]="\n"..(friendly or U.first_line(state.error))
+    end
+    if state.status=="pending_install" then
+        lines[#lines+1]=translation_update and "\n应用后保留当前位置与阅读记录。" or "\n关闭当前书籍后会自动安装新版本。"
+    end
     local buttons={}
     local dialog
+    if translation_update and state.file and U.file_exists(state.file) then
+        if tostring(self:_current_document_path() or "")==tostring(state.file) then
+            buttons[#buttons+1]={{text="应用译文",callback=function()
+                UIManager:close(dialog); self:_apply_reader_translation_update()
+            end}}
+        else
+            buttons[#buttons+1]={{text="打开本书",callback=function()
+                UIManager:close(dialog); self:open_file(state.file)
+            end}}
+        end
+    end
     if (state.status=="completed" or state.status=="annotation_pending") and state.file and U.file_exists(state.file) then
         buttons[#buttons+1]={{text="立即阅读",callback=function()
             UIManager:close(dialog)
@@ -19594,13 +19864,26 @@ function Plugin:_install_pending_record(book_id,kind,chapter_uid,record)
     if pending=="" or target=="" or not U.file_exists(pending) then return false,"等待安装文件不存在" end
     local validation={book_id=book_id,variant=record.variant or kind,chapters=record.chapter_map,
         previous_chapters=record.previous_chapter_map}
-    local translation_settings,previous_settings,remapped_settings
+    local translation_settings,previous_settings,remapped_settings,display_fallback
     if record.translation_mode then
         local DocSettings=require("docsettings")
         translation_settings=DocSettings:open(target)
         previous_settings=U.copy(translation_settings.data)
+        local display_mode=record.translation_mode
+        if record.translation_follow_display and previous_settings.miuread_translation_mode~=nil then
+            display_mode=require("miuread.translation").normalize_mode(previous_settings.miuread_translation_mode)
+        end
+        if display_mode=="translation" then
+            local available=record.translation_only_available
+            if available==nil then
+                local inspected,profile=pcall(require("miuread.translation").inspect,pending)
+                if not inspected or not profile then return false,"暂时无法检查译文格式，原书已保留。" end
+                available=require("miuread.translation").translation_only_status(profile).available
+            end
+            if not available then display_mode="bilingual"; display_fallback=true end
+        end
         local good,remapped,remap_error=pcall(require("miuread.translation").rebase_settings,
-            target,pending,previous_settings,record.translation_mode)
+            target,pending,previous_settings,display_mode)
         if not good or not remapped then
             local reason=tostring(remap_error or remapped)
             logger.warn("[MiuRead][Translation] native positions could not be migrated",reason)
@@ -19631,13 +19914,17 @@ function Plugin:_install_pending_record(book_id,kind,chapter_uid,record)
     updated.pending_install=nil
     updated.previous_chapter_map=nil
     updated.translation_mode=nil
+    updated.translation_follow_display=nil
+    updated.translation_only_available=nil
     updated.translation_refresh_versions=nil
     updated.installed_at=os.time()
     updated.file_size=U.file_size(target)
     if chapter_uid then self.store:save_chapter_variant(book_id,chapter_uid,kind,updated)
     else self.store:save_variant(book_id,kind,updated) end
     self.store:remove_pending_install(book_id,kind,chapter_uid)
-    return true,updated
+    local result=U.copy(updated)
+    result.translation_display_fallback=display_fallback or nil
+    return true,result
 end
 
 function Plugin:_install_pending_downloads(notify)
@@ -22217,7 +22504,7 @@ function Plugin:_annotation_issue_actions(item)
 end
 
 function Plugin:show_annotation_sync_issues(book_id)
-    self.store:reload()
+    -- Failure rows come from annotation DBs; a full settings reload is not needed.
     local failures
     if book_id and tostring(book_id)~="" then
         failures=LocalAnnotationDatabase.failures(self.store,tostring(book_id),100) or {}
@@ -22307,8 +22594,11 @@ function Plugin:_persisted_sessions()
 end
 
 function Plugin:_persisted_library()
-    if self.store and type(self.store.read_persisted)=="function" then
-        local library=self.store:read_persisted("library")
+    -- Callers only look up records and read titles (copying a record before
+    -- changing it), so share one copy per file state instead of deep-copying
+    -- every catalog on each call.
+    if self.store and type(self.store.read_persisted_shared)=="function" then
+        local library=self.store:read_persisted_shared("library")
         if type(library)=="table" then return library end
     end
     return self.store:library() or {}
@@ -23835,13 +24125,21 @@ function Plugin:_sync_home_pending(options)
     local function finish_all()
         self:_invalidate_annotation_sync_summary()
         self:_invalidate_home_sync_status()
-        UIManager:scheduleIn(.55,function()
+        local settle_attempts=0
+        local function settle()
             local summary=self:_home_sync_summary(true)
+            if summary.checking==true and settle_attempts<20 then
+                settle_attempts=settle_attempts+1
+                UIManager:scheduleIn(.5,settle)
+                return
+            end
             local remaining=tonumber(summary.failed_total or 0) or 0
             local progress_items=self:_progress_sync_issue_items()
             local result="failed"
             local result_reason="remaining_items"
-            if remaining<=0 then
+            if summary.checking==true then
+                result="pending"; result_reason="annotation_summary_pending"
+            elseif remaining<=0 then
                 result="success"; result_reason="all_verified"
             elseif #progress_items>0 then
                 local conflict=false
@@ -23855,9 +24153,12 @@ function Plugin:_sync_home_pending(options)
             end
             logger.info("[MiuRead][SyncAction] finish",
                 "source=",source,"result=",result,"reason=",result_reason,
-                "remaining=",tostring(remaining),"progress=",tostring(#progress_items))
+                "remaining=",tostring(remaining),"checking=",tostring(summary.checking==true),
+                "progress=",tostring(#progress_items))
             if not silent then
-                if remaining<=0 then
+                if summary.checking==true then
+                    self:status_toast("同步状态待确认","批注统计仍在检查中，请稍后查看同步状态",4)
+                elseif remaining<=0 then
                     self:status_toast("同步完成","所有可验证项目均已同步",3)
                 elseif #progress_items>0 then
                     if result=="conflict" then
@@ -23870,7 +24171,8 @@ function Plugin:_sync_home_pending(options)
                 end
             end
             release_manual()
-        end)
+        end
+        UIManager:scheduleIn(.55,settle)
     end
 
     local function phase_annotations()
@@ -25883,17 +26185,21 @@ function Plugin:show_sync_status(detail)
         local h_count=tonumber(pending.highlight or 0) or 0
         local t_count=tonumber(pending.thought or 0) or 0
         local b_count=tonumber(pending.bookmark or 0) or 0
-        rows[#rows+1]={text="本地划线",post_text=failed_text(h_count,"已同步"),enabled=h_count>0,
+        local annotation_checking=pending.checking==true
+        local function annotation_text(count)
+            return annotation_checking and "检查中" or failed_text(count,"已同步")
+        end
+        rows[#rows+1]={text="本地划线",post_text=annotation_text(h_count),enabled=h_count>0,
             callback=h_count>0 and function()
                 if (tonumber(pending.annotation_action_highlight or 0) or 0)>0 then self:show_annotation_sync_issues()
                 else self:_sync_home_pending() end
             end or nil}
-        rows[#rows+1]={text="本地想法",post_text=failed_text(t_count,"已同步"),enabled=t_count>0,
+        rows[#rows+1]={text="本地想法",post_text=annotation_text(t_count),enabled=t_count>0,
             callback=t_count>0 and function()
                 if (tonumber(pending.annotation_action_thought or 0) or 0)>0 then self:show_annotation_sync_issues()
                 else self:_sync_home_pending() end
             end or nil}
-        if b_count>0 then rows[#rows+1]={text="本地书签",post_text=failed_text(b_count,"已同步"),enabled=true,
+        if b_count>0 then rows[#rows+1]={text="本地书签",post_text=annotation_text(b_count),enabled=true,
             callback=function()
                 if (tonumber(pending.annotation_action_bookmark or 0) or 0)>0 then self:show_annotation_sync_issues()
                 else self:_sync_home_pending() end
@@ -27010,6 +27316,23 @@ function Plugin:toggle_memory_mode()
         ok_text="开启",
         ok_callback=function() self:_set_memory_mode(true) end,
     })
+end
+
+function Plugin:api_transport_menu()
+    local function set(mode)
+        local prefs=self.store:preferences()
+        prefs.api_transport=mode
+        self.store:save_preferences(prefs)
+        self:toast("接口通道设置将在下次操作时生效")
+    end
+    return {
+        {text="自动（E-Ink 优先）",post_text="书架、书城与下载优先 E-Ink",checked_func=function()
+            return require("miuread.api_transport").preference(self.store)~="web"
+        end,callback=function() set("auto") end},
+        {text="Web",post_text="使用 Web 后端",checked_func=function()
+            return require("miuread.api_transport").preference(self.store)=="web"
+        end,callback=function() set("web") end},
+    }
 end
 
 function Plugin:download_settings_menu()
@@ -28452,6 +28775,8 @@ function Plugin:_toggle_online_review_like(request,callback)
     end
 
     local auth=U.copy(self.store:auth())
+
+    local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
     local known_is_liked=request.is_liked
     if type(known_is_liked)~="boolean" then known_is_liked=nil end
@@ -28462,10 +28787,10 @@ function Plugin:_toggle_online_review_like(request,callback)
         local HttpChild=require("miuread.http")
         local ApiChild=require("miuread.api")
         local ReaderChild=require("miuread.reader")
-        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
         local child_http=HttpChild:new(child_store)
         local child_reader=ReaderChild:new(child_http,child_store)
-        local child_api=ApiChild:new(child_http,child_store,child_reader)
+        local child_api=ApiChild:new(child_http,child_store,child_reader):scope()
         local is_liked=known_is_liked
         local likes=cached_likes
         if is_liked==nil then

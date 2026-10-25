@@ -132,6 +132,15 @@ local function validate_anchor_source(coord_html, anchor)
     return map
 end
 
+-- Title-only placeholder written for chapters a download saw as empty. When
+-- the local book has real text there (re-downloaded later), it is not the
+-- chapter's source and must not be trusted just because the path matches.
+local function stale_structure_source(coord_html, anchor)
+    if not tostring(coord_html or ""):find('data-miuread-structure="1"', 1, true) then return false end
+    if U.trim(tostring(type(anchor) == "table" and anchor.anchor_text or "")) == "" then return false end
+    return validate_anchor_source(coord_html, anchor) == nil
+end
+
 local function fetch_coord_html(reader, record, anchor, options)
     options = type(options) == "table" and options or {}
     if not (reader and type(reader.chapter) == "function") then
@@ -151,7 +160,11 @@ local function fetch_coord_html(reader, record, anchor, options)
     if not force_refresh then
         for _, path in ipairs(paths) do
             local cached = read_cached(path)
-            if cached then
+            if cached and stale_structure_source(cached, anchor) then
+                logger.warn("[MiuRead][ProgressSourceDiagnostic]",
+                    "stage=cache_skip", "book=", tostring(book.book_id or book.bookId or ""),
+                    "chapter=", uid, "reason=stale_structure_placeholder", "source_bytes=", tostring(#cached))
+            elseif cached then
                 return cached, true, nil, {kind="exact", path=path, version=version}
             end
         end
@@ -234,6 +247,14 @@ local function fetch_coord_html(reader, record, anchor, options)
         "source_bytes=", tostring(#coord_html), "source_kind=network_refresh",
         "reader_context=fresh")
     local write_path = paths[1]
+    if stale_structure_source(coord_html, anchor) then
+        -- Keep a better cached generation instead of persisting an empty page
+        -- that does not contain the local text.
+        logger.warn("[MiuRead][ProgressSourceDiagnostic]",
+            "stage=network_fetch", "book=", book_arg.bookId, "chapter=", uid,
+            "cache_write=skipped", "reason=stale_structure_placeholder")
+        write_path = nil
+    end
     if write_path then pcall(U.atomic_write, write_path, coord_html, true) end
     return coord_html, false, nil, {kind="network_refresh", path=write_path, version=version}
 end
@@ -502,9 +523,55 @@ local function neighbour_retryable(error_value)
     return err == "not_found" or err == "ambiguous"
 end
 
+-- A chapter whose local text is only its title has a single position: its
+-- start. Web Reader chapter offsets start at 0, so this is exact.
+local function title_only_position(anchor)
+    local uid = tostring(anchor.chapter_uid or "")
+    if uid == "" then return nil, "chapter_uid_missing" end
+    local words = math.max(0, tonumber(anchor.chapter_word_count) or 0)
+    local total_words = math.max(0, tonumber(anchor.total_word_count) or 0)
+    local words_before = math.max(0, tonumber(anchor.words_before) or 0)
+    local progress = total_words > 0 and U.clamp((words_before / total_words) * 100, 0, 100) or nil
+    return {
+        progress = progress,
+        display_progress = progress,
+        display_progress_quality = "precise_source_mapped",
+        chapter_uid = uid,
+        chapter_index = tonumber(anchor.chapter_index) or 0,
+        offset = 0,
+        chapter_offset = 0,
+        chapter_word_count = words,
+        total_word_count = total_words,
+        words_before = words_before,
+        chapter_percent = 0,
+        chapter_ratio = 0,
+        summary = tostring(anchor.chapter_title or ""),
+        safe = true,
+        coordinate_safe = true,
+        whole_progress_available = progress ~= nil,
+        catalog_pending = progress == nil,
+        precise = true,
+        standalone = anchor.standalone == true,
+        partial_source = anchor.partial_source == true,
+        source = "weread_title_only_chapter_start",
+        position_basis = "wr_data_co",
+        offset_basis = "wr_data_co",
+        native_offset = true,
+        confidence = "native",
+        source_xpointer = tostring(anchor.xpointer or ""),
+        source_wr_co = 0,
+        source_wr_co_basis = "chapter_start",
+        precision_anchor = "title_only_chapter",
+        precision_anchor_chars = 0,
+        precision_anchor_candidates = 0,
+        precision_anchor_recovered = false,
+    }
+end
+
 function M.locate(reader, record, anchor, options)
     options = type(options) == "table" and options or {}
     anchor = type(anchor) == "table" and anchor or {}
+    if anchor.chapter_title_only == true then return title_only_position(anchor) end
 
     local primary, primary_error = locate_single(reader, record, anchor, options)
     if primary then return primary end

@@ -186,7 +186,10 @@ function Cookies.absorb(jar, raw, opt)
                 local lower = line:lower()
                 local deletion = v == "" or lower:find("max%-age%s*=%s*0") ~= nil
                     or lower:find("expires%s*=%s*thu,%s*01%s+jan%s+1970") ~= nil
-                if deletion then
+                if protect_core and k == "wr_fp" and jar.wr_fp and jar.wr_fp ~= "" then
+                    -- Web device identity is installation-scoped. A routine
+                    -- response must not replace or clear it during renewal.
+                elseif deletion then
                     -- The compatibility path ignores browser deletion directives
                     -- for core login credentials. Preserve that behavior so an
                     -- unrelated response cannot silently invalidate this device.
