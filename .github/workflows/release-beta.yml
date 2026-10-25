@@ -337,6 +337,12 @@ jobs:
           lua5.1 tools/test_long_book_anchor.lua
           lua5.1 tools/test_terminal_progress_guard.lua
           lua5.1 tools/test_finished_resolution.lua
+          # Resource/admission and upload-readback invariants must stay fixed
+          # across future PRs; run in both supported Lua engines.
+          lua5.1 tools/test_download_resource_admission.lua
+          luajit tools/test_download_resource_admission.lua
+          lua5.1 tools/test_beta3_progress_sync.lua
+          luajit tools/test_beta3_progress_sync.lua
           lua5.1 tools/test_store_repair.lua
           lua5.1 tools/test_cloud_freshness_contract.lua
           lua5.1 tools/test_beta10_translation_dependency_contract.lua

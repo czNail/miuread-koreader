@@ -6,6 +6,12 @@ package.path=root..'miuread.koplugin/?.lua;'..root..'miuread.koplugin/?/init.lua
 local Admission=require('miuread.download_admission')
 local config={HEAVY_DOWNLOAD_START_MIN_KB=98304,HEAVY_DOWNLOAD_RESUME_MIN_KB=98304,
     DOWNLOAD_RESOURCE_RETRY_FIRST_SECONDS=5,DOWNLOAD_RESOURCE_RETRY_MAX_SECONDS=60}
+local function compile(code, name, env)
+    if _VERSION=='Lua 5.1' then
+        local chunk=assert(loadstring(code,name));setfenv(chunk,env);return chunk
+    end
+    return assert(load(code,name,'t',env))
+end
 local count=0
 local function test(name,callback)
     local ok,err=pcall(callback)
@@ -46,13 +52,18 @@ local sandbox={Plugin={},Config=config,
     HOME_EXITING=false,math=math,tonumber=tonumber,tostring=tostring,type=type,os=os,
 }
 setmetatable(sandbox,{__index=_G_ENV})
-assert(load(snippet,'@download_resource_methods','t',sandbox))()
+compile(snippet,'@download_resource_methods',sandbox)()
 local function new_env()
     used_mem=85*1024;normal=true;background=nil
     scheduled={};events={}
     pending={{key='x',book={bookId='x',title='test'},options={},open_after=false,wait_reason='low_memory'}}
     local store={}
     function store:download_queue() return pending end
+    function store:auth() return {account={vid='account1'}} end
+    function store:enqueue_download(job)
+        if #pending>0 then return nil,'full' end
+        pending={job};return 1
+    end
     function store:download_state() return {status='idle'} end
     function store:save_download_queue(q) pending=q end
     function store:dequeue_download()
@@ -69,6 +80,7 @@ local function new_env()
     function plugin:_active_reader_ui() return nil end
     function plugin:download(book,options,open_after)
         events[#events+1]='start:'..book.bookId
+        self._download_runtime={book=book}
     end
     function plugin:_queue_download(book,opt,open_after,extra)
         pending={{book=book,options=opt,open_after=open_after,wait_reason=extra.reason}}
@@ -96,8 +108,8 @@ test('memory recovers and queued download starts exactly once',function()
     local p=new_env()
     p:_start_next_queued_download()
     used_mem=110*1024
-    run_next() -- retry: dequeue and schedule launch
-    eq(#pending,0);eq(#scheduled,1)
+    run_next() -- retry: leave queued job durable until launch callback
+    eq(#pending,1);eq(#scheduled,1)
     run_next()
     eq(#events,1);eq(events[1],'start:x')
 end)
@@ -137,7 +149,38 @@ test('fork race requeues instead of starting after lifecycle change',function()
     normal=false
     run_next()
     eq(#pending,1)
-    eq(#events,1);eq(events[1],'queued:low_memory')
+    eq(#events,0) -- recheck lifecycle; do not start or dequeue
+    eq(#pending,1)
+end)
+test('removal after retry admission cancels already scheduled launch',function()
+    local p=new_env();used_mem=110*1024
+    eq(p:_start_next_queued_download(),true)
+    eq(#pending,1)
+    pending={} -- user clears the queue during the 150ms launch delay
+    run_next()
+    eq(#events,0);eq(#pending,0)
+end)
+test('network loss after admission cannot dequeue the waiting job',function()
+    local p=new_env();used_mem=110*1024
+    eq(p:_start_next_queued_download(),true)
+    function p:_network_radio_hint() return false end
+    run_next()
+    eq(#events,0);eq(#pending,1)
+end)
+test('account switch prevents queued job launch',function()
+    local p=new_env();used_mem=110*1024
+    pending[1].account_vid='account2'
+    eq(p:_start_next_queued_download(),true)
+    run_next()
+    eq(#events,0);eq(#pending,1)
+end)
+test('task replacement invalidates delayed launch',function()
+    local p=new_env();used_mem=110*1024
+    pending[1].queue_nonce='old'
+    eq(p:_start_next_queued_download(),true)
+    pending[1]={key='new',queue_nonce='new',book={bookId='new'},options={},wait_reason='low_memory'}
+    run_next()
+    eq(#events,0);eq(#pending,1)
 end)
 -- The scheduler may release a stale lease only when its worker is
 -- independently confirmed absent, never just because 300 seconds elapsed.
@@ -149,7 +192,7 @@ local sched_methods=schedule_source:sub(s1,s2-1)
 local sched_env={Scheduler={},Config={BACKGROUND_LEASE_TIMEOUT_SECONDS=300},
     logger=sandbox.logger,monotonic=function() return 1000 end,
     tostring=tostring,tonumber=tonumber,math=math,pcall=pcall,type=type}
-assert(load(sched_methods,'@background_lease_probe','t',sched_env))()
+compile(sched_methods,'@background_lease_probe',sched_env)()
 test('long lived background worker keeps its lease',function()
     local s=setmetatable({active={key='home_cover',started=100},liveness_probe=function() return true end},{__index=sched_env.Scheduler})
     s:_clear_stale_active();assert(s.active);s:_clear_stale_active();assert(s.active)
@@ -172,7 +215,7 @@ local env={DownloadTask={},RuntimePressure=sandbox.RuntimePressure,
     Config=config,DownloadAdmission=Admission,logger=sandbox.logger,
     serializable_copy=function(x) return x end,os={remove=function() end},
     tonumber=tonumber,type=type,tostring=tostring,math=math}
-assert(load(download_methods,'@resume_fork_admission','t',env))()
+compile(download_methods,'@resume_fork_admission',env)()
 test('hibernated task cannot fork at 85 MiB',function()
     used_mem=85*1024
     local h={book={bookId='x'},options={},restart_count=0}
@@ -199,7 +242,7 @@ local store_snippet=store_source:sub(e1,e2-1)
 local store_env={Store={},U={copy=function(t)
     local c={};for k,v in pairs(t) do c[k]=v end;return c
 end},logger=sandbox.logger,table=table,tostring=tostring,tonumber=tonumber}
-assert(load(store_snippet,'@durable_queue','t',store_env))()
+compile(store_snippet,'@durable_queue',store_env)()
 local function queue_store()
     local disk={};local can_save=true
     local store=setmetatable({}, {__index=store_env.Store})

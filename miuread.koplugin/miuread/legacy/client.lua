@@ -183,6 +183,20 @@ function Client:get_agent_progress(book_id)
     return result
 end
 
+function Client:get_web_progress(book_id)
+    -- Use the exact same read source as post-upload verification.  A time
+    -- compatibility report is a full position-bearing Web POST; Agent wire
+    -- coordinates must never be echoed blindly into it.
+    local url="https://weread.qq.com/web/book/getProgress?bookId="
+        .. WeRead.e(tostring(book_id or "")) .. "&_=" .. tostring(os.time())
+        .. tostring(math.random(1000,9999))
+    local body=self:get_text(url,{
+        accept="application/json, text/plain, */*",
+        referer=WeRead.reader_url(book_id),
+    })
+    return self:json_decode(body)
+end
+
 function Client:get_progress(book_id)
     local api_key = self.settings:get("api_key", "")
     if api_key == "" then error("WeRead official API key is not configured") end

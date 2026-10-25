@@ -501,14 +501,22 @@ local function normalize_cloud_anchor(anchor, book)
 end
 
 local function refresh_remote_anchor(client, book_id, book)
-    local ok, result = pcall(function() return client:get_progress(book_id) end)
+    -- The read-time compatibility write includes ci/co/pr. It must reflect a
+    -- verified *Web* position; an Agent coordinate may be structurally valid
+    -- while pointing somewhere else (including offset 0).
+    local ok, result = pcall(function() return client:get_web_progress(book_id) end)
     if not ok or type(result) ~= "table" then return false end
-    local remote = type(result.book) == "table" and result.book or result
+    local remote = type(result.book) == "table" and result.book
+        or (type(result.data) == "table" and
+            (type(result.data.book)=="table" and result.data.book or result.data))
+        or result
+    if remote.bookId~=nil and tostring(remote.bookId)~=tostring(book_id) then return false end
     local uid = remote.chapterUid or remote.chapterId or remote.chapter_uid
     local idx = tonumber(remote.chapterIdx or remote.chapterIndex or remote.chapter_idx)
     local offset = tonumber(remote.chapterOffset or remote.chapterPos or remote.offset)
     local progress = tonumber(remote.progress)
-    if tostring(uid or "") == "" or offset == nil or progress == nil then return false end
+    if tostring(uid or "") == "" or offset == nil or offset<0
+        or progress == nil or progress<0 or progress>100 then return false end
     book.remote_raw_progress = progress
     book.remote_chapter_uid = uid
     book.remote_chapter_idx = idx or tonumber(book.chapter_idx) or 0
@@ -756,15 +764,18 @@ function Worker.run(job)
     local protocol_time_only = job.time_only == true and not reading_time_compat
     local position_override
     if reading_time_compat then
-        -- beta.15 integrity rule: every compatibility time write first GETs the
-        -- current server position and then echoes that exact wire coordinate in
-        -- the POST. Never fall back to a cached/local/pending anchor when the GET
-        -- fails; dropping one time interval is safer than reverting cloud progress.
+        -- beta.3: a full read-time report must echo the *Web* position it may
+        -- overwrite, never the Agent gateway position.  If Web cannot expose a
+        -- trustworthy coordinate, defer the time report rather than risk a
+        -- destructive position write.  The parent retains retry-safe intervals.
         local refreshed=refresh_remote_anchor(client, book_id, book)
-        if refreshed then position_override = normalize_cloud_anchor(nil, book) end
+        if refreshed then
+            position_override = normalize_cloud_anchor(nil, book)
+            if position_override then position_override.source="web_cookie_read_time_guard" end
+        end
         if not position_override then
             return finish(settings, book, {
-                ok=false,error="fresh cloud reading position unavailable for reading-time report",error_kind="context",
+                ok=false,error="fresh Web position unavailable for position-bearing reading-time report",error_kind="context",
                 meta={request_dispatched=false},
             }, context_changed)
         end

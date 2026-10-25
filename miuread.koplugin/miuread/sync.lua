@@ -1285,14 +1285,16 @@ function Sync:resolve_local_progress(callback, options)
     -- catalog preparation on the foreground close/suspend edge.
     if options.source_first==true and options.precise~=false then
         emit("position_locating","source_first")
-        local started, source_error = self:_source_position_async(function(position, err)
+        local started, source_error = self:_source_position_async(function(position, err, source_meta)
             if position then
                 deliver_source_position(position,options._catalog_prepared==true,"source_first")
                 return
             end
             emit("position_fallback",err)
             if options.require_cloud_coordinate==true then
-                if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),{error_kind="position"}) end
+                local meta=type(source_meta)=="table" and U.copy(source_meta) or {}
+                meta.error_kind=meta.error_kind or "position"
+                if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),meta) end
             else
                 complete_fallback(false,err)
             end
@@ -1343,14 +1345,16 @@ function Sync:resolve_local_progress(callback, options)
     end
 
     emit("position_locating", catalog_source)
-    local started, source_error = self:_source_position_async(function(position, err)
+    local started, source_error = self:_source_position_async(function(position, err, source_meta)
         if position then
             deliver_source_position(position,prepared,"normal")
             return
         end
         emit("position_fallback", err)
         if options.require_cloud_coordinate==true then
-            if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),{error_kind="position"}) end
+            local meta=type(source_meta)=="table" and U.copy(source_meta) or {}
+            meta.error_kind=meta.error_kind or "position"
+            if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),meta) end
             return
         end
         complete_fallback(prepared, err)
@@ -2473,6 +2477,16 @@ function Sync:remote(book_id, callback, options)
             sourced_progress(value.web,book_id,"web_cookie"),book_id)
         local agent=value.agent_progress or self:_normalize_remote_progress(
             sourced_progress(value.agent,book_id,"agent_gateway"),book_id)
+        -- Log only non-secret wire coordinates. This distinguishes a true
+        -- Web co=0 from an Agent/Web source disagreement after a POST.
+        logger.info("[MiuRead][ProgressWireReadback]",
+            "book=",tostring(book_id),
+            "web_uid=",tostring(web and web.chapter_uid or "-"),
+            "web_co=",tostring(web and web.offset or "-"),
+            "web_basis=",tostring(web and web.position_basis or "-"),
+            "agent_uid=",tostring(agent and agent.chapter_uid or "-"),
+            "agent_co=",tostring(agent and agent.offset or "-"),
+            "agent_basis=",tostring(agent and agent.position_basis or "-"))
         local remote=choose_remote_progress(web,agent,threshold)
         if not remote then
             local remote_error=tostring(value.web_error or value.agent_error or "remote progress unavailable")
@@ -3271,6 +3285,18 @@ function Sync:upload(elapsed, callback, options)
         end
         local attempts_count = #(value.attempts or {})
         local public = value.payload_public or {}
+        -- The values below are from the actual signed Web POST payload, not
+        -- the in-memory local snapshot. Exclude cookies, token and signature.
+        logger.info("[MiuRead][ReadReportWire]",
+            "book=",book_id,
+            "mode=",tostring(public.report_mode or "-"),
+            "uid=",tostring(public.report_chapter_uid or "-"),
+            "ci=",tostring(public.ci or "-"),
+            "co=",tostring(public.co or "-"),
+            "pr=",tostring(public.pr or "-"),
+            "rt=",tostring(public.rt or "-"),
+            "source=",tostring(public.position_source or "-"),
+            "result=",tostring(value.accepted==true and "accepted" or "not_accepted"))
         self.last_path = value.path
         self.last_response_summary = value.response_summary or value.error
         self.last_http_code = value.meta and value.meta.code or nil

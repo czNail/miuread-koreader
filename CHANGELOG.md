@@ -1,5 +1,16 @@
 # Changelog
 
+## 6.1.0-beta.3 - Progress Reliability Candidate
+
+- Preserve precise XPointer source anchors across failed asynchronous mapping callbacks.
+- Use a fresh Web getProgress position, not Agent, before any position-bearing reading-time compatibility report.
+- De-duplicate cloud progress verification per immutable book/epoch/sequence/coordinate transaction.
+- Reject unresolved cloud-authority adoption without clearing local pending data.
+- Verify Web writes only against Web readback; an Agent-only match cannot confirm a Web POST, while Agent lag remains diagnostic.
+- Keep queued downloads durable until delayed launch validation; cancel stale callbacks and bind new queued jobs to account VID.
+- Restore E-Ink zlib loading, HTTP chunk abort propagation, and KOReader exit fallback.
+- Retain the existing database schema and automatic Git Tag release workflow. No live Kindle verification is claimed.
+
 ## 6.1.0-beta.2 - Beta Update
 
 - 修复低内存下载启动时任务被直接拒绝的问题，复用原有持久化队列自动等待和重试

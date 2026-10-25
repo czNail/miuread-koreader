@@ -866,6 +866,7 @@ function Http:_request_once(opt)
     for hop = 0, redirects do
         local chunks, preview = {}, {}
         local preview_bytes, total_bytes = 0, 0
+        local callback_error
         local sink_path=tostring(opt.sink_path or "")
         local stream_file,stream_error
         socketutil:set_timeout((opt.timeout and opt.timeout[1]) or 15, (opt.timeout and opt.timeout[2]) or 35)
@@ -898,6 +899,7 @@ function Http:_request_once(opt)
         local heartbeat_bytes=math.max(64*1024,tonumber(opt.heartbeat_bytes)
             or tonumber(Config.DOWNLOAD_TRANSFER_HEARTBEAT_BYTES) or 512*1024)
         local sink=function(chunk,err)
+            if callback_error then return nil,callback_error end
             if chunk then
                 if not first_data_at then first_data_at=clock_now() end
                 total_bytes=total_bytes+#chunk
@@ -921,7 +923,13 @@ function Http:_request_once(opt)
                         or current_time-last_chunk_report_at>=heartbeat_seconds then
                         last_chunk_report_at=current_time
                         last_chunk_report_bytes=total_bytes
-                        pcall(opt.on_chunk,total_bytes,current)
+                        local callback_ok,callback_result=pcall(opt.on_chunk,total_bytes,current)
+                        if not callback_ok then
+                            callback_error=tostring(callback_result)
+                            -- Stop streaming immediately; an ignored error here
+                            -- prevents download workers from hibernating.
+                            return nil,callback_error
+                        end
                     end
                 end
             end
@@ -982,11 +990,14 @@ function Http:_request_once(opt)
             stream_file=nil
             if flushed==nil and not stream_error then stream_error=flush_error or "download sink flush failed" end
         end
-        if type(opt.on_chunk)=="function" and total_bytes>last_chunk_report_bytes then
-            pcall(opt.on_chunk,total_bytes,current)
+        if not callback_error and not stream_error and type(opt.on_chunk)=="function"
+            and total_bytes>last_chunk_report_bytes then
+            local callback_ok,callback_result=pcall(opt.on_chunk,total_bytes,current)
+            if not callback_ok then callback_error=tostring(callback_result) end
         end
         socketutil:reset_timeout()
-        self:_keepalive_finish(keepalive,called,code,resp_headers,status,stream_error)
+        self:_keepalive_finish(keepalive,called,code,resp_headers,status,stream_error or callback_error)
+        if callback_error then error(callback_error,0) end
         local text = sink_path~="" and table.concat(preview) or table.concat(chunks)
         if stream_error then return text,nil,resp_headers,current,tostring(stream_error) end
         if not called then return text, nil, resp_headers, current, tostring(ok) end

@@ -12745,7 +12745,10 @@ function Plugin:_quit_koreader(confirmed,anchor)
         self:_begin_koreader_exit("quit")
         pcall(function() self:onFlushSettings() end)
         if Device and Device.saveSettings then pcall(Device.saveSettings,Device) end
-        UIManager:nextTick(function() UIManager:broadcastEvent(Event:new("Exit")) end)
+        UIManager:nextTick(function()
+            UIManager:broadcastEvent(Event:new("Exit"))
+            if UIManager._exit_code==nil then UIManager:quit(0) end
+        end)
     end
 
     local function do_exit()
@@ -20105,7 +20108,10 @@ function Plugin:_queue_download(book,opt,open_after,extra)
         end
     end
     local job={key=key,book=U.copy(book or {}),options=U.copy(opt or {}),open_after=open_after==true,
-        queued_at=os.time(),defer_until_reader_closed=extra.defer_until_reader_closed==true or nil,
+        queued_at=os.time(),
+        queue_nonce=tostring(os.time())..":"..tostring(math.random(100000,999999)),
+        account_vid=tostring(((self.store:auth() or {}).account or {}).vid or ""),
+        defer_until_reader_closed=extra.defer_until_reader_closed==true or nil,
         wait_reason=extra.reason}
     local position,reason=self.store:enqueue_download(job)
     if not position then
@@ -20117,7 +20123,11 @@ function Plugin:_queue_download(book,opt,open_after,extra)
             dialog=ButtonDialog:new{title="等待位置中已有《"..waiting_title.."》。\n\n最多只能有一本正在下载、一本等待。",title_align="center",buttons={
                 {{text="替换为《"..U.utf8_truncate(new_title,12).."》",callback=function()
                     UIManager:close(dialog)
-                    self.store:save_download_queue({job})
+                    local saved=self.store:save_download_queue({job})
+                    if saved~=true then
+                        self:info("替换等待任务失败，请检查存储空间后重试。")
+                        return
+                    end
                     self:status_toast("下载队列","等待任务已替换",3)
                     self:_notify_home_data_changed("content")
                 end}},
@@ -20219,21 +20229,42 @@ function Plugin:_start_next_queued_download()
             return false
         end
     end
-    local job=self.store:dequeue_download()
-    if not job then return false end
+    local expected_key=tostring(next_job.key or "")
+    local expected_nonce=tostring(next_job.queue_nonce or "")
+    local expected_queued_at=tonumber(next_job.queued_at or 0) or 0
     self._queued_download_launch_pending=true
     UIManager:scheduleIn(.15,function()
         self._queued_download_launch_pending=false
-        -- A queued item can be invalidated while the UI changes. Recheck key
-        -- lifecycle gates before beginning a second child process.
+        local waiting=(self.store:download_queue() or {})[1]
+        -- Stop-all, removal and replacement invalidate a delayed launch.
+        if not waiting or tostring(waiting.key or "")~=expected_key
+            or tostring(waiting.queue_nonce or "")~=expected_nonce
+            or (tonumber(waiting.queued_at or 0) or 0)~=expected_queued_at then
+            logger.info("[MiuRead][DownloadAdmission] cancelled stale launch", "key=",expected_key)
+            return
+        end
+        local current_vid=tostring(((self.store:auth() or {}).account or {}).vid or "")
+        if waiting.account_vid and waiting.account_vid~="" and current_vid~=waiting.account_vid then
+            logger.warn("[MiuRead][DownloadAdmission] account changed; launch blocked")
+            return
+        end
         if HOME_EXITING or UIManager._exit_code~=nil or (self.download_task and self.download_task:busy())
-            or self._download_runtime or PowerState.state()~="NORMAL" then
-            self:_queue_download(job.book or {},job.options or {},job.open_after==true,
-                {reason=job.wait_reason or "resource_wait",defer_until_reader_closed=job.defer_until_reader_closed})
+            or self._download_runtime or PowerState.state()~="NORMAL"
+            or self._miuread_suspended==true or HOME_SESSION.suspended==true
+            or not self:logged_in() or self:_network_radio_hint()==false then
             self:_schedule_resource_download_retry("launch_deferred")
             return
         end
+        local job=self.store:dequeue_download()
+        if not job then return end
         self:download(job.book or {},job.options or {},job.open_after==true,nil,true,true)
+        if not self._download_runtime and not (self.download_task and self.download_task:busy())
+            and #(self.store:download_queue() or {})==0 then
+            -- No worker owns the job and download() did not requeue it.
+            -- Restore the durable record instead of silently losing it.
+            local saved=self.store:enqueue_download(job)
+            if saved then self:_schedule_resource_download_retry("launch_not_accepted") end
+        end
     end)
     return true
 end
@@ -20250,7 +20281,8 @@ function Plugin:show_waiting_downloads()
     local items={
         {text=title,post_text=variant,callback=function()
             UIManager:show(ConfirmBox:new{text="从等待队列移除《"..title.."》？",ok_text="移除",cancel_text="保留",ok_callback=function()
-                self.store:remove_queued_download(1); self:toast("已移出等待队列")
+                local removed=self.store:remove_queued_download(1)
+                self:toast(removed and "已移出等待队列" or "移除失败，请重试")
             end})
         end},
     }
@@ -23825,6 +23857,18 @@ function Plugin:_adopt_remote_progress_issue(item,callback)
     local started,start_error=self.sync:remote(book_id,function(remote,err)
         if not remote then callback(false,err or "remote_unavailable"); return end
         if remote.conflict then callback(false,"remote_source_conflict",remote); return end
+        local remote_uid=tostring(remote.chapter_uid or remote.chapterUid or "")
+        local remote_co=tonumber(remote.canonical_offset or remote.offset or remote.chapter_offset)
+        local basis=tostring(remote.position_basis or remote.offset_basis or "")
+        if remote_uid=="" or remote_co==nil or remote_co<0
+            or basis:find("unresolved",1,true) then
+            -- Do not erase local pending state for a remote position that could
+            -- not be precisely resolved to a chapter + Web offset.
+            logger.warn("[MiuRead][ProgressResolution] remote adoption deferred",
+                "book=",book_id,"basis=",basis,"co=",tostring(remote_co or "-"))
+            callback(false,"remote_exact_unresolved",remote)
+            return
+        end
         self.store:reset_progress_sync_state(book_id,"user_adopt_remote_authority",true)
         self:_clear_progress_write_fence(book_id,"user_adopt_remote_authority")
         if type(self._position_resolution_contexts)=="table" then self._position_resolution_contexts[book_id]=nil end
@@ -25225,9 +25269,18 @@ function Plugin:_remote_matches(remote,target)
             percent,candidate.source,{reason="percent_fallback",basis=target_basis}
     end
     if remote.conflict then
-        local ok,pct,source,meta=match(remote.web); if ok then return true,pct,source,meta end
-        ok,pct,source,meta=match(remote.agent); if ok then return true,pct,source,meta end
-        return false,nil,nil,meta
+        -- A Web POST is confirmed by the matching Web readback, not Agent.
+        -- Keep Agent disagreement as a diagnostic; never mistake Agent-only
+        -- agreement for proof that the Web write was persisted.
+        local ok,pct,source,meta=match(remote.web)
+        meta=type(meta)=="table" and meta or {}
+        meta.source_conflict=true
+        if ok then
+            meta.reason="web_confirmed_agent_disagrees"
+            return true,pct,source,meta
+        end
+        meta.reason="web_unconfirmed_remote_source_conflict"
+        return false,pct,source,meta
     end
     return match(remote)
 end
@@ -25462,6 +25515,29 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
     end
     local submitted_seq=tonumber(submitted_position.progress_sequence or 0) or 0
     local submitted_at=tonumber(submitted_position.submitted_at or submitted_position.captured_at) or os.time()
+    self._progress_verify_inflight=self._progress_verify_inflight or {}
+    local verify_key=table.concat({book_id,
+        tostring(submitted_position.progress_epoch or "-"),tostring(submitted_seq),
+        tostring(submitted_position.chapter_uid or "-"),
+        tostring(submitted_position.canonical_offset or submitted_position.chapter_offset or submitted_position.offset or "-")},":")
+    local pending_verify=self._progress_verify_inflight[verify_key]
+    if pending_verify then
+        pending_verify.callbacks[#pending_verify.callbacks+1]=callback
+        logger.info("[MiuRead][ProgressVerify] joined existing transaction",
+            "book=",book_id,"seq=",tostring(submitted_seq))
+        return true
+    end
+    local verify_group={callbacks={callback}}
+    self._progress_verify_inflight[verify_key]=verify_group
+    local function notify_waiters(...)
+        if self._progress_verify_inflight[verify_key]==verify_group then
+            self._progress_verify_inflight[verify_key]=nil
+        end
+        for _,listener in ipairs(verify_group.callbacks) do
+            local ok,err=pcall(listener,...)
+            if not ok then logger.warn("[MiuRead][ProgressVerify] listener error",tostring(err)) end
+        end
+    end
     local delays=type(options.verify_delays)=="table" and options.verify_delays or {5,12,24}
     if #delays<1 then delays={5,12,24} end
     local attempt,done=0,false
@@ -25480,7 +25556,7 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
             done=true
             logger.info("[MiuRead][ProgressTransaction] stale verification ignored",
                 "book=",book_id,"seq=",tostring(submitted_seq),"epoch=",tostring(submitted_position.progress_epoch or "-"))
-            callback(false,remote,"superseded",meta); return
+            notify_waiters(false,remote,"superseded",meta); return
         end
         done=true
         if ok then
@@ -25497,7 +25573,7 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
         else
             self:_save_pending_progress(book_id,submitted_position,reason or "cloud_not_confirmed")
         end
-        callback(ok,remote,reason,meta)
+        notify_waiters(ok,remote,reason,meta)
     end
     local function verify()
         attempt=attempt+1
@@ -25528,7 +25604,10 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
                     "submitted_at=",tostring(submitted_at),
                     "reason=",tostring(meta.reason or "-"),"matched=",tostring(matched==true))
                 if matched then
-                    finish(true,remote,nil,{actual=actual,source=source,match=meta})
+                    -- An Agent disagreement must not change which wire value
+                    -- confirmed the Web write or what is committed locally.
+                    local confirmed_remote=remote and remote.conflict and remote.web or remote
+                    finish(true,confirmed_remote,nil,{actual=actual,source=source,match=meta})
                 elseif attempt<#delays then
                     self:_save_progress_state(book_id,"settling","已提交，正在等待微信读书云端状态稳定",
                         tonumber(submitted_position.progress),remote and remote.percent,submitted_seq)
