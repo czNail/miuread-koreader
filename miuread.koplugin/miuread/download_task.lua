@@ -6,6 +6,7 @@ local Device = require("device")
 local logger = require("logger")
 local Config = require("miuread.config")
 local RuntimePressure = require("miuread.runtime_pressure")
+local DownloadAdmission = require("miuread.download_admission")
 local SuspendWorkLease = require("miuread.suspend_work_lease")
 local PseudoLockscreen = require("miuread.pseudo_lockscreen")
 local lfs = require("libs/libkoreader-lfs")
@@ -1568,17 +1569,22 @@ function DownloadTask:resume_hibernated(reason)
     local h=self.hibernated
     if not h then return false,"not_hibernated" end
     local memory=RuntimePressure.memory_snapshot(true)
-    local minimum=math.max(1,tonumber(Config.HEAVY_DOWNLOAD_RESUME_MIN_KB) or 72*1024)
-    if memory and memory.available_kb<minimum then
+    local allowed,reason,minimum,available=DownloadAdmission.check(memory,Config)
+    if not allowed then
         logger.info("[MiuRead][HeavyGuard] hibernated download remains parked",
-            "reason=low_memory","memory_kb=",tostring(memory.available_kb),"minimum_kb=",tostring(minimum))
+            "reason=",tostring(reason),"memory_kb=",tostring(available),"minimum_kb=",tostring(minimum))
         return false,"low_memory"
     end
     self.hibernated=nil
     local options=serializable_copy(h.options or {}) or {}
     options._stall_restart_count=tonumber(h.stall_restart_count) or tonumber(options._stall_restart_count) or 0
     local ok,err=self:start(h.book,options,h.on_progress,h.on_done,h.restart_count)
-    if not ok then self.hibernated=h; return false,err end
+    if not ok then
+        self.hibernated=h
+        -- The memory level can change between the first check and fork.
+        -- Preserve the resumable status so Plugin will schedule another attempt.
+        return false,err
+    end
     self.backgrounded=h.backgrounded==true
     if self.backgrounded then self:set_backgrounded(true) end
     os.remove(self.heavy_watch_path)
@@ -2098,14 +2104,16 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
     -- of deliberately driving the whole KOReader process into OOM.
     collectgarbage("collect")
     local memory=RuntimePressure.memory_snapshot(true)
-    local minimum=math.max(1,tonumber(Config.HEAVY_DOWNLOAD_START_MIN_KB) or 96*1024)
-    if memory and tonumber(memory.available_kb or 0)<minimum then
+    local allowed,reason,minimum,available=DownloadAdmission.check(memory,Config)
+    if not allowed then
         RuntimePressure.activate("download_start_low_memory",
             tonumber(Config.PERFORMANCE_MEMORY_PROTECT_SECONDS) or 30*60,"global")
         logger.warn("[MiuRead][HeavyGuard] download start deferred",
-            "reason=low_memory","memory_kb=",tostring(memory.available_kb),
+            "reason=",tostring(reason),"memory_kb=",tostring(available),
             "minimum_kb=",tostring(minimum),"book=",tostring(book and book.bookId or ""))
-        return false,"当前可用内存较低，已暂缓启动下载以避免 KOReader 被系统终止。请关闭其他界面后再试，已有断点不会丢失。"
+        -- Stable machine-readable reason: both manual and resumed tasks must
+        -- keep their checkpoints and enter the same resource-waiting pipeline.
+        return false,"low_memory"
     end
 
     local stamp = tostring(os.time()) .. "-" .. tostring(math.random(10000, 99999))

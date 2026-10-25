@@ -41,12 +41,6 @@ function M.password(envelope, vid)
 end
 
 function M.inflate(input, size)
-    -- Keep allocations within the native archive parser's per-entry bound.
-    size=tonumber(size)
-    if not size or size<0 or size>8*1024*1024 or size~=math.floor(size)
-        or type(input)~="string" or #input>32*1024*1024 then
-        error("E-Ink ZIP 解压长度无效",0)
-    end
     local ffi = require("ffi")
     -- Unique struct name avoids colliding with other zlib bindings in KOReader.
     if not pcall(ffi.typeof,"miuread_eink_zstream") then ffi.cdef[[
@@ -65,22 +59,9 @@ function M.inflate(input, size)
     ]] end
     -- Keep declarations once even when many chapter entries are decompressed.
     local inflate_impl
-    -- LuaJIT FFI provides ffi.load(), not ffi.loadlib().  A few KOReader
-    -- platforms expose libz under a different SONAME.
-    local loaded,lib
-    for _,name in ipairs({"z","libz.so.1","libz.so","zlib1"}) do
-        loaded,lib=pcall(ffi.load,name)
-        if loaded then break end
-    end
+    local loaded,lib = pcall(ffi.loadlib,"z",1)
     if not loaded then error("E-Ink 解压组件不可用",0) end
     inflate_impl = function(data, expected)
-        -- The cached implementation must validate every later entry too.
-        expected=tonumber(expected)
-        if not expected or expected<0 or expected>8*1024*1024
-            or expected~=math.floor(expected) or type(data)~="string"
-            or #data>32*1024*1024 then
-            error("E-Ink ZIP 解压长度无效",0)
-        end
         local stream = ffi.new("miuread_eink_zstream[1]")
         local buffer = ffi.new("unsigned char[?]", math.max(1, expected))
         stream[0].next_in = data; stream[0].avail_in = #data

@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.0.0-beta.1",
+    VERSION = "6.1.0-beta.2",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -324,12 +324,16 @@ local C = {
     -- exhaust old Kindle memory well before the global critical threshold.
     HEAVY_NATIVE_HIBERNATE_KB = 96 * 1024,
     HEAVY_NATIVE_CRITICAL_KB = 64 * 1024,
-    HEAVY_DOWNLOAD_RESUME_MIN_KB = 72 * 1024,
+    -- A hibernated download is restarted by forking a NEW worker.
+    -- Its admission threshold must match a fresh start; the lower RUNNING
+    -- threshold below applies only while an existing child is alive.
+    HEAVY_DOWNLOAD_RESUME_MIN_KB = 96 * 1024,
     -- Ref #91: do not fork a fresh book-download worker when the device is
-    -- already at the low-memory boundary observed on KPW6. Resume remains a
-    -- little more permissive because a checkpointed worker has already paid
-    -- most of its setup cost.
+    -- already at the low-memory boundary observed on KPW6. A resumed worker
+    -- forks afresh and therefore needs the same admission margin.
     HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024,
+    DOWNLOAD_RESOURCE_RETRY_FIRST_SECONDS = 5,
+    DOWNLOAD_RESOURCE_RETRY_MAX_SECONDS = 60,
     -- beta.26 continuously samples memory while a heavy worker stage is active.
     -- Two consecutive low-memory samples are required before checkpointed
     -- hibernation, avoiding task churn on a single transient dip.

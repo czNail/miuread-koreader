@@ -128,11 +128,8 @@ local SheetWidget = InputContainer:extend{
     _build_started_ms = 0,
 }
 
-function SheetWidget:_close(action, priority)
-    if action and not self.pending_action then
-        self.pending_action = action
-        self.pending_action_priority = priority==true
-    end
+function SheetWidget:_close(action)
+    if action and not self.pending_action then self.pending_action = action end
     if self._closed then return true end
     self._closed = true
     UIManager:close(self)
@@ -210,7 +207,7 @@ function SheetWidget:_card(action, width, height, seed)
     },content)
     return tappable(width, height, card, function()
         if not enabled then return end
-        self:_close(action.callback,action.priority_action==true)
+        self:_close(action.callback)
     end)
 end
 
@@ -517,31 +514,14 @@ function SheetWidget:onCloseWidget()
     end
     local region = self.bubble_dimen and self.bubble_dimen:copy() or (self.panel_dimen and self.panel_dimen:copy() or nil)
     local action = self.pending_action
-    local priority = self.pending_action_priority==true
     self.pending_action = nil
-    self.pending_action_priority = nil
     if live_sheet == self then live_sheet = nil end
     -- CloseWidget fires before UIManager removes this sheet from the stack.
     -- Repaint the newly exposed HomeView on the next UI turn, then run the
     -- selected action, and repaint the old bubble region once more afterwards.
     -- This prevents the Home section refresh triggered by source selection from
     -- painting inside the old bubble while its frame/pointer remains on screen.
-    if priority and type(action)=="function" then
-        -- Execute only explicitly confirmed quit actions independently of the
-        -- shared navigation generation. Still close before opening the next UI.
-        DialogTransition.after_close(region,nil,"ActionSheet")
-        UIManager:nextTick(function()
-            UIManager:scheduleIn(.05,function()
-                local ok,err=pcall(action)
-                if not ok then
-                    logger.warn("[MiuRead][ActionSheet] quit action failed",tostring(err))
-                    UIManager:show(InfoMessage:new{text="退出操作未能完成，请检查日志。",timeout=3})
-                end
-            end)
-        end)
-    else
-        DialogTransition.after_close(region,action,"ActionSheet")
-    end
+    DialogTransition.after_close(region, action, "ActionSheet")
 end
 
 local function show_fallback(opts, reason)

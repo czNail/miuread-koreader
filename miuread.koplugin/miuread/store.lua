@@ -2572,16 +2572,30 @@ function Store:enqueue_download(job)
     local queue=self:download_queue()
     if #queue>=1 then return nil,"full" end
     queue[1]=U.copy(job or {})
-    self:save_download_queue(queue)
+    -- A resource-wait task is only safe if its durable queue write succeeded.
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then return nil,"queue_save_failed:"..tostring(err or "unknown") end
     return 1
 end
 function Store:dequeue_download()
     local queue=self:download_queue(); if #queue==0 then return nil end
-    local job=table.remove(queue,1); self:save_download_queue(queue); return job
+    local job=table.remove(queue,1)
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then
+        logger.warn("[MiuRead][DownloadQueue] unable to dequeue durable job",tostring(err or "unknown"))
+        return nil
+    end
+    return job
 end
 function Store:remove_queued_download(index)
     local queue=self:download_queue(); index=tonumber(index); if not index or not queue[index] then return false end
-    table.remove(queue,index); self:save_download_queue(queue); return true
+    table.remove(queue,index)
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then
+        logger.warn("[MiuRead][DownloadQueue] unable to remove durable job",tostring(err or "unknown"))
+        return false
+    end
+    return true
 end
 function Store:pending_installs() return self:get("pending_installs",{}) end
 function Store:save_pending_installs(rows) self:set("pending_installs",type(rows)=="table" and rows or {}) end

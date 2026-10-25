@@ -62,6 +62,7 @@ local MemoryMode=require("miuread.memory_mode")
 local PerformanceMode=require("miuread.performance_mode")
 local RuntimePressure=require("miuread.runtime_pressure")
 local BackgroundScheduler=require("miuread.background_scheduler")
+local DownloadAdmission=require("miuread.download_admission")
 local PowerState=require("miuread.power_state")
 local SuspendWorkLease=require("miuread.suspend_work_lease")
 local PseudoLockscreen=require("miuread.pseudo_lockscreen")
@@ -874,6 +875,22 @@ function Plugin:init()
     self.memory_mode=MemoryMode:new(self.store)
     self.performance_mode=PerformanceMode:new(self.store)
     self.background_scheduler=BackgroundScheduler:new()
+    -- The scheduler must never free a live worker lease solely because its
+    -- runtime exceeded a timeout. For known background workers the live Async
+    -- descriptor is the authoritative signal; unknown leases remain protected.
+    self.background_scheduler.liveness_probe=function(key)
+        local map={
+            home_shelf="shelf_async",home_scan="home_async",home_metadata="home_metadata_async",
+            home_progress="home_progress_async",home_cover="home_cover_async",
+            home_cover_render="cover_render_async",sync_summary="sync_summary_async",
+            home_stats="reading_stats_async",
+        }
+        local name=map[tostring(key or "")]
+        if not name then return nil end
+        local worker=self[name]
+        if worker and type(worker.busy)=="function" then return worker:busy() end
+        return false
+    end
     self._reader_interaction_resume_task=nil
     self._reader_interaction_resume_generation=0
     self._performance_prompt_pending=nil
@@ -993,6 +1010,10 @@ function Plugin:init()
     self._download_book_menu=nil
     self._cache_cleanup_dialog=nil
     self._download_runtime=nil
+    self._resource_retry_task=nil
+    self._resource_retry_attempt=0
+    self._hibernated_low_memory_retry_count=0
+    self._queued_download_launch_pending=false
     self._chapter_prefetch_task=nil
     self._chapter_prefetch_generation=0
     self._chapter_prefetch_last_key=nil
@@ -4279,8 +4300,17 @@ function Plugin:_background_release(key,token,reason)
         self._heavy_background_download_hibernated[key]=nil
         if self.download_task and self.download_task:is_hibernated() then
             UIManager:scheduleIn(math.max(1.0,tonumber(Config.DOWNLOAD_INTERACTION_RESUME_DELAY) or 2.5),function()
-                if self.download_task then self.download_task:resume_hibernated("background task finished") end
+                if self.download_task and self.download_task:is_hibernated() then
+                    self:_schedule_hibernated_download_resume("background task finished")
+                end
             end)
+        end
+    end
+    if released and self.store and self.background_scheduler then
+        local waiting=self.store:download_queue()[1]
+        if waiting and (waiting.wait_reason=="low_memory" or waiting.wait_reason=="background_busy") then
+            self.background_scheduler:set_foreground_barrier(1.5,"waiting download priority")
+            UIManager:scheduleIn(.4,function() self:_start_next_queued_download() end)
         end
     end
     return released
@@ -9703,7 +9733,7 @@ function Plugin:_home_action_function_actions(key,anchor)
             {icon="◐",label="休眠",detail=self:_sleep_action_detail(),callback=function() self:_home_sleep() end},
             {icon="←",label="返回 KOReader",detail="离开觅阅桌面",callback=function() self:_home_close_to_native(true) end},
             {icon="↺",label="重启 KOReader",detail="保存状态后重新启动",callback=function() self:_show_home_power_confirm(anchor,"重启 KOReader？","阅读状态会先保存。","重启",function() self:_restart_koreader("home power bubble") end) end},
-            {icon="⏻",label="退出 KOReader",detail="返回设备原生环境",priority_action=true,callback=function() self:_show_home_power_confirm(anchor,"退出 KOReader？","当前阅读和设置会先保存。","退出",function() self:_quit_koreader(true) end) end},
+            {icon="⏻",label="退出 KOReader",detail="返回设备原生环境",callback=function() self:_show_home_power_confirm(anchor,"退出 KOReader？","当前阅读和设置会先保存。","退出",function() self:_quit_koreader(true) end) end},
         }
         if type(Device.canReboot)=="function" and Device:canReboot() then rows[#rows+1]={icon="↻",label="重启设备",detail="重新启动设备",callback=function() self:_home_reboot_device(anchor) end} end
         if type(Device.canPowerOff)=="function" and Device:canPowerOff() then rows[#rows+1]={icon="■",label="关闭设备",detail="完全关闭设备",danger=true,callback=function() self:_home_poweroff_device(anchor) end} end
@@ -12388,8 +12418,7 @@ function Plugin:_show_home_power_confirm(anchor,title,detail,confirm_label,callb
         title=tostring(title or "确认操作"),subtitle=tostring(detail or ""),
         actions={
             {icon="×",label="取消",detail="不执行任何操作",callback=function() end},
-            {icon="!",label=tostring(confirm_label or "确定"),detail="保存当前状态后执行",danger=true,
-                priority_action=confirm_label=="退出",callback=callback},
+            {icon="!",label=tostring(confirm_label or "确定"),detail="保存当前状态后执行",danger=true,callback=callback},
         },
     }
 end
@@ -12716,12 +12745,7 @@ function Plugin:_quit_koreader(confirmed,anchor)
         self:_begin_koreader_exit("quit")
         pcall(function() self:onFlushSettings() end)
         if Device and Device.saveSettings then pcall(Device.saveSettings,Device) end
-        UIManager:nextTick(function()
-            -- Keep device-specific Exit handlers, but a widget broadcast alone
-            -- is not guaranteed to stop KOReader on all platforms.
-            UIManager:broadcastEvent(Event:new("Exit"))
-            if UIManager._exit_code==nil then UIManager:quit(0) end
-        end)
+        UIManager:nextTick(function() UIManager:broadcastEvent(Event:new("Exit")) end)
     end
 
     local function do_exit()
@@ -17098,17 +17122,24 @@ function Plugin:_schedule_hibernated_download_resume(reason)
         end
         local ok,err=self.download_task:resume_hibernated(reason or "foreground stable")
         if not ok and err=="low_memory" then
+            self._hibernated_low_memory_retry_count=math.min(5,
+                (tonumber(self._hibernated_low_memory_retry_count) or 0)+1)
             self:_schedule_hibernated_download_resume(reason or "foreground stable")
         elseif not ok then
+            self._hibernated_low_memory_retry_count=0
             logger.warn("[MiuRead][DownloadTask] hibernated resume failed",
                 "reason=",tostring(hibernate_reason or "unknown"),"error=",tostring(err or "unknown"))
+        else
+            self._hibernated_low_memory_retry_count=0
         end
     end
     self._hibernated_download_resume_task=task
     local hibernate_reason=type(self.download_task.hibernated_reason)=="function"
         and self.download_task:hibernated_reason() or nil
+    local retry_count=math.min(5,math.max(0,tonumber(self._hibernated_low_memory_retry_count) or 0))
     local delay=hibernate_reason=="network_offline" and 8
-        or math.max(2.0,tonumber(Config.DOWNLOAD_INTERACTION_RESUME_DELAY) or 2.5)
+        or math.min(60,math.max(2.0,tonumber(Config.DOWNLOAD_INTERACTION_RESUME_DELAY) or 2.5)
+            *(2^retry_count))
     UIManager:scheduleIn(delay,task)
     return true
 end
@@ -20104,21 +20135,104 @@ function Plugin:_queue_download(book,opt,open_after,extra)
     self:_notify_home_data_changed("content")
     return true
 end
+-- Memory-constrained Kindle: a waiting download remains in Store's durable
+-- one-slot queue. Avoid a second queue or multiple independently scheduled
+-- retry loops. No retry callback survives a removed/replaced queue item.
+function Plugin:_schedule_resource_download_retry(reason)
+    if self._resource_retry_task then return false end
+    local queue=self.store:download_queue()
+    if not queue[1] then return false end
+    local count=math.min(5,math.max(0,tonumber(self._resource_retry_attempt) or 0))
+    local first=math.max(2,tonumber(Config.DOWNLOAD_RESOURCE_RETRY_FIRST_SECONDS) or 5)
+    local maximum=math.max(first,tonumber(Config.DOWNLOAD_RESOURCE_RETRY_MAX_SECONDS) or 60)
+    local delay=math.min(maximum,first*(2^count))
+    self._resource_retry_attempt=count+1
+    local callback
+    callback=function()
+        if self._resource_retry_task~=callback then return end
+        self._resource_retry_task=nil
+        -- This method only attempts work if the existing queue and lifecycle
+        -- gates are still valid; cancellation while waiting is respected.
+        self:_start_next_queued_download()
+    end
+    self._resource_retry_task=callback
+    UIManager:scheduleIn(delay,callback)
+    logger.info("[MiuRead][DownloadAdmission] retry scheduled",
+        "reason=",tostring(reason or "resource_wait"),"seconds=",tostring(delay),
+        "attempt=",tostring(count+1))
+    return true
+end
+
+function Plugin:_download_resources_ready(reason)
+    if self.background_scheduler then
+        self.background_scheduler:set_foreground_barrier(7,"download admission")
+    end
+    -- Do not spawn the heavy worker alongside an active background lease;
+    -- let an existing task complete instead of force-releasing its ownership.
+    local active=self.background_scheduler and self.background_scheduler.active
+    if active then
+        logger.info("[MiuRead][DownloadAdmission] waiting for background worker",
+            "worker=",tostring(active.key),"reason=",tostring(reason))
+        return false,"background_busy"
+    end
+    collectgarbage("collect")
+    local memory=RuntimePressure.memory_snapshot(true)
+    local ok,why,minimum,available=DownloadAdmission.check(memory,Config)
+    if not ok then
+        logger.warn("[MiuRead][DownloadAdmission] waiting for memory",
+            "reason=",tostring(reason),"memory_kb=",tostring(available),
+            "minimum_kb=",tostring(minimum),
+            "total_kb=",tostring(memory and memory.total_kb or "unknown"))
+    end
+    return ok,why,available,minimum
+end
+
 function Plugin:_start_next_queued_download()
+    if self._queued_download_launch_pending then return false end
     if self.download_task and self.download_task:busy() then return false end
     if self._download_runtime then return false end
+    local queue=self.store:download_queue()
+    local next_job=queue[1]
+    if not next_job then
+        self._resource_retry_attempt=0
+        return false
+    end
     local state=self.store:download_state()
     if state.status=="active" or state.status=="prefetch" or state.status=="failed" or state.status=="interrupted" then
         return false
     end
     if not self:logged_in() or self:_network_radio_hint()==false then return false end
-    local queue=self.store:download_queue()
-    local next_job=queue[1]
-    if not next_job then return false end
     if next_job.defer_until_reader_closed==true and self:_active_reader_ui() then return false end
+    if HOME_EXITING or UIManager._exit_code~=nil or PowerState.state()~="NORMAL"
+        or self._miuread_suspended==true or HOME_SESSION.suspended==true then
+        return false
+    end
+    -- Only preflight resource-wait jobs; existing queued work keeps its usual
+    -- priority/compatibility behaviour, while all downloads are still guarded
+    -- again inside DownloadTask:start immediately before forking.
+    if next_job.wait_reason=="low_memory" or next_job.wait_reason=="background_busy" then
+        local ready,reason=self:_download_resources_ready("queued")
+        if not ready then
+            next_job.wait_reason=reason
+            self.store:save_download_queue(queue)
+            self:_schedule_resource_download_retry(reason)
+            return false
+        end
+    end
     local job=self.store:dequeue_download()
     if not job then return false end
+    self._queued_download_launch_pending=true
     UIManager:scheduleIn(.15,function()
+        self._queued_download_launch_pending=false
+        -- A queued item can be invalidated while the UI changes. Recheck key
+        -- lifecycle gates before beginning a second child process.
+        if HOME_EXITING or UIManager._exit_code~=nil or (self.download_task and self.download_task:busy())
+            or self._download_runtime or PowerState.state()~="NORMAL" then
+            self:_queue_download(job.book or {},job.options or {},job.open_after==true,
+                {reason=job.wait_reason or "resource_wait",defer_until_reader_closed=job.defer_until_reader_closed})
+            self:_schedule_resource_download_retry("launch_deferred")
+            return
+        end
         self:download(job.book or {},job.options or {},job.open_after==true,nil,true,true)
     end)
     return true
@@ -20131,6 +20245,8 @@ function Plugin:show_waiting_downloads()
     local variant=(job.options and job.options.annotations) and "划线与想法版" or "纯净版"
     if job.options and job.options.range_start_index then variant="章节版 · "..variant end
     if job.defer_until_reader_closed==true then variant=variant.." · 退出阅读后开始" end
+    if job.wait_reason=="low_memory" then variant=variant.." · 等待设备内存" end
+    if job.wait_reason=="background_busy" then variant=variant.." · 等待后台资源" end
     local items={
         {text=title,post_text=variant,callback=function()
             UIManager:show(ConfirmBox:new{text="从等待队列移除《"..title.."》？",ok_text="移除",cancel_text="保留",ok_callback=function()
@@ -20212,6 +20328,20 @@ function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
     if opt.images==nil then opt.images=prefs.images end
     opt.network_mode=tostring(prefs.download_network_mode or "auto")=="ipv4" and "ipv4" or "auto"
     opt.active_document_path=self:_current_document_path()
+    -- Prefetch never occupies the sole durable waiting slot. An explicit
+    -- download waits safely rather than being lost when memory is below the
+    -- fork margin or an existing background worker still owns the lease.
+    local admitted,wait_reason=self:_download_resources_ready("download")
+    if not admitted then
+        if is_prefetch then return false end
+        local queued=self:_queue_download(b,opt,open_after,{reason=wait_reason})
+        if queued then
+            self:_update_open_shelf_download_status(b.bookId,
+                wait_reason=="low_memory" and "等待内存恢复" or "等待后台任务结束")
+            self:_schedule_resource_download_retry(wait_reason)
+        end
+        return queued
+    end
     local runtime={book=U.copy(b),options=U.copy(opt),last_state={stage="prepare",current=0,total=1,percent=0,chapter=b.title or ""},background=start_in_background==true,dialog=nil,started_at=os.time(),open_after=open_after==true,done=done,notified_milestones={}}
     self._download_runtime=runtime
     if not is_prefetch then
@@ -20225,6 +20355,13 @@ function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
         self._download_runtime=nil
         self.store:clear_download_state()
         self:_notify_home_data_changed("content")
+        if err=="low_memory" then
+            if not is_prefetch then
+                local queued=self:_queue_download(b,opt,open_after,{reason="low_memory"})
+                if queued then self:_schedule_resource_download_retry("fork_memory_race") end
+            end
+            return false
+        end
         if from_queue then self:_queue_download(b,opt,open_after) end
         if is_prefetch then
             logger.warn("[MiuRead][Prefetch] unable to start",tostring(err))
@@ -20233,6 +20370,9 @@ function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
         end
         return false
     end
+    -- Only an accepted fork clears retry backoff. A failed admission keeps
+    -- its prior attempts so intermittent pressure cannot create a hot loop.
+    self._resource_retry_attempt=0
     runtime.task=self.download_task:descriptor()
     self:_write_download_state(is_prefetch and "prefetch" or "active",
         self:_active_download_payload(runtime,runtime.last_state),true)
@@ -31661,6 +31801,12 @@ function Plugin:onResume()
         logger.info("[MiuRead][Power] resume stable",
             "state=",normal.state,"generation=",tostring(normal.generation))
         self:_pump_finished_status(true)
+        -- UI timers may have stopped during physical suspend. Re-evaluate a
+        -- durable memory-wait queue now that the device is fully resumed.
+        local waiting=self.store:download_queue()[1]
+        if waiting and (waiting.wait_reason=="low_memory" or waiting.wait_reason=="background_busy") then
+            UIManager:scheduleIn(.6,function() self:_start_next_queued_download() end)
+        end
     end)
 
     local reader_active=self.ui and self.ui.document
