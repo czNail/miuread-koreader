@@ -165,9 +165,15 @@ def runtime(zlib_path=None, root=None):
         } end
         if zlib_path then
             local ffi=require('ffi')
-            ffi.loadlib=function(name) assert(name=='z'); return ffi.load(zlib_path) end
+            if zlib_path=='miuread-unavailable-zlib-for-test' then
+                -- Simulate missing native zlib using the real LuaJIT ffi.load
+                -- entrypoint, not a non-existent ffi.loadlib helper.
+                ffi.load=function() error('zlib unavailable in test') end
+            else
+                assert(ffi.load(zlib_path))
+            end
         else
-            -- --zlib exercises the actual production FFI inflate adapter.
+            -- Unit tests use a Python fixture decoder unless --zlib is set.
             require('miuread.eink_crypto').inflate=function(data,size) return py_inflate(data,size) end
         end
     ''')

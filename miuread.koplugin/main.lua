@@ -9703,7 +9703,7 @@ function Plugin:_home_action_function_actions(key,anchor)
             {icon="◐",label="休眠",detail=self:_sleep_action_detail(),callback=function() self:_home_sleep() end},
             {icon="←",label="返回 KOReader",detail="离开觅阅桌面",callback=function() self:_home_close_to_native(true) end},
             {icon="↺",label="重启 KOReader",detail="保存状态后重新启动",callback=function() self:_show_home_power_confirm(anchor,"重启 KOReader？","阅读状态会先保存。","重启",function() self:_restart_koreader("home power bubble") end) end},
-            {icon="⏻",label="退出 KOReader",detail="返回设备原生环境",callback=function() self:_show_home_power_confirm(anchor,"退出 KOReader？","当前阅读和设置会先保存。","退出",function() self:_quit_koreader(true) end) end},
+            {icon="⏻",label="退出 KOReader",detail="返回设备原生环境",priority_action=true,callback=function() self:_show_home_power_confirm(anchor,"退出 KOReader？","当前阅读和设置会先保存。","退出",function() self:_quit_koreader(true) end) end},
         }
         if type(Device.canReboot)=="function" and Device:canReboot() then rows[#rows+1]={icon="↻",label="重启设备",detail="重新启动设备",callback=function() self:_home_reboot_device(anchor) end} end
         if type(Device.canPowerOff)=="function" and Device:canPowerOff() then rows[#rows+1]={icon="■",label="关闭设备",detail="完全关闭设备",danger=true,callback=function() self:_home_poweroff_device(anchor) end} end
@@ -12388,7 +12388,8 @@ function Plugin:_show_home_power_confirm(anchor,title,detail,confirm_label,callb
         title=tostring(title or "确认操作"),subtitle=tostring(detail or ""),
         actions={
             {icon="×",label="取消",detail="不执行任何操作",callback=function() end},
-            {icon="!",label=tostring(confirm_label or "确定"),detail="保存当前状态后执行",danger=true,callback=callback},
+            {icon="!",label=tostring(confirm_label or "确定"),detail="保存当前状态后执行",danger=true,
+                priority_action=confirm_label=="退出",callback=callback},
         },
     }
 end
@@ -12715,7 +12716,12 @@ function Plugin:_quit_koreader(confirmed,anchor)
         self:_begin_koreader_exit("quit")
         pcall(function() self:onFlushSettings() end)
         if Device and Device.saveSettings then pcall(Device.saveSettings,Device) end
-        UIManager:nextTick(function() UIManager:broadcastEvent(Event:new("Exit")) end)
+        UIManager:nextTick(function()
+            -- Keep device-specific Exit handlers, but a widget broadcast alone
+            -- is not guaranteed to stop KOReader on all platforms.
+            UIManager:broadcastEvent(Event:new("Exit"))
+            if UIManager._exit_code==nil then UIManager:quit(0) end
+        end)
     end
 
     local function do_exit()
