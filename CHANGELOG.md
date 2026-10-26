@@ -1,3 +1,13 @@
+## v6.1.0-beta.6 — automatic end-of-reading sync repair (candidate)
+
+- Resolve local/cloud positions using reading-event timestamps; remove the 30-second ambiguous-clock conflict gate and prefer the latest cloud observation even within 30 seconds.
+- Allow legacy fenced UNSENT progress to re-enter automatic upload after cloud freshness comparison; preserve superseded local snapshots and choose newest Web/Agent observation without user conflict dialogs.
+- Keep progress uploads only on reading-end events (including on-open local-newer branch); remove periodic reading-time HTTP writes while an active reader is open.
+- Interpret a nil KOReader text-search result as no match, with short UTF-8 anchor fallbacks; exact chapter/co still requires Kindle verification.
+- Prevent retry-budget drops of provably unsent reading time, retain verified safe carry and its journal through restarts, and improve fixed-height status-row contrast.
+- Preserve schema 136, Web-only post-write verification, existing download paths and Tag-triggered beta CI.
+- Kindle and live WeRead verification still required.
+
 # Changelog
 
 ## 6.1.0-beta.5 — 修复整合与功能回归候选版

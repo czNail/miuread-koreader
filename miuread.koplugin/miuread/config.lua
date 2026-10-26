@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.1.0-beta.5",
+    VERSION = "6.1.0-beta.6",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -109,9 +109,9 @@ local C = {
     -- reports stay on the established one-minute cadence and every request is
     -- independently capped, avoiding burst uploads after reconnect/resume.
     READ_REPORT_MAX_ELAPSED_SECONDS = 60,
-    -- beta.5: reading time is statistics, not durable reading position. One normal
-    -- attempt plus one runtime retry is enough; failures never survive restart.
-    READ_TIME_BEST_EFFORT = true,
+    -- beta.6: report only after reading. Only *provably unsent* seconds may be
+    -- persisted and retried after restart; unknown dispatches are NEVER replayed.
+    READ_TIME_BEST_EFFORT = false,
     READ_TIME_MAX_ATTEMPTS = 2,
     -- beta.13: progress writes have priority over periodic reading-time writes.
     -- The fence is a soft preemption: an already-dispatched time request is

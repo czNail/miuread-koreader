@@ -194,10 +194,17 @@ local function choose_remote_progress(web,agent,threshold)
         end
         if web_uid and agent_uid then
             if web_uid~=agent_uid or math.abs(web_offset-agent_offset)>32 then
-                return {
-                    conflict=true,conflict_reason="coordinate_mismatch",
-                    web=web,agent=agent,source="conflict",fetched_at=os.time(),
-                }
+                -- beta.6: conflicting *observations* are not a user conflict.
+                -- Use the most recently modified source; equal/unknown server
+                -- timestamps prefer the canonical Web cookie view. Actual
+                -- Web uploads are still verified only by Web readback.
+                local selected=newest()
+                selected.selection_reason="latest_cloud_coordinate"
+                selected.source_disagreement=true
+                logger.info("[MiuRead][ProgressSources] newest cloud coordinate selected",
+                    "source=",tostring(selected.source or "-"),
+                    "web_updated=",tostring(wt),"agent_updated=",tostring(at))
+                return selected
             end
             local selected=newest()
             selected.selection_reason="coordinate_match"
@@ -211,10 +218,10 @@ local function choose_remote_progress(web,agent,threshold)
         end
         local delta=math.abs((tonumber(web.percent) or 0)-(tonumber(agent.percent) or 0))
         if delta>threshold then
-            return {
-                conflict=true,conflict_reason="percent_mismatch",
-                web=web,agent=agent,source="conflict",fetched_at=os.time(),
-            }
+            local selected=newest()
+            selected.selection_reason="latest_cloud_percent"
+            selected.source_disagreement=true
+            return selected
         end
         local selected=newest()
         selected.selection_reason="percent_match"
@@ -1878,42 +1885,43 @@ function Sync:text_anchor_rescue(remote,options)
     local query_valid,invalid_at=U.is_valid_utf8(query)
     local search=ui and ui.search or nil
     local flags=search and search.current_search_type and search.current_search_type.flags or nil
+    local strategy="exact"
     local ok,hits=pcall(document.findAllText,document,query,true,3,40,false,flags)
-    local strategy="standard"
-    local first_error=not ok and tostring(hits) or (type(hits)~="table" and ("return_type:"..type(hits)) or nil)
-    if not ok or type(hits)~="table" then
-        strategy="compat"
-        ok,hits=pcall(document.findAllText,document,query,true,3,40)
+    local first_error=not ok and tostring(hits) or nil
+    -- A nil/empty result means no match, not an incompatible API return.
+    -- Try shorter UTF-8-safe textual windows. Keep the original chapter and
+    -- multiple-hit verification below; never claim a match solely by percent.
+    if not ok or type(hits)~="table" or #hits==0 then
+        local qlen=U.utf8_len(query)
+        for _,window in ipairs({24,16,12}) do
+            if qlen>window then
+                local probe=U.utf8_sub(query,1,window)
+                strategy="prefix_"..tostring(window)
+                local retry_ok,retry_hits=pcall(document.findAllText,document,probe,true,3,40,false,flags)
+                if not retry_ok then
+                    retry_ok,retry_hits=pcall(document.findAllText,document,probe,true,3,40)
+                end
+                if retry_ok and type(retry_hits)=="table" and #retry_hits>0 then
+                    ok,hits=true,retry_hits
+                    break
+                end
+            end
+        end
     end
     if not ok then
-        logger.warn("[MiuRead][TextAnchorDiagnostic]",
-            "state=call_failed","book=",tostring(record.book and record.book.book_id or "-"),
-            "chapter=",remote_uid,"co=",tostring(remote.offset or remote.chapter_offset or "-"),
-            "strategy=",strategy,"query_chars=",tostring(U.utf8_len(query)),
-            "query_bytes=",tostring(#query),"utf8_valid=",tostring(query_valid),
-            "invalid_at=",tostring(invalid_at or "-"),"query_hash=",query_hash,
-            "first_error=",U.first_line(first_error or "-",160),
-            "error=",U.first_line(tostring(hits),220))
+        logger.warn("[MiuRead][TextAnchorDiagnostic]", "state=call_failed",
+            "book=",tostring(record.book and record.book.book_id or "-"),
+            "chapter=",remote_uid,"strategy=",strategy,
+            "query_hash=",query_hash,"error=",U.first_line(first_error or "-",160))
         return false,"text_anchor_search_call_failed"
     end
-    if type(hits)~="table" then
-        logger.warn("[MiuRead][TextAnchorDiagnostic]",
-            "state=invalid_return","book=",tostring(record.book and record.book.book_id or "-"),
-            "chapter=",remote_uid,"co=",tostring(remote.offset or remote.chapter_offset or "-"),
-            "strategy=",strategy,"return_type=",type(hits),
-            "query_chars=",tostring(U.utf8_len(query)),"query_bytes=",tostring(#query),
-            "utf8_valid=",tostring(query_valid),"query_hash=",query_hash,
-            "first_error=",U.first_line(first_error or "-",160))
-        return false,"text_anchor_search_invalid_return"
-    end
-    if #hits==0 then
-        logger.warn("[MiuRead][TextAnchorDiagnostic]",
-            "state=zero_hits","book=",tostring(record.book and record.book.book_id or "-"),
-            "chapter=",remote_uid,"co=",tostring(remote.offset or remote.chapter_offset or "-"),
-            "strategy=",strategy,"query_chars=",tostring(U.utf8_len(query)),
-            "query_bytes=",tostring(#query),"utf8_valid=",tostring(query_valid),
-            "query_hash=",query_hash,"first_error=",U.first_line(first_error or "-",160))
-        return false,"text_anchor_search_zero_hits"
+    if type(hits)~="table" or #hits==0 then
+        logger.info("[MiuRead][TextAnchorDiagnostic]", "state=no_match",
+            "book=",tostring(record.book and record.book.book_id or "-"),
+            "chapter=",remote_uid,"strategy=",strategy,
+            "query_chars=",tostring(U.utf8_len(query)),
+            "utf8_valid=",tostring(query_valid),"query_hash=",query_hash)
+        return false,"text_anchor_search_no_match"
     end
     local candidates={}
     for _,hit in ipairs(hits) do

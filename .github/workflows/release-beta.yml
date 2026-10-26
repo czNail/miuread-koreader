@@ -328,6 +328,7 @@ jobs:
           lua5.1 tools/test_position_resolution.lua
           lua5.1 tools/test_position_state_hotfix.lua
           lua5.1 tools/test_open_sync_contract.lua
+          lua5.1 tools/test_beta6_end_reading_latest_wins.lua
           lua5.1 tools/test_beta6_sync_contract.lua
           lua5.1 tools/test_beta7_sync_contract.lua
           lua5.1 tools/test_beta8_home_translation_contract.lua
@@ -341,6 +342,7 @@ jobs:
           luajit tools/test_download_resource_admission.lua
           lua5.1 tools/test_beta5_reintegration.lua
           luajit tools/test_beta5_reintegration.lua
+          luajit tools/test_beta6_end_reading_latest_wins.lua
           lua5.1 tools/test_store_repair.lua
           lua5.1 tools/test_cloud_freshness_contract.lua
           lua5.1 tools/test_beta10_translation_dependency_contract.lua

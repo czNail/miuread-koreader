@@ -22340,7 +22340,7 @@ function Plugin:progress_sync_label()
         if kind=="context" or kind=="position" then return "需要修复" end
     end
     local state=session and session.progress_sync_state or nil
-    local labels={checking="正在检查",retrying="同步中",mapping_pending="同步中",mapping_preparing="同步中",mapping_failed="同步失败",position_locating="同步中",aligned="已同步",local_selected="同步中",local_uploaded="已同步",uploading="同步中",verifying_upload="同步中",upload_failed="同步失败",upload_unconfirmed="同步失败",source_conflict="同步失败",remote_selected="已同步",different="同步失败",deferred="同步失败",remote_unavailable="同步失败",remote_jump_unconfirmed="同步失败",waiting_network="同步失败"}
+    local labels={checking="正在检查",retrying="同步中",mapping_pending="同步中",mapping_preparing="同步中",mapping_failed="同步失败",position_locating="同步中",aligned="已同步",local_selected="结束阅读后上传",local_uploaded="已同步",uploading="同步中",verifying_upload="同步中",upload_failed="同步失败",upload_unconfirmed="同步失败",source_conflict="同步失败",remote_selected="已同步",different="同步失败",deferred="同步失败",remote_unavailable="同步失败",remote_jump_unconfirmed="同步失败",waiting_network="同步失败"}
     return labels[state] or "阅读中自动"
 end
 
@@ -23098,16 +23098,15 @@ function Plugin:_progress_sync_issue_items()
                     or (pending_unresolved and pending_unresolved.reason)
                     or session.progress_last_verify_reason or "")
                 local legacy_unsent=upload_state=="fenced" or pending_reason:find("^write_fenced:")~=nil
-                local authority_conflict=pending_reason:find("^write_fenced:conflict:")~=nil
-                    or pending_reason=="freshness_conflict"
+                -- beta.6: legacy `ambiguous_clock_conflict` is an UNSENT
+                -- observation, not proof of simultaneous independent edits.
+                local authority_conflict=false
+                local old_conflict=pending_reason=="freshness_conflict"
+                    or pending_reason:find("^write_fenced:conflict:")~=nil
                     or tostring(reason):find("ambiguous_clock_conflict",1,true)~=nil
-                    or tostring(reason):find("无法安全判断",1,true)~=nil
-                -- beta.17: an authority conflict is not a retryable transport
-                -- failure. Automatic/Home retry must never decide which side
-                -- wins; the user explicitly chooses local or cloud instead.
-                local can_send=can_replay and not authority_conflict
-                    and (upload_state=="pending_send" or legacy_unsent)
-                local can_verify=can_replay and not can_send and not authority_conflict
+                local can_send=can_replay and (upload_state=="pending_send" or legacy_unsent
+                    or (old_conflict and (upload_state=="" or upload_state=="false")))
+                local can_verify=can_replay and not can_send
                 local explicit_mismatch=pending_reason=="chapter_offset_mismatch" or pending_reason=="chapter_mismatch"
                     or pending_reason=="position_mismatch" or pending_reason=="remote_position_mismatch"
                 local can_resubmit=not authority_conflict and replayable==true and (session.progress_resubmit_allowed==true
@@ -23130,7 +23129,7 @@ function Plugin:_progress_sync_issue_items()
                         or (can_send and "精确位置已保存，但请求尚未发送"
                         or (replayable and reason or "本地只剩不完整的位置记录，无法安全重传")))),
                     local_percent=localp,
-                    requires_choice=authority_conflict,
+                    requires_choice=false,
                     can_adopt_remote=(pending_progress~=nil or pending_coordinate~=nil or pending_unresolved~=nil),
                     can_force_local=authority_conflict and replayable==true and exact_native,
                     can_clear_stale=replayable~=true and not (anchor_only and saved_anchor~=nil),
@@ -23449,6 +23448,10 @@ end
 
 function Plugin:_submit_saved_pending_progress(item,callback)
     callback=type(callback)=="function" and callback or function() end
+    if self:_active_reader_ui() then
+        callback(false,"deferred_until_reading_end")
+        return false
+    end
     item=type(item)=="table" and item or {}
     local book_id=tostring(item.book_id or "")
     local session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or {}
@@ -23491,12 +23494,8 @@ function Plugin:_submit_saved_pending_progress(item,callback)
             callback(false,remote_err or "remote_unavailable")
             return
         end
-        if remote.conflict then
-            self:_save_progress_state(book_id,"deferred","云端来源暂时不一致；本机精确位置继续保留",
-                localp,nil,position.progress_sequence)
-            callback(false,"remote_source_conflict",remote)
-            return
-        end
+        -- Web and Agent may disagree temporarily. Sync:remote() already
+        -- selects its best current observation; compare event freshness there.
         local latest_session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or session
         local state=type(latest_session.position_state)=="table" and latest_session.position_state or {}
         local decision=PR.decide{
@@ -23530,6 +23529,10 @@ function Plugin:_submit_saved_pending_progress(item,callback)
         if winner=="remote" then
             -- The cloud is newer: discard the stale UNSENT write request. The
             -- next book open will apply/offer the newer cloud position normally.
+            self.store:save_session(book_id,{
+                last_superseded_local_position=PR.snapshot(position),
+                last_superseded_local_at=os.time(),
+            })
             self:_clear_pending_progress(book_id,position.progress_sequence)
             self.store:save_session(book_id,{
                 progress_sync_state="remote_newer_pending",
@@ -24303,6 +24306,11 @@ function Plugin:_sync_home_pending(options)
     local source=tostring(options.source or (manual and "manual_unspecified" or "background"))
     logger.info("[MiuRead][SyncAction] start",
         "source=",source,"manual=",tostring(manual),"silent=",tostring(silent))
+    if self:_active_reader_ui() then
+        logger.info("[MiuRead][SyncAction] delayed until close","source=",source)
+        if manual then self:toast("结束阅读后自动处理待同步任务",2) end
+        return false
+    end
     if manual and self._home_sync_manual_active==true then
         logger.warn("[MiuRead][SyncAction] finish",
             "source=",source,"result=busy","reason=manual_recovery_active")
@@ -24423,7 +24431,7 @@ function Plugin:_sync_home_pending(options)
 
     local function proceed(summary)
         summary=summary or self:_home_sync_summary(false)
-        local failed=tonumber(summary.failed_total or 0) or 0
+        local failed=(tonumber(summary.failed_total or 0) or 0)+#self:_reading_time_sync_issue_items()
         if failed<=0 and summary.checking~=true then
             logger.info("[MiuRead][SyncAction] finish",
                 "source=",source,"result=already_synced","reason=no_failed_items")
@@ -24903,9 +24911,13 @@ function Plugin:_progress_write_fence(book_id)
     self._progress_write_fences=type(self._progress_write_fences)=="table" and self._progress_write_fences or {}
     local fence=self._progress_write_fences[book_id]
     if type(fence)~="table" then return false,"" end
-    return true,tostring(fence.reason or "reconciliation_unresolved")
+    local reason=tostring(fence.reason or "")
+    -- beta.6: a failed pull or close-in-time cloud observation must not
+    -- veto a NEW reading-end write. Account/session protections live in
+    -- _progress_snapshot_current and the submission's immutable auth context.
+    if reason:find("^account:") then return true,reason end
+    return false,reason
 end
-
 function Plugin:_save_position_resolution(book_id,winner,reason,local_position,remote)
     book_id=tostring(book_id or "")
     if book_id=="" then return false end
@@ -25666,6 +25678,11 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
         callback(false,nil,"position_missing",position)
         return false
     end
+    if options.reading_end~=true and self:_active_reader_ui() then
+        logger.info("[MiuRead][ProgressUpload] deferred while reader active","book=",book_id)
+        callback(false,nil,"deferred_until_reading_end",position)
+        return false
+    end
     local snapshot=self:_prepare_progress_snapshot(book_id,position)
     if not snapshot then
         callback(false,nil,"position_missing",position)
@@ -25860,6 +25877,11 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
 end
 
 function Plugin:upload_local_progress(manual,callback)
+    if self:_active_reader_ui() and self._reading_end_sync_active~=true then
+        if callback then callback(false,"deferred_until_reading_end") end
+        if manual then self:toast("结束阅读后自动上传",2) end
+        return false
+    end
     local r=self.sync:record()
     if not r then
         if manual then self:info("请先打开一本觅阅下载的书籍。") end
@@ -26193,9 +26215,8 @@ function Plugin:on_remote_source_conflict(id,localp,remote,automatic,local_posit
     local web,agent=remote and remote.web or nil,remote and remote.agent or nil
     local wt=tonumber(web and web.updated_at or 0) or 0
     local at=tonumber(agent and agent.updated_at or 0) or 0
-    local grace=tonumber(Config.POSITION_CLOCK_SKEW_GRACE_SECONDS) or 30
     local selected,reason
-    if web and agent and wt>0 and at>0 and math.abs(wt-at)>grace then
+    if web and agent and wt>0 and at>0 and wt~=at then
         if at>wt then selected,reason=agent,"agent_newer_cloud_source" else selected,reason=web,"web_newer_cloud_source" end
     elseif web and not agent then selected,reason=web,"web_only_cloud_source"
     elseif agent and not web then selected,reason=agent,"agent_only_cloud_source"
@@ -26387,12 +26408,13 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
         return apply_remote(remote)
     end
 
-    -- LOCAL_NEWER is the only automatic state that authorizes a cloud write.
+    -- beta.6: latest local wins, but opening/reading NEVER uploads progress.
+    -- The existing finalizer persists its final coordinate and writes only
+    -- after the user ends reading. No one-shot network write on book open.
     self:_clear_progress_write_fence(id,"local_newer:"..reason)
-    self:_save_progress_state(id,"local_selected","已确认本机阅读事件更新，准备后台上传",localp,remotep)
-    self.sync:end_progress_sync("本机位置更新，后台上传")
+    self:_save_progress_state(id,"local_selected","本机阅读位置较新；结束阅读时自动上传",localp,remotep)
+    self.sync:end_progress_sync("本机位置较新，等待结束阅读")
     if automatic then self:_open_sync_close("local position newer",false); self:_finish_auto_position_check(id,"local newer") end
-    UIManager:scheduleIn(.08,function() if self.ui and self.ui.document then self:upload_local_progress(false) end end)
     return true
 end
 
@@ -28246,6 +28268,10 @@ function Plugin:onMiuReadReaderProgress()
     return true
 end
 function Plugin:onMiuReadUploadProgress()
+    if self:_active_reader_ui() then
+        self:toast("结束阅读时自动上传进度",2)
+        return true
+    end
     self:upload_local_progress(true)
     return true
 end
