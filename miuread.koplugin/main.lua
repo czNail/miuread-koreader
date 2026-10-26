@@ -879,6 +879,34 @@ function Plugin:init()
     self._performance_prompt_pending=nil
     self._performance_prompt_dialog=nil
     self.book_repair=DataMigration:new(self.store)
+    do
+        -- One-shot dump of the MemTotal-scaled heavy-guard profile so field
+        -- logs from small-memory devices can be calibrated against reality.
+        local total=RuntimePressure.total_kb()
+        local thresholds=RuntimePressure.thresholds()
+        logger.info("[MiuRead][MemoryProfile]",
+            "total_kb=",tostring(total or "unknown"),"tier=",RuntimePressure.tier(),
+            "start=",tostring(thresholds.start_min),"resume=",tostring(thresholds.resume_min),
+            "running=",tostring(thresholds.running_min),
+            "native_hibernate=",tostring(thresholds.native_hibernate),
+            "native_critical=",tostring(thresholds.native_critical),
+            "cover_coexist=",tostring(thresholds.cover_coexist),
+            "typography_hibernate=",tostring(thresholds.typography_hibernate),
+            "typography_critical=",tostring(thresholds.typography_critical),
+            "soft=",tostring(thresholds.soft),"critical=",tostring(thresholds.critical))
+        local parent_adj=tonumber(Config.DOWNLOAD_PARENT_OOM_SCORE_ADJ) or 0
+        if parent_adj~=0 then
+            -- Opt-in extra protection for the resident process; the download
+            -- child already raises its own score in its bootstrap.
+            pcall(function()
+                local file=io.open("/proc/self/oom_score_adj","w")
+                if file then
+                    file:write(tostring(math.max(-1000,math.min(1000,parent_adj))))
+                    file:close()
+                end
+            end)
+        end
+    end
     logger.info("[MiuRead] initialized", "version=", tostring(Config.VERSION),
         "schema=", tostring(Config.SCHEMA), "root=", tostring(ROOT))
     sanitize_saved_auth(self.store)
@@ -4180,7 +4208,7 @@ function Plugin:_background_claim(key,options,retry)
         and self.download_task and self.download_task:busy() and not self.download_task:is_hibernated()
         and self.download_task:is_heavy_stage() then
         local memory=RuntimePressure.memory_snapshot(false)
-        local minimum=math.max(1,tonumber(Config.DOWNLOAD_COVER_COEXIST_MIN_KB) or 80*1024)
+        local minimum=RuntimePressure.thresholds().cover_coexist
         if memory and tonumber(memory.available_kb or 0)<minimum then
             options.blocked_reason="download_memory_pressure"
         end
@@ -4196,7 +4224,7 @@ function Plugin:_background_claim(key,options,retry)
         and self.download_task:is_heavy_stage() then
         local memory=RuntimePressure.memory_snapshot(false)
         if options.user_requested==true then
-            local critical=math.max(1,tonumber(Config.HEAVY_NATIVE_CRITICAL_KB) or 64*1024)
+            local critical=RuntimePressure.thresholds().native_critical
             if memory and memory.available_kb<critical then
                 local requested=self.download_task:request_hibernate("background:"..key)
                 if requested then
@@ -4699,6 +4727,7 @@ function Plugin:_home_freeze_for_suspend()
     self:_home_unschedule_task("_home_manual_metadata_retry_task")
     self:_home_unschedule_task("_home_stats_refresh_task")
     self:_home_unschedule_task("_home_stats_apply_task")
+    self:_download_idle_pump_stop()
     self._home_pending_network_metadata_key=nil
     self._home_refresh_debounce_generation=(tonumber(self._home_refresh_debounce_generation) or 0)+1
     self._home_render_refresh_generation=(tonumber(self._home_render_refresh_generation) or 0)+1
@@ -6611,8 +6640,9 @@ function Plugin:_home_close_to_native(show_notice,after_open)
     self._native_heavy_transition_pending=true
     local memory=RuntimePressure.memory_snapshot(true)
     local available=memory and tonumber(memory.available_kb) or nil
-    local hibernate_line=math.max(1,tonumber(Config.HEAVY_NATIVE_HIBERNATE_KB) or 96*1024)
-    local critical_line=math.max(1,tonumber(Config.HEAVY_NATIVE_CRITICAL_KB) or 64*1024)
+    local native_thresholds=RuntimePressure.thresholds()
+    local hibernate_line=native_thresholds.native_hibernate
+    local critical_line=native_thresholds.native_critical
     local download_stage=tostring(task:stage() or "unknown")
     local memory_heavy_stage=download_stage=="transform" or download_stage=="package"
         or download_stage=="annotation_batch" or download_stage=="annotation_apply"
@@ -12628,22 +12658,43 @@ function Plugin:_quiesce_download_for_exit(reason)
         end
     elseif ok~=true and (mode=="forced_stop" or mode=="interrupted") then
         -- The child did not reach a cooperative checkpoint inside the short
-        -- external-exit window. The per-book cache is still intact, but never
-        -- persist its now-dead PID as an active worker.
+        -- external-exit window. The per-book chapter cache is still intact, so
+        -- park the task as hibernated instead of dead-ending into an
+        -- "interrupted" error state; the next launch auto-resumes it through
+        -- the idle pump instead of waiting for a manual tap.
         if passive then
             self.store:clear_download_state()
         else
-            local state=runtime and self:_active_download_payload(runtime,runtime.last_state or {})
-                or U.copy(self.store:download_state() or {})
-            state.task=nil
-            state.stage="interrupted"
-            state.error="KOReader 退出时已停止后台下载；已完成章节和断点均已保留，可继续下载。"
-            state.message=state.error
-            state.updated_at=os.time()
-            state.status="interrupted"
-            self.store:save_download_state(state)
+            local task=runtime and U.copy(runtime.task) or nil
+            if type(task)~="table" then
+                task=U.copy((self.store:download_state() or {}).task or {})
+            end
+            task.pid=nil
+            task.hibernated=true
+            task.hibernate_reason="exit_forced_stop"
+            task.stage=tostring(task.stage or "hibernated")
+            task.updated_at=os.time()
+            if runtime then
+                runtime.task=task
+                runtime.last_state=U.copy(runtime.last_state or {})
+                runtime.last_state.stage="hibernated"
+                runtime.last_state.hibernate_reason="exit_forced_stop"
+                runtime.last_state.message="KOReader 退出时已保存下载断点，重新启动后自动继续"
+                runtime.last_state.updated_at=os.time()
+                self:_write_download_state("active",
+                    self:_active_download_payload(runtime,runtime.last_state),true)
+            else
+                local state=U.copy(self.store:download_state() or {})
+                if state.status=="active" or state.status=="prefetch" then
+                    state.task=task
+                    state.stage="hibernated"
+                    state.hibernate_reason="exit_forced_stop"
+                    state.message="KOReader 退出时已保存下载断点，重新启动后自动继续"
+                    state.updated_at=os.time()
+                    self.store:save_download_state(state)
+                end
+            end
         end
-        if runtime then runtime.task=nil end
     end
     logger.info("[MiuRead][DownloadExit] quiesce complete",
         "reason=",reason,"ok=",tostring(ok==true),"mode=",tostring(mode or "unknown"))
@@ -13180,7 +13231,7 @@ function Plugin:_reader_typography_wait_for_guard(generation,started,mode)
     if elapsed>=wait_limit then
         local memory=RuntimePressure.memory_snapshot(true)
         local available=memory and tonumber(memory.available_kb) or nil
-        local critical=math.max(1,tonumber(Config.TYPOGRAPHY_CRITICAL_MEMORY_KB) or 48*1024)
+        local critical=RuntimePressure.thresholds().typography_critical
         if available and available<critical then
             logger.warn("[MiuRead][Typography] apply deferred for safety",
                 "reason=low_memory","memory_kb=",tostring(available),"stage=",tostring(task:stage() or "unknown"))
@@ -13227,7 +13278,7 @@ function Plugin:_reader_typography_apply(generation)
 
     local memory=RuntimePressure.memory_snapshot(true)
     local available=memory and tonumber(memory.available_kb) or nil
-    local critical=math.max(1,tonumber(Config.TYPOGRAPHY_CRITICAL_MEMORY_KB) or 48*1024)
+    local critical=RuntimePressure.thresholds().typography_critical
     if available and available<critical and (not task or not task:busy()) then
         if collectgarbage then pcall(collectgarbage,"collect") end
         memory=RuntimePressure.memory_snapshot(true)
@@ -13242,7 +13293,7 @@ function Plugin:_reader_typography_apply(generation)
     end
 
     if task and task:busy() and not task:is_hibernated() then
-        local hibernate_line=math.max(1,tonumber(Config.TYPOGRAPHY_HIBERNATE_MEMORY_KB) or 72*1024)
+        local hibernate_line=RuntimePressure.thresholds().typography_hibernate
         local stage=tostring(task:stage() or "unknown")
         if typography_heavy_stage(stage) or (available and available<hibernate_line) then
             local requested=task:request_hibernate((available and available<hibernate_line)
@@ -16839,12 +16890,17 @@ function Plugin:_navigation_token_valid(token,allowed_states)
     return false
 end
 
-function Plugin:_schedule_hibernated_download_resume(reason)
+function Plugin:_schedule_hibernated_download_resume(reason,keep_fast_counter)
     if self._hibernated_download_resume_task then
         UIManager:unschedule(self._hibernated_download_resume_task)
         self._hibernated_download_resume_task=nil
     end
     if not self.download_task or not self.download_task:is_hibernated() then return false end
+    if keep_fast_counter~=true then self._hibernated_resume_fast_tries=0 end
+    -- Any resume scheduling implies a parked task exists; keep the idle pump
+    -- armed so a missed UI event (for example after a device wake) cannot
+    -- strand the task without a retry loop.
+    self:_download_idle_pump_ensure(reason)
     local generation=tonumber(NAVIGATION.generation) or 0
     local task
     task=function()
@@ -16853,6 +16909,7 @@ function Plugin:_schedule_hibernated_download_resume(reason)
         local state=self:_navigation_state()
         if generation~=(tonumber(NAVIGATION.generation) or 0) or state=="native" or state=="native_menu"
             or state=="suspended" or state=="opening_reader" or state=="closing_reader" then
+            self:_download_idle_pump_ensure("navigation blocked")
             return
         end
         local hibernate_reason=type(self.download_task.hibernated_reason)=="function"
@@ -16864,8 +16921,28 @@ function Plugin:_schedule_hibernated_download_resume(reason)
             return
         end
         local ok,err=self.download_task:resume_hibernated(reason or "foreground stable")
-        if not ok and err=="low_memory" then
-            self:_schedule_hibernated_download_resume(reason or "foreground stable")
+        if ok then
+            -- Flip the shelf card and the persisted state off the stale
+            -- "hibernated" badge immediately; the child's first heartbeat may
+            -- be seconds or a whole rate-limit cooldown away.
+            local runtime=self._download_runtime
+            if runtime then
+                local resumed=U.copy(runtime.last_state or {})
+                resumed.stage="resume"
+                resumed.hibernated=nil
+                resumed.message="正在从断点继续下载"
+                resumed.updated_at=os.time()
+                self:_on_download_progress(runtime,resumed)
+            end
+        elseif not ok and err=="low_memory" then
+            self._hibernated_resume_fast_tries=(tonumber(self._hibernated_resume_fast_tries) or 0)+1
+            if (tonumber(self._hibernated_resume_fast_tries) or 0)<4 then
+                self:_schedule_hibernated_download_resume(reason or "foreground stable",true)
+            else
+                -- Memory stays below the resume line; back off to the slow idle
+                -- pump instead of spinning at the interaction delay.
+                self:_download_idle_pump_ensure("low memory backoff")
+            end
         elseif not ok then
             logger.warn("[MiuRead][DownloadTask] hibernated resume failed",
                 "reason=",tostring(hibernate_reason or "unknown"),"error=",tostring(err or "unknown"))
@@ -16877,6 +16954,46 @@ function Plugin:_schedule_hibernated_download_resume(reason)
     local delay=hibernate_reason=="network_offline" and 8
         or math.max(2.0,tonumber(Config.DOWNLOAD_INTERACTION_RESUME_DELAY) or 2.5)
     UIManager:scheduleIn(delay,task)
+    return true
+end
+
+function Plugin:_download_idle_pump_stop()
+    if self._download_idle_pump_task then
+        UIManager:unschedule(self._download_idle_pump_task)
+        self._download_idle_pump_task=nil
+    end
+    return true
+end
+
+-- A hibernated download used to wait for a UI event (returning from native,
+-- typography settling) to revive. On a small-memory device those windows are
+-- rare, so this slow self-looping pump keeps sampling for any memory window
+-- that is large enough to restart the checkpointed worker.
+function Plugin:_download_idle_pump_ensure(reason)
+    if self._download_idle_pump_task then return true end
+    if not self.download_task or not self.download_task:is_hibernated() then return false end
+    local task
+    task=function()
+        if self._download_idle_pump_task~=task then return end
+        self._download_idle_pump_task=nil
+        if not self.download_task or not self.download_task:is_hibernated() then return end
+        local state=self:_navigation_state()
+        if state~="native" and state~="native_menu" and state~="suspended"
+            and state~="opening_reader" and state~="closing_reader" and state~="exiting" then
+            local memory=RuntimePressure.memory_snapshot(true)
+            local resume_min=RuntimePressure.thresholds().resume_min
+            if memory and tonumber(memory.available_kb or 0)>=resume_min then
+                logger.info("[MiuRead][DownloadTask] idle memory window",
+                    "memory_kb=",tostring(memory.available_kb),
+                    "resume_min_kb=",tostring(resume_min),
+                    "reason=",tostring(reason or "pump"))
+                self:_schedule_hibernated_download_resume("idle memory window")
+            end
+        end
+        self:_download_idle_pump_ensure("pump tick")
+    end
+    self._download_idle_pump_task=task
+    UIManager:scheduleIn(math.max(15,tonumber(Config.DOWNLOAD_IDLE_PUMP_SECONDS) or 75),task)
     return true
 end
 
@@ -16896,11 +17013,13 @@ function Plugin:_set_foreground(owner)
             UIManager:unschedule(self._hibernated_download_resume_task)
             self._hibernated_download_resume_task=nil
         end
+        self:_download_idle_pump_stop()
     elseif (value=="home" or value=="reader") and (previous=="native" or previous=="native_menu") then
         if self.download_task and self.download_task:busy() and not self.download_task:is_hibernated() then
             self.download_task:resume("heavy_resource")
         end
         self:_schedule_hibernated_download_resume("return from native to "..value)
+        self:_download_idle_pump_ensure("return from native")
     end
     return HOME_SESSION.foreground
 end
@@ -18867,14 +18986,20 @@ function Plugin:_on_download_progress(runtime,state)
                 wait>0 and ("请求受限 · "..tostring(wait).."秒") or "请求受限 · 等待恢复")
         elseif state and state.stage=="restart" then
             self:_update_open_shelf_download_status(runtime.book.bookId,"从断点自动恢复")
+        elseif state and state.stage=="resume" then
+            self:_update_open_shelf_download_status(runtime.book.bookId,"正在继续下载")
         elseif state and state.stage=="hibernated" then
             if state.hibernate_reason=="network_offline" then
                 self:_update_open_shelf_download_status(runtime.book.bookId,"网络暂停 · 联网后继续")
                 if HOME_SESSION.suspended~=true and self._miuread_suspended~=true then
                     self:_schedule_hibernated_download_resume("network restored")
                 end
+            elseif state.hibernate_reason=="restart_fuse" then
+                self:_update_open_shelf_download_status(runtime.book.bookId,"多次中断 · 稍后自动继续")
+                self:_download_idle_pump_ensure("task parked by restart fuse")
             else
                 self:_update_open_shelf_download_status(runtime.book.bookId,"已安全释放资源 · 稍后继续")
+                self:_download_idle_pump_ensure("task hibernated")
             end
         elseif state and (state.waiting_network==true or state.stage=="waiting_network") then
             self:_update_open_shelf_download_status(runtime.book.bookId,"等待网络 · 已保存进度")
@@ -19120,6 +19245,7 @@ function Plugin:_recover_download_state()
                 "hibernated=",tostring(self.download_task:is_hibernated()))
             if self.download_task:is_hibernated() then
                 self:_schedule_hibernated_download_resume("recovered hibernated task")
+                self:_download_idle_pump_ensure("recovered hibernated task")
             end
             return true
         end
@@ -31241,6 +31367,9 @@ function Plugin:onResume()
     self._miuread_suspended=false
     HOME_SESSION.suspended=false
     StatusToast.set_blocked(false)
+    -- The suspend freeze stops the download idle pump; re-arm it in case a
+    -- hibernated download is still waiting for a memory window.
+    self:_download_idle_pump_ensure("device resumed")
     -- Ref #92: on Kobo the radio is expected to be OFF at the raw wake edge
     -- because KOReader unloads Wi-Fi for suspend. Restore the *pre-suspend user
     -- intent* through KOReader's own network backend instead of interpreting

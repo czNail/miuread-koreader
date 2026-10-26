@@ -6,7 +6,8 @@ local RuntimePressure={}
 local KEY="__MIUREAD_RUNTIME_PRESSURE"
 local state=rawget(_G,KEY)
 if type(state)~="table" then
-    state={until_at=0,reason=nil,global_until_at=0,global_reason=nil,last_memory=nil,last_memory_at=0,last_log_at=0,manual_enabled=false}
+    state={until_at=0,reason=nil,global_until_at=0,global_reason=nil,last_memory=nil,last_memory_at=0,last_log_at=0,manual_enabled=false,
+        total_kb=nil,thresholds=nil}
     rawset(_G,KEY,state)
 else
     -- Runtime state survives plugin reloads inside one KOReader process. Older
@@ -70,6 +71,60 @@ local function parse_meminfo(raw)
         cached_kb=values.Cached,
         total_kb=values.MemTotal,
     }
+end
+
+-- Heavy-guard thresholds scale with MemTotal so small-RAM devices (for example
+-- a 256 MiB KPW2) can actually start and resume downloads. Each value is
+-- clamp(MemTotal * ratio, floor, cap); the caps are the historical absolute
+-- thresholds, so >=512 MiB devices keep the previous behavior unchanged and
+-- hosts without /proc fall back to the caps.
+local THRESHOLD_SPECS = {
+    start_min        = { ratio = "HEAVY_DOWNLOAD_START_RATIO",       ratio_default = 0.20, floor = "HEAVY_DOWNLOAD_START_FLOOR_KB",       floor_default = 48 * 1024, cap = "HEAVY_DOWNLOAD_START_MIN_KB",       cap_default = 96 * 1024 },
+    resume_min       = { ratio = "HEAVY_DOWNLOAD_RESUME_RATIO",      ratio_default = 0.19, floor = "HEAVY_DOWNLOAD_RESUME_FLOOR_KB",      floor_default = 44 * 1024, cap = "HEAVY_DOWNLOAD_RESUME_MIN_KB",      cap_default = 72 * 1024 },
+    running_min      = { ratio = "HEAVY_DOWNLOAD_RUNNING_RATIO",     ratio_default = 0.16, floor = "HEAVY_DOWNLOAD_RUNNING_FLOOR_KB",     floor_default = 36 * 1024, cap = "HEAVY_DOWNLOAD_RUNNING_MIN_KB",     cap_default = 72 * 1024 },
+    native_hibernate = { ratio = "HEAVY_NATIVE_HIBERNATE_RATIO",     ratio_default = 0.24, floor = "HEAVY_NATIVE_HIBERNATE_FLOOR_KB",     floor_default = 56 * 1024, cap = "HEAVY_NATIVE_HIBERNATE_KB",          cap_default = 96 * 1024 },
+    native_critical  = { ratio = "HEAVY_NATIVE_CRITICAL_RATIO",      ratio_default = 0.14, floor = "HEAVY_NATIVE_CRITICAL_FLOOR_KB",      floor_default = 36 * 1024, cap = "HEAVY_NATIVE_CRITICAL_KB",           cap_default = 64 * 1024 },
+    cover_coexist    = { ratio = "DOWNLOAD_COEXIST_RATIO",           ratio_default = 0.25, floor = "DOWNLOAD_COEXIST_FLOOR_KB",           floor_default = 48 * 1024, cap = "DOWNLOAD_COVER_COEXIST_MIN_KB",     cap_default = 80 * 1024 },
+    typography_hibernate = { ratio = "TYPOGRAPHY_HIBERNATE_RATIO",   ratio_default = 0.20, floor = "TYPOGRAPHY_HIBERNATE_FLOOR_KB",      floor_default = 48 * 1024, cap = "TYPOGRAPHY_HIBERNATE_MEMORY_KB",    cap_default = 72 * 1024 },
+    typography_critical  = { ratio = "TYPOGRAPHY_CRITICAL_RATIO",    ratio_default = 0.12, floor = "TYPOGRAPHY_CRITICAL_FLOOR_KB",       floor_default = 32 * 1024, cap = "TYPOGRAPHY_CRITICAL_MEMORY_KB",     cap_default = 48 * 1024 },
+    soft             = { ratio = "BACKGROUND_MEMORY_SOFT_RATIO",     ratio_default = 0.12, floor = "BACKGROUND_MEMORY_SOFT_FLOOR_KB",     floor_default = 64 * 1024, cap = "BACKGROUND_MEMORY_SOFT_MAX_KB",     cap_default = 128 * 1024 },
+    critical         = { ratio = "BACKGROUND_MEMORY_CRITICAL_RATIO", ratio_default = 0.08, floor = "BACKGROUND_MEMORY_CRITICAL_FLOOR_KB", floor_default = 40 * 1024, cap = "BACKGROUND_MEMORY_CRITICAL_MAX_KB", cap_default = 80 * 1024 },
+}
+
+function RuntimePressure.compute_thresholds(total_kb)
+    local thresholds={}
+    for name,spec in pairs(THRESHOLD_SPECS) do
+        local cap=tonumber(Config[spec.cap]) or spec.cap_default
+        local floor_kb=tonumber(Config[spec.floor]) or spec.floor_default
+        if floor_kb>cap then floor_kb=cap end
+        local ratio=tonumber(Config[spec.ratio]) or spec.ratio_default
+        local total=tonumber(total_kb)
+        if not total or total<=0 then
+            thresholds[name]=cap
+        else
+            thresholds[name]=math.max(floor_kb,math.min(cap,math.floor(total*ratio+.5)))
+        end
+    end
+    return thresholds
+end
+
+function RuntimePressure.total_kb(force)
+    if force~=true and state.total_kb~=nil then return tonumber(state.total_kb) or nil end
+    local memory=parse_meminfo(U.read_file("/proc/meminfo",true))
+    state.total_kb=memory and tonumber(memory.total_kb) or false
+    return tonumber(state.total_kb) or nil
+end
+
+function RuntimePressure.thresholds(force)
+    if force~=true and type(state.thresholds)=="table" then return state.thresholds end
+    state.thresholds=RuntimePressure.compute_thresholds(RuntimePressure.total_kb(force))
+    return state.thresholds
+end
+
+function RuntimePressure.tier()
+    local total=RuntimePressure.total_kb()
+    if not total then return "unknown" end
+    return total<=(tonumber(Config.MEMORY_SMALL_TIER_TOTAL_KB) or 300*1024) and "small" or "standard"
 end
 
 function RuntimePressure.active()
@@ -163,17 +218,9 @@ function RuntimePressure.memory_snapshot(force)
         state.last_memory=nil
         return nil
     end
-    local fixed_soft=math.max(1,tonumber(Config.BACKGROUND_MEMORY_SOFT_KB) or 64*1024)
-    local fixed_critical=math.max(1,tonumber(Config.BACKGROUND_MEMORY_CRITICAL_KB) or 40*1024)
-    local total=math.max(0,tonumber(memory.total_kb) or 0)
-    local soft_ratio=tonumber(Config.BACKGROUND_MEMORY_SOFT_RATIO) or 0.12
-    local critical_ratio=tonumber(Config.BACKGROUND_MEMORY_CRITICAL_RATIO) or 0.08
-    local soft_ratio_limit=math.max(fixed_soft,tonumber(Config.BACKGROUND_MEMORY_SOFT_MAX_KB) or 128*1024)
-    local critical_ratio_limit=math.max(fixed_critical,tonumber(Config.BACKGROUND_MEMORY_CRITICAL_MAX_KB) or 80*1024)
-    local ratio_soft=math.min(soft_ratio_limit,math.floor(total*soft_ratio+.5))
-    local ratio_critical=math.min(critical_ratio_limit,math.floor(total*critical_ratio+.5))
-    local soft=math.max(fixed_soft,ratio_soft)
-    local critical=math.max(fixed_critical,ratio_critical)
+    local thresholds=RuntimePressure.thresholds()
+    local soft=thresholds.soft
+    local critical=thresholds.critical
     if critical>soft then critical=soft end
     memory.soft_kb=soft
     memory.critical_kb=critical

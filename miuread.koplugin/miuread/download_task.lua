@@ -62,6 +62,20 @@ local function lower_worker_priority()
     return called
 end
 
+local function raise_worker_oom_score()
+    -- Prefer the OOM killer taking this checkpointed worker (which resumes
+    -- from its chapter checkpoint) over the resident KOReader process.
+    local value=tonumber(Config.DOWNLOAD_WORKER_OOM_SCORE_ADJ)
+    if not value or value==0 then return false,"disabled" end
+    local ok,err=pcall(function()
+        local file=io.open("/proc/self/oom_score_adj","w")
+        if not file then error("not_writable") end
+        file:write(tostring(math.max(-1000,math.min(1000,value))))
+        file:close()
+    end)
+    return ok,tostring(err)
+end
+
 local function signal_worker(pid,signal)
     pid=tonumber(pid)
     signal=tonumber(signal) or 15
@@ -633,7 +647,8 @@ function DownloadTask:descriptor()
         local h=self.hibernated
         if not h then return nil end
         return {hibernated=true,hibernate_reason=h.reason,stage=h.stage,started_at=h.started_at,
-            restart_count=tonumber(h.restart_count) or 0,stall_restart_count=tonumber(h.stall_restart_count) or 0}
+            restart_count=tonumber(h.restart_count) or 0,stall_restart_count=tonumber(h.stall_restart_count) or 0,
+            cooldown_until=tonumber(h.cooldown_until) or nil}
     end
     return {
         pid=job.pid,progress_path=job.progress_path,result_path=job.result_path,
@@ -1144,7 +1159,7 @@ function DownloadTask:_heavy_watch(force)
     if force~=true and now-(tonumber(self.last_heavy_watch_at) or 0)<gap then return false end
     local memory=RuntimePressure.memory_snapshot(force==true)
     local stage=self:stage()
-    if not self:is_heavy_stage() and not (memory and memory.available_kb<(tonumber(Config.HEAVY_NATIVE_HIBERNATE_KB) or 96*1024)) then
+    if not self:is_heavy_stage() and not (memory and memory.available_kb<RuntimePressure.thresholds().native_hibernate) then
         return false
     end
     self.last_heavy_watch_at=now
@@ -1175,7 +1190,7 @@ function DownloadTask:_guard_running_memory(job,now,network_waiting)
     local memory=RuntimePressure.memory_snapshot(true)
     local available=memory and tonumber(memory.available_kb or 0) or 0
     if available<=0 then return false end
-    local minimum=math.max(32*1024,tonumber(Config.HEAVY_DOWNLOAD_RUNNING_MIN_KB) or 72*1024)
+    local minimum=RuntimePressure.thresholds().running_min
     if available>=minimum then
         job.running_low_memory_samples=0
         return false
@@ -1236,6 +1251,7 @@ function DownloadTask:_read_progress(job)
             job.network_sleep_notified=nil
             job.network_hibernate_requested_at=nil
             job.last_effective_progress_at=job.last_progress_at
+            job.first_effective_progress_at=job.first_effective_progress_at or job.last_progress_at
         end
         job.waiting_notified = false
         job.stall_suspect_notified = false
@@ -1369,16 +1385,37 @@ function DownloadTask:_handle_hibernated(job,result)
     state.stage="hibernated"
     state.hibernated=true
     state.hibernate_reason=tostring(result and result.reason or "heavy_resource")
-    state.message=state.hibernate_reason=="network_offline"
-        and "网络长时间不可用，下载断点已保存；联网后继续"
-        or (state.hibernate_reason=="low_battery"
-            and "设备电量较低，下载断点已保存；唤醒后可继续"
-            or "为前台释放资源，下载已安全休眠")
+    -- One generic message hid very different causes; users could not tell a
+    -- memory-pressure park from a typography yield apart.
+    local hibernate_messages={
+        network_offline="网络长时间不可用，下载断点已保存；联网后继续",
+        low_battery="设备电量较低，下载断点已保存；唤醒后可继续",
+        restart_fuse="多次自动恢复未成功，断点已保留；设备空闲时将自动继续",
+        memory_pressure="设备内存紧张，已保存断点；空闲时自动继续",
+        typography_low_memory="排版重整需要内存，下载已让路；完成后自动继续",
+        typography_heavy_stage="排版重整需要内存，下载已让路；完成后自动继续",
+        native_low_memory="打开其他界面需要内存，下载已让路；返回后自动继续",
+    }
+    state.message=hibernate_messages[state.hibernate_reason]
+        or "为前台释放资源，下载已安全休眠"
     state.updated_at=os.time()
+    local cooldown_until
+    if state.hibernate_reason=="restart_fuse" then
+        cooldown_until=os.time()+math.max(0,tonumber(Config.DOWNLOAD_FUSE_COOLDOWN_SECONDS) or 900)
+        state.cooldown_until=cooldown_until
+    elseif state.hibernate_reason=="memory_pressure" then
+        -- A memory-pressure park right after a resume means memory sits at the
+        -- resume line and the pump would otherwise fork a fresh worker every
+        -- ~90 seconds (each fork is a 1-2s CPU spike the user feels as UI
+        -- stutter). A short minimum park spaces those spikes out; fast legit
+        -- recovery still happens through the fast retries once memory frees.
+        cooldown_until=os.time()+math.max(0,tonumber(Config.DOWNLOAD_MEMORY_HIBERNATE_MIN_PARK_SECONDS) or 90)
+        state.cooldown_until=cooldown_until
+    end
     local h={book=serializable_copy(job.restart_book),options=options,on_progress=job.on_progress,on_done=job.on_done,
         restart_count=tonumber(job.restart_count) or 0,stall_restart_count=tonumber(job.stall_restart_count) or 0,
         backgrounded=self.backgrounded==true,reason=state.hibernate_reason,stage=tostring(result and result.stage or self:stage()),
-        started_at=job.started_at,last_state=U.copy(state)}
+        started_at=job.started_at,last_state=U.copy(state),cooldown_until=cooldown_until}
     os.remove(job.progress_path); os.remove(job.result_path); if job.recovery_path then os.remove(job.recovery_path) end
     os.remove(job.cancel_path); if job.pause_path then os.remove(job.pause_path) end
     if job.pause_ack_path then os.remove(job.pause_ack_path) end
@@ -1398,6 +1435,17 @@ function DownloadTask:_handle_hibernated(job,result)
         "reason=",h.reason,"stage=",h.stage)
     pcall(PseudoLockscreen.background_task_done, "download_hibernated")
     return true
+end
+
+-- The auto-restart budget is exhausted but the chapter checkpoint still
+-- exists. Park the task as hibernated with a cooldown instead of dead-ending
+-- into a failed state, so the idle pump can revive it once memory recovers.
+function DownloadTask:_park_after_restart_fuse(job)
+    if not job or self.job~=job then return false end
+    if type(job.restart_book)~="table" or tostring(job.restart_book.bookId or "")=="" then
+        return false
+    end
+    return self:_handle_hibernated(job,{reason="restart_fuse",stage=self:stage()})
 end
 
 function DownloadTask:request_hibernate(reason)
@@ -1567,8 +1615,10 @@ end
 function DownloadTask:resume_hibernated(reason)
     local h=self.hibernated
     if not h then return false,"not_hibernated" end
+    local cooldown_until=tonumber(h.cooldown_until) or 0
+    if cooldown_until>os.time() then return false,"low_memory" end
     local memory=RuntimePressure.memory_snapshot(true)
-    local minimum=math.max(1,tonumber(Config.HEAVY_DOWNLOAD_RESUME_MIN_KB) or 72*1024)
+    local minimum=RuntimePressure.thresholds().resume_min
     if memory and memory.available_kb<minimum then
         logger.info("[MiuRead][HeavyGuard] hibernated download remains parked",
             "reason=low_memory","memory_kb=",tostring(memory.available_kb),"minimum_kb=",tostring(minimum))
@@ -1576,9 +1626,14 @@ function DownloadTask:resume_hibernated(reason)
     end
     self.hibernated=nil
     local options=serializable_copy(h.options or {}) or {}
+    options._from_checkpoint=true
     options._stall_restart_count=tonumber(h.stall_restart_count) or tonumber(options._stall_restart_count) or 0
-    local ok,err=self:start(h.book,options,h.on_progress,h.on_done,h.restart_count)
-    if not ok then self.hibernated=h; return false,err end
+    local ok,err,errcode=self:start(h.book,options,h.on_progress,h.on_done,h.restart_count)
+    if not ok then
+        self.hibernated=h
+        if errcode=="low_memory" then return false,"low_memory" end
+        return false,err
+    end
     self.backgrounded=h.backgrounded==true
     if self.backgrounded then self:set_backgrounded(true) end
     os.remove(self.heavy_watch_path)
@@ -1590,6 +1645,17 @@ end
 function DownloadTask:_restart_interrupted(job,stall_recovery)
     if not job or job.cancel_requested_at then return false end
     local count=tonumber(job.restart_count) or 0
+    -- A worker that survived long enough to make real progress earns a fresh
+    -- restart budget. Without this, a long book pays the fuse cooldown for
+    -- every death after the first two even when it had been healthy for hours;
+    -- a fork-and-die loop never reaches the bar, so churn stays bounded.
+    local ran_seconds=os.time()-(tonumber(job.started_at) or os.time())
+    if count>0 and job.first_effective_progress_at~=nil
+        and ran_seconds>=math.max(0,tonumber(Config.DOWNLOAD_RESTART_BUDGET_RESET_SECONDS) or 600) then
+        logger.info("[MiuRead][DownloadTask] restart budget reset",
+            "previous=",tostring(count),"ran_seconds=",tostring(ran_seconds))
+        count=0
+    end
     local maximum=math.max(0,tonumber(Config.DOWNLOAD_AUTO_RESTARTS) or 2)
     if count>=maximum or type(job.restart_book)~="table" or tostring(job.restart_book.bookId or "")=="" then
         return false
@@ -1599,6 +1665,7 @@ function DownloadTask:_restart_interrupted(job,stall_recovery)
     local stall_count=tonumber(job.stall_restart_count) or tonumber(options._stall_restart_count) or 0
     if stall_recovery==true then stall_count=stall_count+1 end
     options._stall_restart_count=stall_count
+    options._from_checkpoint=true
     local network_control=job.network_path and U.read_file(job.network_path,true) or nil
     network_control=tostring(network_control or ""):match("^%s*([%w_%-]+)")
     if network_control=="ipv4" then
@@ -1635,9 +1702,28 @@ function DownloadTask:_restart_interrupted(job,stall_recovery)
     if self:_owns_job() then os.remove(self.owner_path) end
     self.job=nil
     self:_release_awake()
-    local ok,err=self:start(book,options,on_progress,on_done,count+1)
+    local ok,err,errcode=self:start(book,options,on_progress,on_done,count+1)
     if not ok then
         PseudoLockscreen.set_download_active(false)
+        if errcode=="low_memory" then
+            -- The restart was deferred only because memory is tight. Keep the
+            -- checkpoint parked for the idle pump instead of reporting failure.
+            local now=os.time()
+            self.hibernated={book=book,options=options,on_progress=on_progress,on_done=on_done,
+                restart_count=count+1,stall_restart_count=stall_count,backgrounded=self.backgrounded==true,
+                reason="restart_fuse",stage="unknown",started_at=now,
+                cooldown_until=now+math.max(0,tonumber(Config.DOWNLOAD_FUSE_COOLDOWN_SECONDS) or 900),
+                last_state={stage="hibernated",hibernated=true,hibernate_reason="restart_fuse",
+                    message="多次自动恢复未成功，断点已保留；设备空闲时将自动继续",updated_at=now}}
+            self:_clear_lockscreen_network("download_restart_parked")
+            U.atomic_write(self.heavy_watch_path,Json.encode({updated_at=now,owner="download",
+                hibernated=true,reason="restart_fuse"}),true)
+            if on_progress then pcall(on_progress,self.hibernated.last_state) end
+            logger.warn("[MiuRead][HeavyGuard] automatic restart parked for memory",
+                "book=",tostring(book and book.bookId or ""))
+            pcall(PseudoLockscreen.background_task_done, "download_restart_parked")
+            return true
+        end
         logger.warn("[MiuRead][DownloadTask] automatic restart failed",tostring(err))
         if on_done then
             on_done({ok=false,error="后台下载进程被系统中断，自动恢复失败："..tostring(err).."。断点仍已保留。"})
@@ -1952,6 +2038,7 @@ function DownloadTask:_poll()
         -- Android while still recovering a truly dead task from its checkpoint.
         if idle<180 or now-job.unknown_seen_at<180 then self:_schedule(); return end
         if self:_restart_interrupted(job) then return end
+        if self:_park_after_restart_fuse(job) then return end
         self:_finish(job)
         return
     end
@@ -1965,6 +2052,7 @@ function DownloadTask:_poll()
             return
         end
         if self:_restart_interrupted(job,true) then return end
+        if self:_park_after_restart_fuse(job) then return end
         self:_finish(job,"下载任务没有响应，自动恢复未能启动；断点已保留，可点击继续。")
         return
     end
@@ -1979,6 +2067,7 @@ function DownloadTask:_poll()
     -- process must remain absent for 30 seconds and make no progress for 20.
     if now-job.dead_seen_at<30 or idle<20 then self:_schedule(); return end
     if self:_restart_interrupted(job) then return end
+    if self:_park_after_restart_fuse(job) then return end
     self:_finish(job)
 end
 
@@ -2007,7 +2096,8 @@ function DownloadTask:attach(descriptor,on_progress,on_done,restart_book,restart
             on_progress=on_progress,on_done=on_done,restart_count=tonumber(descriptor.restart_count) or 0,
             stall_restart_count=tonumber(descriptor.stall_restart_count) or 0,
             backgrounded=true,reason=tostring(descriptor.hibernate_reason or "recovered"),
-            stage=tostring(descriptor.stage or "hibernated"),started_at=descriptor.started_at}
+            stage=tostring(descriptor.stage or "hibernated"),started_at=descriptor.started_at,
+            cooldown_until=tonumber(descriptor.cooldown_until) or nil}
         self.backgrounded=true
         PseudoLockscreen.set_download_active(false)
         logger.warn("[MiuRead][DownloadTask] recovered hibernated task",
@@ -2095,17 +2185,20 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
     -- Ref #91: the failing KPW6 started a fresh worker with ~95 MiB available
     -- and was killed immediately afterwards. A fresh worker duplicates Lua
     -- state before it reaches a checkpoint, so reject that unsafe edge instead
-    -- of deliberately driving the whole KOReader process into OOM.
+    -- of deliberately driving the whole KOReader process into OOM. A worker
+    -- restarted from an existing chapter checkpoint has already paid most of
+    -- its setup cost, so it only needs the (lower) resume threshold.
     collectgarbage("collect")
     local memory=RuntimePressure.memory_snapshot(true)
-    local minimum=math.max(1,tonumber(Config.HEAVY_DOWNLOAD_START_MIN_KB) or 96*1024)
+    local thresholds=RuntimePressure.thresholds()
+    local from_checkpoint=(options or {})._from_checkpoint==true
+    local minimum=from_checkpoint and thresholds.resume_min or thresholds.start_min
     if memory and tonumber(memory.available_kb or 0)<minimum then
-        RuntimePressure.activate("download_start_low_memory",
-            tonumber(Config.PERFORMANCE_MEMORY_PROTECT_SECONDS) or 30*60,"global")
         logger.warn("[MiuRead][HeavyGuard] download start deferred",
             "reason=low_memory","memory_kb=",tostring(memory.available_kb),
-            "minimum_kb=",tostring(minimum),"book=",tostring(book and book.bookId or ""))
-        return false,"当前可用内存较低，已暂缓启动下载以避免 KOReader 被系统终止。请关闭其他界面后再试，已有断点不会丢失。"
+            "minimum_kb=",tostring(minimum),"checkpoint=",tostring(from_checkpoint),
+            "book=",tostring(book and book.bookId or ""))
+        return false,"当前可用内存较低，已暂缓启动下载以避免 KOReader 被系统终止。请关闭其他界面后再试，已有断点不会丢失。","low_memory"
     end
 
     local stamp = tostring(os.time()) .. "-" .. tostring(math.random(10000, 99999))
@@ -2182,6 +2275,9 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
         -- any connection of its own.
         SubprocessHygiene.close_inherited_sockets()
         lower_worker_priority()
+        local oom_ok,oom_detail=raise_worker_oom_score()
+        logger.info("[MiuRead][DownloadTask] worker oom_score_adj",
+            "applied=",tostring(oom_ok),"detail=",tostring(oom_detail))
         local Store = require("miuread.store")
         local Http = require("miuread.http")
         local Api = require("miuread.api")

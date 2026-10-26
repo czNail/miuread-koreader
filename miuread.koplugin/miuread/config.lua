@@ -183,8 +183,13 @@ local C = {
     -- Automatic home maintenance is serialized on memory-constrained Kindles.
     -- Soft pressure enables temporary lightweight behavior; critical pressure
     -- defers optional heavy work until memory becomes available again.
-    BACKGROUND_MEMORY_SOFT_KB = 64 * 1024,
-    BACKGROUND_MEMORY_CRITICAL_KB = 40 * 1024,
+    -- These floors intentionally keep the historical 64/40 MiB values: on a
+    -- 256 MiB device they hold a near-permanent "low" level, which throttles
+    -- home background maintenance (covers, metadata, scans) away from the UI.
+    -- Download start/resume/hibernate gates do NOT depend on these levels --
+    -- they compare MemAvailable against the scaled HEAVY_* thresholds.
+    BACKGROUND_MEMORY_SOFT_FLOOR_KB = 64 * 1024,
+    BACKGROUND_MEMORY_CRITICAL_FLOOR_KB = 40 * 1024,
     BACKGROUND_MEMORY_SOFT_RATIO = 0.12,
     BACKGROUND_MEMORY_CRITICAL_RATIO = 0.08,
     -- Ratio-based thresholds are capped so high-memory Android devices do not
@@ -336,6 +341,44 @@ local C = {
     HEAVY_DOWNLOAD_RUNNING_MIN_KB = 72 * 1024,
     HEAVY_DOWNLOAD_RUNNING_LOW_SAMPLES = 2,
     HEAVY_DOWNLOAD_RUNNING_SAMPLE_SECONDS = 5,
+    -- Heavy-guard thresholds above are the CAPS of a MemTotal-scaled profile:
+    -- each is clamp(MemTotal * ratio, floor, cap). Small-RAM devices (for
+    -- example a 256 MiB KPW2) can never present 96 MiB free, so absolute
+    -- values meant "downloads permanently forbidden" there. >=512 MiB devices
+    -- keep the historical absolutes because the caps equal them.
+    MEMORY_SMALL_TIER_TOTAL_KB = 300 * 1024,
+    HEAVY_DOWNLOAD_START_RATIO = 0.20,
+    HEAVY_DOWNLOAD_START_FLOOR_KB = 48 * 1024,
+    HEAVY_DOWNLOAD_RESUME_RATIO = 0.19,
+    HEAVY_DOWNLOAD_RESUME_FLOOR_KB = 44 * 1024,
+    HEAVY_DOWNLOAD_RUNNING_RATIO = 0.16,
+    HEAVY_DOWNLOAD_RUNNING_FLOOR_KB = 36 * 1024,
+    HEAVY_NATIVE_HIBERNATE_RATIO = 0.24,
+    HEAVY_NATIVE_HIBERNATE_FLOOR_KB = 56 * 1024,
+    HEAVY_NATIVE_CRITICAL_RATIO = 0.14,
+    HEAVY_NATIVE_CRITICAL_FLOOR_KB = 36 * 1024,
+    DOWNLOAD_COEXIST_RATIO = 0.25,
+    DOWNLOAD_COEXIST_FLOOR_KB = 48 * 1024,
+    -- When the kernel does run out of memory, prefer killing the checkpointed
+    -- download child (which resumes from its chapter checkpoint) over the
+    -- resident KOReader process. The parent value stays disabled by default;
+    -- the relative child/parent gap already decides the victim.
+    DOWNLOAD_WORKER_OOM_SCORE_ADJ = 500,
+    DOWNLOAD_PARENT_OOM_SCORE_ADJ = 0,
+    -- Idle pump: keep retrying a hibernated download while a memory window is
+    -- open instead of waiting for a UI event to revive it.
+    DOWNLOAD_IDLE_PUMP_SECONDS = 75,
+    -- An exhausted auto-restart budget parks the task as hibernated for this
+    -- long before the idle pump may try again.
+    DOWNLOAD_FUSE_COOLDOWN_SECONDS = 900,
+    -- Minimum park time after a memory-pressure hibernation. Without it, a
+    -- device hovering at the resume line forks a fresh worker roughly every
+    -- 90 seconds; each fork is a short CPU spike the UI feels as stutter.
+    DOWNLOAD_MEMORY_HIBERNATE_MIN_PARK_SECONDS = 90,
+    -- A worker that survived at least this long AND made chapter progress
+    -- resets the auto-restart budget on death, so a healthy long download is
+    -- not punished by the fuse for its first two deaths anymore.
+    DOWNLOAD_RESTART_BUDGET_RESET_SECONDS = 600,
 
     -- beta.4 coalesces repeated typography taps into one KOReader reflow. On a
     -- low-memory/heavy-download overlap, let the downloader checkpoint first
@@ -344,6 +387,13 @@ local C = {
     TYPOGRAPHY_REBUILD_HINT_SECONDS = 12,
     TYPOGRAPHY_HIBERNATE_MEMORY_KB = 72 * 1024,
     TYPOGRAPHY_CRITICAL_MEMORY_KB = 48 * 1024,
+    -- MemTotal-scaled typography guard lines; the absolutes above are the caps
+    -- (see runtime_pressure.compute_thresholds). A fixed 72 MiB hibernate line
+    -- fired on essentially every typography change on a 256 MiB device.
+    TYPOGRAPHY_HIBERNATE_RATIO = 0.20,
+    TYPOGRAPHY_HIBERNATE_FLOOR_KB = 48 * 1024,
+    TYPOGRAPHY_CRITICAL_RATIO = 0.12,
+    TYPOGRAPHY_CRITICAL_FLOOR_KB = 32 * 1024,
     TYPOGRAPHY_HEAVY_WAIT_SECONDS = 8,
     TYPOGRAPHY_DOWNLOAD_RESUME_DELAY_SECONDS = 2.2,
     -- Remote cover fetching may coexist with a healthy download. It yields only
