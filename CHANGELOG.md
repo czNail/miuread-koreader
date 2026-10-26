@@ -1,4 +1,13 @@
-## v6.1.0-beta.6 — automatic end-of-reading sync repair (candidate)
+# Changelog
+
+## 6.1.0-beta.7 — Beta Tag CI 元数据修复版
+
+- 修正 beta.6 版本日志标题及位置，使 CHANGELOG.md 符合发布工作流既有格式。
+- Tag 发布在校验前自动确保当前版本的 CHANGELOG 条目存在；缺失时从 Tag 提交说明生成，不再要求用户手动补标题。
+- 保留现有 Beta Tag 自动发布和手动发布两条路径；不移动旧 Tag、不修改下载和同步业务逻辑，数据库 Schema 仍为 136。
+- 进度同步改动与 beta.6 保持一致；仍需在真实 Kindle 和微信读书服务端验证双向精确同步。
+
+## 6.1.0-beta.6 — automatic end-of-reading sync repair (candidate)
 
 - Resolve local/cloud positions using reading-event timestamps; remove the 30-second ambiguous-clock conflict gate and prefer the latest cloud observation even within 30 seconds.
 - Allow legacy fenced UNSENT progress to re-enter automatic upload after cloud freshness comparison; preserve superseded local snapshots and choose newest Web/Agent observation without user conflict dialogs.
@@ -7,8 +16,6 @@
 - Prevent retry-budget drops of provably unsent reading time, retain verified safe carry and its journal through restarts, and improve fixed-height status-row contrast.
 - Preserve schema 136, Web-only post-write verification, existing download paths and Tag-triggered beta CI.
 - Kindle and live WeRead verification still required.
-
-# Changelog
 
 ## 6.1.0-beta.5 — 修复整合与功能回归候选版
 

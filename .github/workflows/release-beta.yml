@@ -134,8 +134,13 @@ jobs:
               echo "::warning::Tag 中的源码版本 $SOURCE_VERSION 与目标版本 $VERSION 不同；仅在打包工作区修正元数据，绝不移动 Tag。"
               python3 tools/prepare_beta_release.py --version "$VERSION" --notes "$RELEASE_NOTES_INPUT"
             else
-              echo "Tag 源码已包含目标版本，直接校验元数据和 CHANGELOG。"
+              echo "Tag 源码已包含目标版本。"
             fi
+            # Source may have the target version without a canonical CHANGELOG
+            # header. Repair only this build workspace, never move the Git tag.
+            python3 -m unittest discover -s tools -p 'test_ensure_beta_tag_changelog.py'
+            python3 tools/ensure_beta_tag_changelog.py \
+              --version "$VERSION" --notes "$(git log -1 --format=%s)"
           fi
 
       - name: Read and validate beta identity
