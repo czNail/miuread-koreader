@@ -20212,6 +20212,10 @@ function Plugin:_start_next_queued_download()
         return false
     end
     if not self:logged_in() or self:_network_radio_hint()==false then return false end
+    -- Tasks written by pre-beta.3 versions have no VID. Keep them visible,
+    -- require a deliberate one-time confirmation rather than guessing identity.
+    if tostring(next_job.account_vid or "")=="" then return false end
+    if tostring(next_job.account_vid)~=tostring(((self.store:auth() or {}).account or {}).vid or "") then return false end
     if next_job.defer_until_reader_closed==true and self:_active_reader_ui() then return false end
     if HOME_EXITING or UIManager._exit_code~=nil or PowerState.state()~="NORMAL"
         or self._miuread_suspended==true or HOME_SESSION.suspended==true then
@@ -20244,8 +20248,12 @@ function Plugin:_start_next_queued_download()
             return
         end
         local current_vid=tostring(((self.store:auth() or {}).account or {}).vid or "")
-        if waiting.account_vid and waiting.account_vid~="" and current_vid~=waiting.account_vid then
-            logger.warn("[MiuRead][DownloadAdmission] account changed; launch blocked")
+        if current_vid=="" or not waiting.account_vid or waiting.account_vid=="" then
+            logger.warn("[MiuRead][DownloadAdmission] legacy queued job needs account confirmation")
+            return
+        end
+        if current_vid~=waiting.account_vid then
+            logger.warn("[MiuRead][DownloadAdmission] queued account changed; launch blocked")
             return
         end
         if HOME_EXITING or UIManager._exit_code~=nil or (self.download_task and self.download_task:busy())
@@ -20278,6 +20286,8 @@ function Plugin:show_waiting_downloads()
     if job.defer_until_reader_closed==true then variant=variant.." · 退出阅读后开始" end
     if job.wait_reason=="low_memory" then variant=variant.." · 等待设备内存" end
     if job.wait_reason=="background_busy" then variant=variant.." · 等待后台资源" end
+    local current_vid=tostring(((self.store:auth() or {}).account or {}).vid or "")
+    local unbound=tostring(job.account_vid or "")==""
     local items={
         {text=title,post_text=variant,callback=function()
             UIManager:show(ConfirmBox:new{text="从等待队列移除《"..title.."》？",ok_text="移除",cancel_text="保留",ok_callback=function()
@@ -20286,6 +20296,29 @@ function Plugin:show_waiting_downloads()
             end})
         end},
     }
+    if unbound then
+        items[#items+1]={text="确认在当前账号下载此旧任务",callback=function()
+            if not self:logged_in() or current_vid=="" then
+                self:info("请先登录账号再确认等待任务。")
+                return
+            end
+            local fresh=self.store:download_queue()
+            if not fresh[1] or tostring(fresh[1].key or "")~=tostring(job.key or "")
+                or tostring(fresh[1].queued_at or "")~=tostring(job.queued_at or "") then
+                self:info("等待任务已发生变化，请重新打开列表。")
+                return
+            end
+            fresh[1].account_vid=current_vid
+            fresh[1].queue_nonce=tostring(os.time())..":"..tostring(math.random(100000,999999))
+            local saved=self.store:save_download_queue(fresh)
+            if saved==true then
+                self:toast("已确认当前账号，等待资源就绪")
+                self:_schedule_resource_download_retry("legacy_account_confirmed")
+            else
+                self:info("保存账号确认失败，请重试。")
+            end
+        end}
+    end
     self:list("等待下载 · 最多一本",items)
 end
 
@@ -23857,18 +23890,6 @@ function Plugin:_adopt_remote_progress_issue(item,callback)
     local started,start_error=self.sync:remote(book_id,function(remote,err)
         if not remote then callback(false,err or "remote_unavailable"); return end
         if remote.conflict then callback(false,"remote_source_conflict",remote); return end
-        local remote_uid=tostring(remote.chapter_uid or remote.chapterUid or "")
-        local remote_co=tonumber(remote.canonical_offset or remote.offset or remote.chapter_offset)
-        local basis=tostring(remote.position_basis or remote.offset_basis or "")
-        if remote_uid=="" or remote_co==nil or remote_co<0
-            or basis:find("unresolved",1,true) then
-            -- Do not erase local pending state for a remote position that could
-            -- not be precisely resolved to a chapter + Web offset.
-            logger.warn("[MiuRead][ProgressResolution] remote adoption deferred",
-                "book=",book_id,"basis=",basis,"co=",tostring(remote_co or "-"))
-            callback(false,"remote_exact_unresolved",remote)
-            return
-        end
         self.store:reset_progress_sync_state(book_id,"user_adopt_remote_authority",true)
         self:_clear_progress_write_fence(book_id,"user_adopt_remote_authority")
         if type(self._position_resolution_contexts)=="table" then self._position_resolution_contexts[book_id]=nil end
@@ -25220,7 +25241,7 @@ function Plugin:manual_sync()
     return self:ensure_read_report_progress("manual_progress_sync",false)
 end
 
-function Plugin:_remote_matches(remote,target)
+function Plugin:_remote_matches(remote,target,web_post_verification)
     local threshold=tonumber(self.store:preferences().sync.threshold) or 2
     if not remote then return false,nil,nil end
     local target_position=type(target)=="table" and target or nil
@@ -25268,18 +25289,18 @@ function Plugin:_remote_matches(remote,target)
         return percent and math.abs(percent-target_percent)<=threshold,
             percent,candidate.source,{reason="percent_fallback",basis=target_basis}
     end
+    if web_post_verification==true then
+        -- Only the Web side can confirm a Web POST. Ordinary cross-device
+        -- comparisons still use the unmodified beta.2 source policy below.
+        local web=remote.web or (remote.source=="web_cookie" and remote or nil)
+        if not web then return false,nil,"web_cookie",{reason="web_readback_unavailable"} end
+        return match(web)
+    end
     if remote.conflict then
-        -- A Web POST is confirmed by the matching Web readback, not Agent.
-        -- Keep Agent disagreement as a diagnostic; never mistake Agent-only
-        -- agreement for proof that the Web write was persisted.
         local ok,pct,source,meta=match(remote.web)
-        meta=type(meta)=="table" and meta or {}
-        meta.source_conflict=true
-        if ok then
-            meta.reason="web_confirmed_agent_disagrees"
-            return true,pct,source,meta
-        end
-        meta.reason="web_unconfirmed_remote_source_conflict"
+        if ok then return true,pct,source,meta end
+        ok,pct,source,meta=match(remote.agent)
+        if ok then return true,pct,source,meta end
         return false,pct,source,meta
     end
     return match(remote)
@@ -25516,7 +25537,10 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
     local submitted_seq=tonumber(submitted_position.progress_sequence or 0) or 0
     local submitted_at=tonumber(submitted_position.submitted_at or submitted_position.captured_at) or os.time()
     self._progress_verify_inflight=self._progress_verify_inflight or {}
-    local verify_key=table.concat({book_id,
+    local auth_for_verify=self.store:auth() or {}
+    local account_for_verify=type(auth_for_verify.account)=="table" and auth_for_verify.account or {}
+    local verify_key=table.concat({tostring(account_for_verify.vid or ""),
+        tostring(auth_for_verify.login_session_id or ""),book_id,
         tostring(submitted_position.progress_epoch or "-"),tostring(submitted_seq),
         tostring(submitted_position.chapter_uid or "-"),
         tostring(submitted_position.canonical_offset or submitted_position.chapter_offset or submitted_position.offset or "-")},":")
@@ -25552,6 +25576,16 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
     end
     local function finish(ok,remote,reason,meta)
         if done then return end
+        -- An old account's verification may arrive after a login change.
+        -- Never write its pending/verified status into the current account.
+        local current_auth=self.store:auth() or {}
+        local current_account=type(current_auth.account)=="table" and current_auth.account or {}
+        if tostring(current_account.vid or "")~=tostring(account_for_verify.vid or "")
+            or tostring(current_auth.login_session_id or "")~=tostring(auth_for_verify.login_session_id or "") then
+            done=true
+            notify_waiters(false,remote,"account_changed",{stale_account=true})
+            return
+        end
         if submitted_seq>0 and not self:_progress_snapshot_current(book_id,submitted_position) then
             done=true
             logger.info("[MiuRead][ProgressTransaction] stale verification ignored",
@@ -25584,7 +25618,7 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
                 finish(false,nil,"superseded",{superseded=true}); return
             end
             self.sync:remote(book_id,function(remote,remote_err)
-                local matched,actual,source,meta=self:_remote_matches(remote,submitted_position)
+                local matched,actual,source,meta=self:_remote_matches(remote,submitted_position,true)
                 meta=type(meta)=="table" and meta or {}
                 local remote_updated=tonumber(remote and remote.updated_at or 0) or 0
                 local target_co=tonumber(submitted_position.canonical_offset or submitted_position.chapter_offset or submitted_position.offset)
@@ -25615,7 +25649,8 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
                 else
                     finish(false,remote,remote_err or meta.reason or "cloud_not_confirmed",meta)
                 end
-            end,{force=true,raw_coordinate=true,detached=detached,record_snapshot=record_snapshot,
+            end,{force=true,raw_coordinate=true,web_only=true,verify_only=true,
+                detached=detached,record_snapshot=record_snapshot,
                 catalog_snapshot=catalog_snapshot,update_cloud_anchor=false})
         end)
     end

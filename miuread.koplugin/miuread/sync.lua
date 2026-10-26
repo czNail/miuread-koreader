@@ -2425,7 +2425,12 @@ function Sync:remote(book_id, callback, options)
     } or nil
     local reader_snapshot=self.reader
     local ok, err = self.async:run("remote_progress", function()
-        local out=self.api:progress_sources(book_id)
+        local out
+        if options.web_only==true then
+            out={web=self.api:web_progress(book_id)}
+        else
+            out=self.api:progress_sources(book_id)
+        end
 
         local function normalize_native(value,source)
             local progress=sourced_progress(value,book_id,source)
@@ -2487,6 +2492,13 @@ function Sync:remote(book_id, callback, options)
             "agent_uid=",tostring(agent and agent.chapter_uid or "-"),
             "agent_co=",tostring(agent and agent.offset or "-"),
             "agent_basis=",tostring(agent and agent.position_basis or "-"))
+        if options.verify_only==true then
+            -- Reconcile a Web write with the Web response alone; no session
+            -- baseline change, no flash write and no Agent-only acceptance.
+            if web then callback(web,nil)
+            else callback(nil,tostring(value.web_error or "web_progress_unavailable")) end
+            return
+        end
         local remote=choose_remote_progress(web,agent,threshold)
         if not remote then
             local remote_error=tostring(value.web_error or value.agent_error or "remote progress unavailable")

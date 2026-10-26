@@ -519,7 +519,23 @@ local function refresh_remote_anchor(client, book_id, book)
         or progress == nil or progress<0 or progress>100 then return false end
     book.remote_raw_progress = progress
     book.remote_chapter_uid = uid
-    book.remote_chapter_idx = idx or tonumber(book.chapter_idx) or 0
+    if idx==nil then
+        -- A chapter index can only be recovered from a record with matching UID.
+        for _,chapter in ipairs(type(book.chapters)=="table" and book.chapters or {}) do
+            if tostring(chapter_uid(chapter) or "")==tostring(uid) then
+                idx=tonumber(chapter.chapterIdx or chapter.chapterIndex or chapter.chapter_index or chapter.chapter_idx)
+                break
+            end
+        end
+    end
+    if idx==nil and tostring(book.chapter_uid or "")==tostring(uid) then
+        idx=tonumber(book.chapter_idx)
+    end
+    if idx==nil and tostring(book.remote_chapter_uid or "")==tostring(uid) then
+        idx=tonumber(book.remote_chapter_idx)
+    end
+    if idx==nil or idx<0 or idx~=math.floor(idx) then return false end
+    book.remote_chapter_idx = idx
     book.remote_chapter_offset = offset
     book.remote_progress_loaded = true
     return true

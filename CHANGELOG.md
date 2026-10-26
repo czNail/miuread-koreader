@@ -1,15 +1,15 @@
 # Changelog
 
-## 6.1.0-beta.3 - Progress Reliability Candidate
+## 6.1.0-beta.5 — 修复整合与功能回归候选版
 
-- Preserve precise XPointer source anchors across failed asynchronous mapping callbacks.
-- Use a fresh Web getProgress position, not Agent, before any position-bearing reading-time compatibility report.
-- De-duplicate cloud progress verification per immutable book/epoch/sequence/coordinate transaction.
-- Reject unresolved cloud-authority adoption without clearing local pending data.
-- Verify Web writes only against Web readback; an Agent-only match cannot confirm a Web POST, while Agent lag remains diagnostic.
-- Keep queued downloads durable until delayed launch validation; cancel stale callbacks and bind new queued jobs to account VID.
-- Restore E-Ink zlib loading, HTTP chunk abort propagation, and KOReader exit fallback.
-- Retain the existing database schema and automatic Git Tag release workflow. No live Kindle verification is claimed.
+- 以 beta.2 为基线，选择性移植进度恢复锚点、E-Ink ZIP、HTTP 暂停与 KOReader 退出修复。
+- Web 上传只由 Web 回读确认；普通云端进度仍使用 Web/Agent 综合读取，保留原坐标字段优先级及原持久化写入。
+- 阅读时间兼容写入采用 Web 进度；缺失章节索引时只允许同章节 UID 的目录信息补齐。缺少可信上下文时保持既有失败补报路径。
+- 下载等待队列在延迟启动前重查队列身份和运行条件；历史无账号标记的等待任务需要手动确认后才能自动运行。
+- 同一笔进度上传的重复校验共享回调；扩充功能等价和异常恢复测试。
+- 本版未更改 SQLite Schema、下载协议、登录协议、原有 Tag 自动发布触发条件。
+- 尚未通过真实微信读书服务端与 Kindle 实机验证；历史 `co=368 → co=0` 的服务器侧原因仍待确认。
+
 
 ## 6.1.0-beta.2 - Beta Update
 

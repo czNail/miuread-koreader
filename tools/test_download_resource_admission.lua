@@ -56,7 +56,7 @@ compile(snippet,'@download_resource_methods',sandbox)()
 local function new_env()
     used_mem=85*1024;normal=true;background=nil
     scheduled={};events={}
-    pending={{key='x',book={bookId='x',title='test'},options={},open_after=false,wait_reason='low_memory'}}
+    pending={{key='x',book={bookId='x',title='test'},options={},open_after=false,wait_reason='low_memory',account_vid='account1'}}
     local store={}
     function store:download_queue() return pending end
     function store:auth() return {account={vid='account1'}} end
@@ -170,9 +170,14 @@ end)
 test('account switch prevents queued job launch',function()
     local p=new_env();used_mem=110*1024
     pending[1].account_vid='account2'
-    eq(p:_start_next_queued_download(),true)
-    run_next()
+    eq(p:_start_next_queued_download(),false)
     eq(#events,0);eq(#pending,1)
+end)
+test('legacy waiting task without account identity requires confirmation',function()
+    local p=new_env();used_mem=110*1024
+    pending[1].account_vid=nil
+    eq(p:_start_next_queued_download(),false)
+    eq(#pending,1);eq(#events,0);eq(#scheduled,0)
 end)
 test('task replacement invalidates delayed launch',function()
     local p=new_env();used_mem=110*1024
