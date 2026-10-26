@@ -25360,7 +25360,7 @@ function Plugin:_prepare_progress_snapshot(book_id,position,persist_sequence)
     return snapshot
 end
 
-function Plugin:_progress_snapshot_current(book_id,position)
+function Plugin:_progress_snapshot_current(book_id,position,allow_verified)
     book_id=tostring(book_id or "")
     if book_id=="" or type(position)~="table" then return false end
     local seq=tonumber(position.progress_sequence or 0) or 0
@@ -25371,7 +25371,13 @@ function Plugin:_progress_snapshot_current(book_id,position)
     if snapshot_epoch~=current_epoch then return false end
     local latest=tonumber(session.progress_latest_sequence or 0) or 0
     local verified=tonumber(session.progress_verified_sequence or 0) or 0
-    if verified>=seq then return false end
+    if verified>=seq then
+        -- Verification commits before its submit callback runs. That callback
+        -- may accept the same verified generation, while all send/replay gates
+        -- must continue to reject an already verified snapshot.
+        return allow_verified==true and verified==seq and latest==seq
+            and tonumber(session.progress_verified_epoch)==snapshot_epoch
+    end
     return seq>=latest
 end
 
@@ -25716,8 +25722,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
     local finished=false
     local accepted_notified=false
 
-    local function current()
-        return self:_progress_snapshot_current(book_id,snapshot)
+    local function current(allow_verified)
+        return self:_progress_snapshot_current(book_id,snapshot,allow_verified)
     end
     local function finish(ok,remote,err,meta)
         if finished then return end
@@ -25749,7 +25755,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             catalog_snapshot=options.catalog_snapshot,
         },function(verified,remote,verify_error,verify_meta)
             if finished then return end
-            if verify_error=="superseded" or not current() then
+            if verify_error=="account_changed" then finish(false,remote,verify_error,verify_meta); return end
+            if verify_error=="superseded" or not current(verified==true) then
                 finish(false,remote,"superseded",verify_meta)
                 return
             end
@@ -25861,7 +25868,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             catalog_snapshot=options.catalog_snapshot,
         },function(verified,remote,verify_error,meta)
             if finished then return end
-            if verify_error=="superseded" or not current() then
+            if verify_error=="account_changed" then finish(false,remote,verify_error,meta); return end
+            if verify_error=="superseded" or not current(verified==true) then
                 finish(false,remote,"superseded",meta)
             elseif verified then
                 self:_save_progress_state(book_id,"local_uploaded",
