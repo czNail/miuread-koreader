@@ -3,3 +3,5 @@ release.env
 *.zip
 *.sha256
 .DS_Store
+/release-notes.md
+/update-summary.txt

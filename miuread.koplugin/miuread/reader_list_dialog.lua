@@ -550,7 +550,7 @@ function Dialog:_rebuild()
             h = math.max(old.y + old.h, self.frame_dimen.y + self.frame_dimen.h) - math.min(old.y, self.frame_dimen.y),
         }
     end
-    UIManager:setDirty(self, function() return "full", Skin.expand_region(dirty) end)
+    UIManager:setDirty(self, function() return "ui", Skin.expand_region(dirty) end)
 end
 
 function Dialog:init()
@@ -587,7 +587,7 @@ function Dialog:onClose()
     return self:_close(self.opts and self.opts.on_back or nil)
 end
 function Dialog:onShow()
-    UIManager:setDirty(self, function() return "full", Skin.expand_region(self.frame_dimen) end)
+    UIManager:setDirty(self, function() return "ui", Skin.expand_region(self.frame_dimen) end)
 end
 function Dialog:onCloseWidget()
     local region = self.frame_dimen and Skin.expand_region(self.frame_dimen) or nil
@@ -625,7 +625,7 @@ function M.show(opts)
         return nil, tostring(dialog)
     end
     live_dialog = dialog
-    UIManager:show(dialog, "full", dialog.frame_dimen)
+    UIManager:show(dialog, "ui", dialog.frame_dimen)
     return dialog
 end
 return M

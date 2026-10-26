@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import re
 import sys
 root=Path(__file__).resolve().parents[1]
 main=(root/'miuread.koplugin/main.lua').read_text(encoding='utf-8')
@@ -15,9 +17,20 @@ ch=(root/'CHANGELOG.md').read_text(encoding='utf-8')
 workflow=(root/'.github/workflows/release-beta.yml').read_text(encoding='utf-8')
 checks=[]
 def ok(cond,msg): checks.append((bool(cond),msg))
-ok('VERSION = "6.0.0-beta.1"' in config,'config version 6.0.0-beta.1')
-ok('version = "6.0.0-beta.1"' in meta,'metadata version 6.0.0-beta.1')
-ok(ch.startswith('## 6.0.0-beta.1'),'6.0.0-beta.1 changelog first')
+# Historical invariants must remain valid after each new release. Do not pin
+# the *current* version to the original 6.0.0-beta.1 baseline.
+config_versions = re.findall(r'(?m)^\s*VERSION\s*=\s*["\'](\d+\.\d+\.\d+-beta\.\d+)["\']', config)
+meta_versions = re.findall(r'(?m)^\s*version\s*=\s*["\'](\d+\.\d+\.\d+-beta\.\d+)["\']', meta)
+current_version = config_versions[0] if len(config_versions) == 1 else None
+ok(len(config_versions) == 1 and len(meta_versions) == 1 and config_versions == meta_versions,
+   'beta config and plugin metadata contain matching versions')
+expected_version = os.environ.get('VERSION')
+ok(current_version is not None and (not expected_version or current_version == expected_version),
+   'beta version matches the release target when supplied')
+changelog_head = re.search(r'(?m)^## (\d+\.\d+\.\d+-beta\.\d+)(?:\s+-\s+.*|\s+—\s+.*)?$', ch)
+ok(current_version is not None and changelog_head is not None and changelog_head.group(1) == current_version,
+   'newest changelog entry matches current beta version')
+ok('## 6.0.0-beta.1' in ch, 'original 6.0.0-beta.1 changelog retained')
 ok('SCHEMA = 136' in config,'schema remains 136')
 ok('SOURCE_ANCHOR_WORDS = {24, 16, 12}' in precise,'beta19 multi-anchor sizes retained')
 ok('anchor_candidates = anchor_candidates' in precise,'beta19 captured anchor set retained')
@@ -51,7 +64,7 @@ bookstore=(root/'miuread.koplugin/miuread/bookstore.lua').read_text(encoding='ut
 shelf_client=(root/'miuread.koplugin/miuread/shelf_client.lua').read_text(encoding='utf-8')
 finished=(root/'miuread.koplugin/miuread/finished_status.lua').read_text(encoding='utf-8')
 shelf_progress=(root/'miuread.koplugin/miuread/shelf_progress.lua').read_text(encoding='utf-8')
-api=(root/'miuread.koplugin/miuread/api.lua').read_text(encoding='utf-8')
+api=(root/'miuread.koplugin/miuread/api_web.lua').read_text(encoding='utf-8')
 ok('function Api:add_to_shelf' in api and 'function Api:remove_from_shelf' in api,'#123 shelf add/remove API retained')
 ok('function Api:book_read_info' in api and 'function Api:mark_book_finished' in api,'#126 finished-status API retained')
 ok('similar' in bookstore and 'recommend' in bookstore,'#123 bookstore recommendation paths retained')
@@ -89,7 +102,7 @@ ok('AuthCompare' not in main and 'AuthBridge' not in main,'one-off auth diagnost
 ok('new_auth.native_shelf=Util.copy(old_auth.native_shelf)' in auth,'same-account Web re-login preserves Native shelf authorization')
 ok('new_vid==old_vid and native_vid==new_vid' in auth,'Native shelf authorization preservation is account-scoped')
 ok('function Store:clear_native_shelf_auth()' in store,'Native shelf authorization can be revoked independently')
-ok('书架管理授权' in main and '取消书架管理授权' in main,'account status exposes Native shelf authorization state and revoke action')
+ok('E-Ink 客户端授权' in main and '取消 E-Ink 客户端授权' in main,'account status exposes Native shelf authorization state and revoke action')
 ok('微信读书 · 书城' in bookstore and '总榜 · 飙升 · 新书 · 热门' in bookstore,'bookstore root copy polished without structural rewrite')
 ok('第 "..tostring(spec.page or 1).." 页' in bookstore and 'label="上一页"' in bookstore,'bookstore pagination copy normalized')
 ok('if elapsed_ms>=250 then' in store and 'if elapsed_ms>=250 or reason=="set:auth" then' in store,'successful StorePerf logging is rate-limited by cost/relevance')

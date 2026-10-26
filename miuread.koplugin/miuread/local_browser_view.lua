@@ -212,7 +212,7 @@ function LocalBrowserWidget:_set_view_mode(mode)
     self.view_mode = mode
     self.page = 1
     self:_build()
-    UIManager:setDirty(self, "full")
+    UIManager:setDirty(self, "ui")
     if self.opts and self.opts.on_page_changed then
         self.opts.on_page_changed(self.page, self:visibleBooks(), self)
     end
@@ -369,7 +369,7 @@ function LocalBrowserWidget:_change_page(delta)
     if next_page == self.page then return true end
     self.page = next_page
     self:_build()
-    UIManager:setDirty(self, "full")
+    UIManager:setDirty(self, "ui")
     if self.opts and self.opts.on_page_changed then
         self.opts.on_page_changed(self.page, self:visibleBooks(), self)
     end
@@ -391,7 +391,7 @@ function LocalBrowserWidget:init()
 end
 function LocalBrowserWidget:updateItems()
     if self._miu_closed then return false end
-    self:_build(); UIManager:setDirty(self, "full"); return true
+    self:_build(); UIManager:setDirty(self, "ui"); return true
 end
 function LocalBrowserWidget:updateData(snapshot)
     if self._miu_closed then return false end
@@ -404,7 +404,7 @@ function LocalBrowserWidget:updateData(snapshot)
     self.page = 1
     self.opts.empty_text = snapshot.error and ("无法读取文件夹\n" .. tostring(snapshot.error)) or self.opts.empty_text
     self:_build()
-    UIManager:setDirty(self, "full")
+    UIManager:setDirty(self, "ui")
     if self.opts and self.opts.on_page_changed then
         self.opts.on_page_changed(self.page, self:visibleBooks(), self)
     end

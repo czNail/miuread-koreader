@@ -38,7 +38,10 @@ lua.execute("""
 package.preload['json']=function() return {encode=json_encode,decode=json_decode} end
 package.preload['logger']=function() return {info=function() end,warn=function() end,dbg=function() end} end
 package.preload['util']=function() return {} end -- KOReader helpers outside the packaging path.
-package.preload['miuread.http']=function() return {} end -- No network calls in these tests.
+package.preload['miuread.http']=function() return {
+    is_rate_limit_error=function() return false end,is_auth_error=function() return false end,
+    is_network_error=function() return false end,
+} end -- No network calls in these tests.
 """)
 lua.execute("package.path = " + repr((ROOT / "miuread.koplugin/?.lua").as_posix()) + " .. ';' .. package.path")
 lua.execute("package.path = " + repr((ROOT / "tools/?.lua").as_posix()) + " .. ';' .. package.path")
@@ -60,11 +63,27 @@ with tempfile.TemporaryDirectory(prefix="miuread-translation-") as directory:
         path.mkdir(parents=True, exist_ok=True)
         return True
 
+    def directory_entries(path):
+        path = Path(path).resolve()
+        assert path == work or work in path.parents, "test listing escaped temporary directory"
+        return lua.table_from([entry.name for entry in path.iterdir()])
+
+    def rmdir(path):
+        path = Path(path).resolve()
+        assert work in path.parents, "test removal escaped temporary directory"
+        path.rmdir()
+        return True
+
     lua.globals().host_attributes = attributes
     lua.globals().host_mkdir = mkdir
+    lua.globals().host_directory_entries = directory_entries
+    lua.globals().host_rmdir = rmdir
     lua.execute("""
 package.preload['libs/libkoreader-lfs']=function()
-    return {attributes=host_attributes,mkdir=host_mkdir,dir=function() return function() return nil end end}
+    return {attributes=host_attributes,mkdir=host_mkdir,rmdir=host_rmdir,dir=function(path)
+        local entries,index=host_directory_entries(path),0
+        return function() index=index+1; return entries[index] end
+    end}
 end
 """)
     lua.globals().work = work.as_posix()
@@ -148,6 +167,33 @@ assert(language_rebased.annotations[1].pos0=='/body/DocFragment[2]/body/section[
     'adding a translated sibling shifted a note inside the original custom element')
 assert(language_rebased.last_xpointer=='/body/DocFragment[2]/body/section[1]/p[2]')
 
+-- Technical books can contain unescaped RDF/SPARQL IRIs. Keep the exact
+-- source and its native code offsets while adding the official translation.
+do
+    local query_source='<section><pre id="query"><code>PREFIX rdf: <http://example.org/rdf#> '
+        ..'SELECT ?s WHERE { ?s rdf:type ?o . }</code></pre></section>'
+    local query_translation=query_source:gsub('</pre>','</pre><pre id="query" class="wr-translation">查询三元组。</pre>')
+    local query_meta={book_id=book.bookId,variant='clean',chapters={{uid='53'}}}
+    Epub.build(work..'/query-original.epub',book,{{uid='53',body=query_source}},css,{},nil,query_meta)
+    Epub.build(work..'/query-translated.epub',book,{{uid='53',body=query_translation}},css,{},nil,query_meta)
+    local query_profile=assert(Translation.inspect(work..'/query-translated.epub'))
+    assert(query_profile.blocks==1 and query_profile.separable and query_profile.recoveries==1)
+    local query_xp='/body/DocFragment[1]/body/section/pre/code/text().8'
+    local query_notes={last_xpointer=query_xp,annotations={{pos0=query_xp,pos1=query_xp,note='Keep SPARQL code note'}}}
+    local rebased=assert(Translation.rebase_settings(work..'/query-original.epub',work..'/query-translated.epub',query_notes,'bilingual'))
+    local expected='/body/DocFragment[1]/body/section[1]/pre[1]/code[1]/text().8'
+    assert(rebased.last_xpointer==expected and rebased.annotations[1].pos0==expected
+        and rebased.annotations[1].note=='Keep SPARQL code note','SPARQL recovery shifted a code note')
+    assert(Installer.visit_chapter_text(work..'/query-translated.epub',function(html)
+        assert(html:find('<http://example.org/rdf#>',1,true),'inspection rewrote the original URI source')
+        return true
+    end))
+    local changed=query_translation:gsub('SELECT %?s','SELECT ?other')
+    Epub.build(work..'/query-changed.epub',book,{{uid='53',body=changed}},css,{},nil,query_meta)
+    local unsafe,why=Translation.rebase_settings(work..'/query-original.epub',work..'/query-changed.epub',query_notes,'bilingual')
+    assert(not unsafe and why:find('translation_position_unverified',1,true),'namespace recovery accepted changed code text')
+end
+
 -- Reproduce close -> sidecar migration -> atomic install -> reopen -> CSS
 -- using the real plugin installer and real ZIPs. The old original has no ids;
 -- the official translated response adds ids/attributes and translated siblings.
@@ -174,7 +220,7 @@ local Plugin={}
 local env=setmetatable({Plugin=Plugin,U=U,EpubInstaller=Installer,logger=require('logger')},{__index=_G})
 require('translation_test_support').load_plugin_methods(root,
     {'_install_pending_record','_reader_translation_mode','_reader_translation_font_scale_value','_reader_translation_css',
-    '_install_marks_getCssText_wrapper'},env)
+    '_install_marks_getCssText_wrapper','_reader_translation_record','_apply_reader_translation_update'},env)
 local stored,removed
 local plugin=setmetatable({store={save_variant=function(_,_,_,record) stored=record end,
     remove_pending_install=function() removed=true end}}, {__index=Plugin})
@@ -196,6 +242,42 @@ assert(plugin:_install_marks_getCssText_wrapper(plugin.ui.styletweak))
 assert(plugin.ui.styletweak:getCssText():find('p.wr-translation { display: block !important; }',1,true),
     'reopen lost the bilingual stylesheet override')
 
+-- A single Apply action uses the reader's safe reload boundary. Read the
+-- final saved cursor, and keep the display mode chosen during the download.
+close_meta.task_id='apply-original'
+Epub.build(close_target,book,{{uid='4',body=bare_body}},css,{},nil,close_meta)
+close_meta.task_id='apply-translated'
+Epub.build(close_pending,book,{{uid='4',body=bare_translation}},css,{},nil,close_meta)
+sidecar={last_xpointer='/body/DocFragment[1]/body/section/p[2]/text().1',miuread_translation_mode='original',
+    annotations={{pos0='/body/DocFragment[1]/body/section/p[2]/em/text().1',
+        pos1='/body/DocFragment[1]/body/section/p[2]/em/text().5',note='Keep'}}}
+local apply_record={file=close_target,pending_file=close_pending,pending_install=true,variant='clean',
+    chapter_map=close_meta.chapters,translation_mode='bilingual',translation_follow_display=true}
+local apply_current={book={book_id=book.bookId},record=apply_record,variant='clean'}
+plugin._current_book_record=function() return apply_current end
+plugin.store.variant=function() return apply_record end
+plugin.store.save_variant=function(_,_,_,record) apply_record=record end
+plugin.toast=function() end; plugin.status_toast=function() end
+plugin.info=function(_,message) error('unexpected apply message: '..message) end
+local reader={document={file=close_target},doc_settings={readSetting=function(_,key) return sidecar[key] end}}
+plugin.ui=reader
+local closed,reloaded=false,false
+function reader:reloadDocument(after_close,seamless,after_open)
+    assert(seamless and U.file_exists(close_pending))
+    -- This location is newer than the location at download start.
+    sidecar.last_xpointer='/body/DocFragment[1]/body/section/p[2]/text().3'
+    self.document=nil; closed=true
+    after_close(close_target)
+    assert(Translation.inspect(close_target).blocks==2)
+    assert(sidecar.last_xpointer=='/body/DocFragment[1]/body/section[1]/p[3]/text().3')
+    self.document={file=close_target}; reloaded=true
+    after_open()
+end
+assert(plugin:_apply_reader_translation_update() and closed and reloaded)
+assert(sidecar.miuread_translation_mode=='original','offline download changed the chosen reading mode')
+assert(sidecar.annotations[1].note=='Keep' and not apply_record.pending_install)
+assert(apply_record.translation_follow_display==nil and not plugin._reader_translation_applying)
+
 -- Exercise Downloader:_save, rather than only Epub.build. The real sequence
 -- includes resource pruning, old chapter preservation, package validation,
 -- translation inspection and deferred installation for an open document.
@@ -214,6 +296,68 @@ function store:variant() return {file=target,chapter_map=meta.chapters,variant='
 function store:save_variant(_,_,record) self.saved=record end
 function store:save_book() end
 local downloader=Downloader:new(nil,nil,nil,store,{})
+
+-- Exercise the production generation checkpoint with interrupted/restarted
+-- workers. Only the database transport is replaced; the planner, poller,
+-- downloader preparation and content guards are the real modules.
+local DB=require('miuread.download_database')
+local save_manifest=DB.save_manifest
+local persisted,writes=nil,0
+DB.save_manifest=function(_,manifest) persisted=U.copy(manifest); writes=writes+1; return true end
+local generation_book={bookId=book.bookId,version=1}
+local generation_catalog={{chapterUid=1},{chapterUid=2},{chapterUid=3},{chapterUid=4}}
+local generation_opt={generate_translation_uid='2',translation_batch_size='all'}
+local generation_cache={root=work..'/generation-checkpoint',manifest={chapters={}}}
+local requests={}
+local fake_api={translation_member_summary=function() return {isPaying=true} end,toggle_translate=function() end}
+function fake_api:en_read(_,current)
+    requests[#requests+1]=current
+    if #requests==2 then error('download cancelled') end
+    return {stopPoll=true,curStatus={{uid=current,translateVersion=7}}}
+end
+downloader.api=fake_api
+local good,why=pcall(downloader._prepare_translation,downloader,generation_book,generation_catalog,
+    generation_opt,generation_cache)
+assert(not good and tostring(why):find('download cancelled',1,true) and writes>=2)
+assert(persisted.translation_generation.versions['2']==7,'completed generation was not persisted before interruption')
+generation_cache.manifest=U.copy(persisted)
+requests={}
+function fake_api:en_read(_,current)
+    requests[#requests+1]=current
+    assert(current~=2,'resumed task generated an already completed chapter again')
+    return {stopPoll=true,curStatus={{uid=current,translateVersion=7}}}
+end
+downloader:_prepare_translation(generation_book,generation_catalog,generation_opt,generation_cache)
+assert(#requests==3 and generation_opt.translation_refresh_versions['2']==7)
+assert(generation_opt.translation_batch_uids['1'] and generation_opt.translation_batch_uids['4'])
+
+-- A changed book version or catalog invalidates old generation checkpoints.
+function fake_api:en_read(_,current)
+    requests[#requests+1]=current
+    return {stopPoll=true,curStatus={{uid=current,translateVersion=8}}}
+end
+requests={}; generation_book.version=2
+downloader:_prepare_translation(generation_book,generation_catalog,generation_opt,generation_cache)
+assert(#requests==4 and generation_opt.translation_refresh_versions['2']==8)
+requests={}; generation_catalog[1].title='Changed catalog'
+downloader:_prepare_translation(generation_book,generation_catalog,generation_opt,generation_cache)
+assert(#requests==4,'catalog change reused an unrelated generation checkpoint')
+
+requests={}
+local directory_catalog={{chapterUid=1,structural=true},{chapterUid=2}}
+local directory_opt={generate_translation_uid='1',translation_batch_size='all'}
+downloader:_prepare_translation(generation_book,directory_catalog,directory_opt,generation_cache)
+assert(#requests==1 and requests[1]==2 and directory_opt.generate_translation_uid=='2',
+    'whole-file download from a directory page required a translation for the directory itself')
+
+-- A failed checkpoint write must stop before issuing any new generation.
+DB.save_manifest=function() return nil,'test storage failure' end
+requests={}
+good,why=pcall(downloader._prepare_translation,downloader,generation_book,generation_catalog,
+    generation_opt,generation_cache)
+assert(not good and tostring(why):find('test storage failure',1,true) and #requests==0)
+DB.save_manifest=save_manifest
+
 local on_disk={}
 for index,chapter in ipairs(chapters) do
     local path=work..'/source-'..index..'.xhtml'
@@ -221,12 +365,32 @@ for index,chapter in ipairs(chapters) do
     on_disk[index]={uid=chapter.uid,title=chapter.title,body_path=path}
 end
 local opt={generate_translation_uid='21',translation_mode='translation',active_document_path=target,
-    expected_chapter_count=2,download_run_id='save-good'}
+    expected_chapter_count=2,download_run_id='save-good',translation_batch_uids={['21']=true,['22']=true}}
 local saved=downloader:_save(book,on_disk,{},css,nil,U.copy(opt),{})
 assert(saved.pending_install and saved.file==target and U.file_exists(saved.pending_file))
 assert(Installer.validate(saved.pending_file,{book_id=book.bookId,chapters=meta.chapters}))
 assert(Translation.inspect(saved.pending_file).blocks==8)
+assert(saved.translation_batch_summary.total==2 and saved.translation_batch_summary.available==2,
+    'batch completion did not report the actual translated chapters')
 assert(U.read_file(target,true)==original_bytes,'open EPUB was replaced during a translation download')
+local queued_opt=U.copy(opt); queued_opt.download_run_id='queued-other-book'; queued_opt.active_document_path=work..'/other.epub'
+queued_opt.translation_follow_display=true
+local queued=downloader:_save(book,on_disk,{},css,nil,queued_opt,{})
+assert(queued.pending_install and queued.translation_follow_display,
+    'queued translation bypassed native position migration after the reader changed books')
+assert(U.read_file(target,true)==original_bytes,'queued translation replaced the book in its worker')
+
+-- Preserve a completed prefix when later chapters are still generating, but
+-- never lose translations that were already in the reader's original EPUB.
+assert(U.atomic_write(on_disk[2].body_path,body,true))
+local partial_opt=U.copy(opt); partial_opt.download_run_id='partial-batch'
+local partial=downloader:_save(book,on_disk,{},css,nil,partial_opt,{})
+assert(partial.translation_batch_summary.total==2 and partial.translation_batch_summary.available==1)
+partial_opt.download_run_id='lost-cached-translation'; partial_opt.translation_cached_uids={['22']=true}
+store.saved=nil
+local kept,keep_error=pcall(downloader._save,downloader,book,on_disk,{},css,nil,partial_opt,{})
+assert(not kept and tostring(keep_error):find('已有译文未完整保留',1,true))
+assert(not store.saved and U.read_file(target,true)==original_bytes,'lost cached translation replaced the reader EPUB')
 
 assert(U.atomic_write(on_disk[2].body_path,language_translated,true))
 local recovery_opt=U.copy(opt); recovery_opt.download_run_id='reader-recovery'
@@ -235,6 +399,24 @@ assert(recovered_save.pending_install and Translation.inspect(recovered_save.pen
     'a next chapter with recoverable language markup prevented staging current translations')
 assert(U.read_file(target,true)==original_bytes,'recoverable next chapter replaced the active EPUB before installation')
 assert(U.atomic_write(on_disk[2].body_path,translated,true))
+
+-- A single unpaired chapter used to reject the whole generated translation
+-- EPUB. Preserve that chapter's bilingual text and allow verified pairs.
+assert(U.atomic_write(on_disk[2].body_path,'<section><p>Keep original.</p><p class="wr-translation">保留译文。</p></section>',true))
+local mixed_opt=U.copy(opt); mixed_opt.download_run_id='partial-separation'
+local mixed_save=downloader:_save(book,on_disk,{},css,nil,mixed_opt,{})
+local mixed_profile=assert(Translation.inspect(mixed_save.pending_file))
+assert(mixed_save.pending_install and not mixed_profile.separable and Translation.translation_only_status(mixed_profile).available)
+assert(Translation.css(mixed_profile,'translation') and U.read_file(target,true)==original_bytes)
+assert(U.atomic_write(on_disk[2].body_path,translated,true))
+local idless_translation=translated:gsub(' id="[^"]+"','')
+for _,chapter in ipairs(on_disk) do assert(U.atomic_write(chapter.body_path,idless_translation,true)) end
+local idless_opt=U.copy(opt); idless_opt.download_run_id='unsupported-only-display'
+local idless_save=downloader:_save(book,on_disk,{},css,nil,idless_opt,{})
+assert(idless_save.pending_install and idless_save.translation_only_available==false,
+    'unsupported translation-only display discarded an otherwise readable bilingual download')
+assert(Translation.inspect(idless_save.pending_file).blocks==8 and U.read_file(target,true)==original_bytes)
+for _,chapter in ipairs(on_disk) do assert(U.atomic_write(chapter.body_path,translated,true)) end
 
 for _,case in ipairs({
     {name='chapters',options={previous_chapter_map={{uid='missing-old-chapter'}}},reason='新 EPUB 缺少旧版本章节：missing-old-chapter'},
@@ -272,6 +454,177 @@ passed,reason=pcall(downloader._save,downloader,book,on_disk,{},css,nil,failed_o
 assert(not passed and tostring(reason):find('译文章节解析未通过：chapter=22 unterminated_tag',1,true),
     'translation parse failure was misreported as unavailable translated text')
 assert(U.read_file(target,true)==original_bytes,'malformed translated chapter replaced the original')
+
+-- Reproduce the device log: all chapters report generation complete, but
+-- chapter 3 repeatedly returns a readable original without translated blocks.
+-- Run the real download loop, Reader retries, checkpoints and EPUB packaging.
+do
+    local Reader=require('miuread.reader')
+    local Source=require('miuread.source_position')
+    local Generation=require('miuread.translation_generation')
+    local db_methods={}
+    for _,name in ipairs({'load_manifest','save_manifest','save_assets','load_assets'}) do db_methods[name]=DB[name] end
+    local manifests,asset_manifests={},{}
+    DB.load_manifest=function(path)
+        if host_attributes(path,'mode')=='directory' then return U.copy(manifests[path]) end
+    end
+    DB.save_manifest=function(path,value) manifests[path]=U.copy(value); return true end
+    DB.save_assets=function(path,uid,value) asset_manifests[path..'/'..uid]=U.copy(value); return true end
+    DB.load_assets=function(path,uid) return U.copy(asset_manifests[path..'/'..uid]) end
+    local cache_source=Source.cacheChapter
+    Source.cacheChapter=function() return true end
+    local test_root=work..'/pending-content'
+    U.mkdir(test_root)
+    local test_book={bookId='CB_pending',title='Pending translation regression',version=1}
+    local test_path=test_root..'/original.epub'
+    local query_source='<section><pre id="query"><code>PREFIX rdf: <http://example.org/rdf#> SELECT ?s</code></pre></section>'
+    local query_translation=query_source:gsub('</pre>','</pre><pre id="query" class="wr-translation">查询语句。</pre>')
+    local test_map,test_catalog,test_chapters={},{},{}
+    for index=1,230 do
+        local title=index==53 and 'Triple Stores and SPARQL' or ('Chapter '..index)
+        test_map[index]={uid=tostring(index),structural=index==5,title=title}
+        test_catalog[index]={chapterUid=index,chapterIdx=index,title=title,
+            translateVersion=index==3 and 10130 or 0,hasTranslated=index==3}
+        test_chapters[index]={uid=tostring(index),title=title,body=index==53 and query_source or body,structural=index==5}
+    end
+    Epub.build(test_path,test_book,test_chapters,css,{},nil,
+        {book_id=test_book.bookId,variant='clean',chapters=test_map})
+    local original=assert(U.read_file(test_path,true))
+    local test_store={record={file=test_path,chapter_map=test_map,variant='clean'}}
+    function test_store:book_dir() return test_root end
+    function test_store:epub_root() return test_root end
+    function test_store:epub_path(name) return test_root..'/'..name end
+    function test_store:variant() return self.record end
+    function test_store:save_variant(_,_,value) self.saved=value end
+    function test_store:save_book() end
+    function test_store:save_session() end
+    function test_store:auth() return {} end
+    local requests,seen,reads={},{},{}
+    local ready_three,ready_two=false,false
+    local test_api={translation_member_summary=function() return {isPaying=true} end,toggle_translate=function() end}
+    function test_api:en_read(_,uid)
+        uid=tostring(uid)
+        requests[#requests+1]=uid
+        assert(uid~='5','fresh catalog lost the proven local structural flag')
+        if seen[uid] then
+            for _,manifest in pairs(manifests) do
+                assert(manifest.translation_generation.versions[uid]==nil,
+                    'content retry retained its stale completed generation checkpoint')
+            end
+            if uid=='2' then ready_two=true end
+        end
+        seen[uid]=true
+        if uid=='3' then return {stopPoll=true} end -- Device: unchanged completed catalog version, no curStatus.
+        return {stopPoll=true,curStatus={{uid=uid,translateVersion=7}}}
+    end
+    local test_reader=Reader:new({},test_store)
+    local query_failed=true
+    function test_reader:chapter_state() return {book_version=1} end
+    function test_reader:_epub_once(_,chapter,options,state)
+        local uid=tostring(chapter.chapterUid)
+        reads[#reads+1]={uid=uid,translation=options.translation==true}
+        if uid=='53' and query_failed then error('test interrupted chapter processing') end
+        local available=uid~='3' or ready_three
+        if uid=='2' and not ready_two then available=false end
+        local fragment=options.translation and available and translated or body
+        if uid=='53' then fragment=options.translation and query_translation or query_source end
+        state.structural=uid=='5'
+        state.content_format='epub'
+        state.coord_html='<html><body>'..fragment..'</body></html>'
+        return state.coord_html,css,{},state
+    end
+    local test_downloader=Downloader:new(test_reader,test_api,nil,test_store,{})
+    function test_downloader:catalog() return {format='epub'},U.copy(test_catalog) end
+    local passed,reason=pcall(test_downloader.book,test_downloader,test_book,
+        {generate_translation_uid='3',translation_batch_size='all',translation_mode='bilingual',images=false},function() end)
+    assert(not passed and tostring(reason):find('已完整获取：229',1,true)
+        and tostring(reason):find('• Triple Stores and SPARQL：',1,true),
+        'a chapter processing failure did not keep its completed checkpoint set: '..tostring(reason))
+    query_failed=false; requests={}; seen={}; reads={}
+    local result=test_downloader:book(test_book,{generate_translation_uid='3',translation_batch_size='all',
+        translation_mode='bilingual',images=false},function() end)
+    assert(result.pending_install and result.chapter_count==230)
+    assert(result.translation_batch_summary.total==229 and result.translation_batch_summary.available==228,
+        'one pending chapter aborted the book or was counted as translated')
+    local profile=assert(Translation.inspect(result.pending_file))
+    local completed={}
+    for _,chapter in ipairs(profile.chapters) do completed[chapter.chapter_uid]=chapter.blocks>0 end
+    assert(completed['1'] and completed['2'] and not completed['3'] and completed['53'] and completed['230'],
+        'pending chapter 3 prevented fetching later chapters')
+    assert(U.read_file(test_path,true)==original,'partially translated download overwrote the open original')
+    local count_three=0
+    for _,uid in ipairs(requests) do if uid=='3' then count_three=count_three+1 end end
+    assert(count_three==2 and #requests==2,'chapter repair regenerated the whole book or retried indefinitely')
+    local original_three=false
+    for _,read in ipairs(reads) do
+        assert(read.uid=='3' or read.uid=='53','resuming a failed book downloaded an already completed chapter again')
+        if read.uid=='3' and not read.translation then original_three=true end
+    end
+    assert(original_three,'pending chapter was omitted instead of preserving its actual original')
+
+    -- After applying partial translations, continue only the missing chapter.
+    assert(Installer.install(result.pending_file,test_path,{book_id=test_book.bookId,chapters=test_map}))
+    test_store.record=U.copy(result)
+    test_store.record.pending_install=nil; test_store.record.pending_file=nil
+    ready_three=true; requests={}; seen={}
+    local cached_uids={}
+    for uid,available in pairs(completed) do if available then cached_uids[uid]=true end end
+    local resumed=test_downloader:book(test_book,{generate_translation_uid='3',translation_batch_size='all',
+        translation_mode='bilingual',translation_cached_uids=cached_uids,images=false},function() end)
+    assert(#requests==1 and requests[1]=='3','continuation regenerated already installed translations')
+    assert(resumed.translation_batch_summary.total==229 and resumed.translation_batch_summary.available==229)
+
+    -- Existing translations and the requested chapter of a short batch must
+    -- never be replaced by an untranslated fallback, even when status is ready.
+    local retry_cache={root=test_root..'/guard',manifest={translation_generation={versions={['3']=10130}}}}
+    local retry_options={generate_translation_uid='3',translation_batch_size='auto',translation_refresh_versions={['3']=10130}}
+    function test_api:en_read() return {stopPoll=true} end
+    ready_three=false
+    local good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and Generation.is_content_pending(why) and retry_cache.manifest.translation_generation.versions['3']==nil,tostring(why))
+    assert(Generation.friendly_error(why):find('Chapter 3',1,true),'failure hid the chapter that needs attention')
+    retry_options.translation_batch_size='all'; retry_options.translation_cached_uids={['3']=true}
+    good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and Generation.is_content_pending(why),'an already installed translation was replaced with its original')
+
+    local reader_chapter=test_reader.chapter
+    local original_reads=0
+    function test_reader:chapter(_,_,_,options)
+        if not options.translation then original_reads=original_reads+1 end
+        error('test network failure')
+    end
+    good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and tostring(why):find('test network failure',1,true) and original_reads==0,
+        'an unrelated failure was treated as an unavailable translation')
+    test_reader.chapter=reader_chapter
+    DB.save_manifest=function() return nil,'test disk failure' end
+    good,why=pcall(test_downloader._translation_chapter,test_downloader,test_book,U.copy(test_catalog[3]),'epub',
+        {translation=true,images=false},retry_options,retry_cache)
+    assert(not good and tostring(why):find('test disk failure',1,true),'re-confirmation ignored checkpoint storage failure')
+    Source.cacheChapter=cache_source
+    for name,method in pairs(db_methods) do DB[name]=method end
+end
+
+-- No newly downloaded translated text must not be reported as a completed
+-- whole-book update, even if older translated chapters are still present.
+do
+    local none_opt=U.copy(opt)
+    none_opt.translation_batch_size='all'
+    none_opt.translation_cached_uids={['21']=true}
+    none_opt.translation_content_pending={['22']=true}
+    none_opt.download_run_id='no-new-translation'
+    assert(U.atomic_write(on_disk[1].body_path,translated,true))
+    assert(U.atomic_write(on_disk[2].body_path,body,true))
+    store.saved=nil
+    local good,why=pcall(downloader._save,downloader,book,on_disk,{},css,nil,none_opt,{})
+    assert(not good and require('miuread.translation_generation').is_content_pending(why))
+    assert(require('miuread.translation_generation').friendly_error(why):find('Second',1,true),
+        'no-progress message named an already translated chapter instead of the pending one')
+    assert(not store.saved and U.read_file(target,true)==original_bytes,'empty translation update replaced the original')
+end
 """)
     with ZipFile(work / "old.epub") as archive:
         assert archive.testzip() is None
