@@ -6,6 +6,7 @@ local Device = require("device")
 local logger = require("logger")
 local Config = require("miuread.config")
 local RuntimePressure = require("miuread.runtime_pressure")
+local DownloadAdmission = require("miuread.download_admission")
 local SuspendWorkLease = require("miuread.suspend_work_lease")
 local PseudoLockscreen = require("miuread.pseudo_lockscreen")
 local lfs = require("libs/libkoreader-lfs")
@@ -1618,20 +1619,21 @@ function DownloadTask:resume_hibernated(reason)
     local cooldown_until=tonumber(h.cooldown_until) or 0
     if cooldown_until>os.time() then return false,"low_memory" end
     local memory=RuntimePressure.memory_snapshot(true)
-    local minimum=RuntimePressure.thresholds().resume_min
-    if memory and memory.available_kb<minimum then
+    local allowed,reason,minimum,available=DownloadAdmission.check(memory,Config,true)
+    if not allowed then
         logger.info("[MiuRead][HeavyGuard] hibernated download remains parked",
-            "reason=low_memory","memory_kb=",tostring(memory.available_kb),"minimum_kb=",tostring(minimum))
+            "reason=",tostring(reason),"memory_kb=",tostring(available),"minimum_kb=",tostring(minimum))
         return false,"low_memory"
     end
     self.hibernated=nil
     local options=serializable_copy(h.options or {}) or {}
     options._from_checkpoint=true
     options._stall_restart_count=tonumber(h.stall_restart_count) or tonumber(options._stall_restart_count) or 0
-    local ok,err,errcode=self:start(h.book,options,h.on_progress,h.on_done,h.restart_count)
+    local ok,err=self:start(h.book,options,h.on_progress,h.on_done,h.restart_count)
     if not ok then
         self.hibernated=h
-        if errcode=="low_memory" then return false,"low_memory" end
+        -- The memory level can change between the first check and fork.
+        -- Preserve the resumable status so Plugin will schedule another attempt.
         return false,err
     end
     self.backgrounded=h.backgrounded==true
@@ -1702,10 +1704,10 @@ function DownloadTask:_restart_interrupted(job,stall_recovery)
     if self:_owns_job() then os.remove(self.owner_path) end
     self.job=nil
     self:_release_awake()
-    local ok,err,errcode=self:start(book,options,on_progress,on_done,count+1)
+    local ok,err=self:start(book,options,on_progress,on_done,count+1)
     if not ok then
         PseudoLockscreen.set_download_active(false)
-        if errcode=="low_memory" then
+        if err=="low_memory" then
             -- The restart was deferred only because memory is tight. Keep the
             -- checkpoint parked for the idle pump instead of reporting failure.
             local now=os.time()
@@ -2190,15 +2192,18 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
     -- its setup cost, so it only needs the (lower) resume threshold.
     collectgarbage("collect")
     local memory=RuntimePressure.memory_snapshot(true)
-    local thresholds=RuntimePressure.thresholds()
     local from_checkpoint=(options or {})._from_checkpoint==true
-    local minimum=from_checkpoint and thresholds.resume_min or thresholds.start_min
-    if memory and tonumber(memory.available_kb or 0)<minimum then
+    local allowed,reason,minimum,available=DownloadAdmission.check(memory,Config,from_checkpoint)
+    if not allowed then
+        RuntimePressure.activate("download_start_low_memory",
+            tonumber(Config.PERFORMANCE_MEMORY_PROTECT_SECONDS) or 30*60,"global")
         logger.warn("[MiuRead][HeavyGuard] download start deferred",
-            "reason=low_memory","memory_kb=",tostring(memory.available_kb),
+            "reason=",tostring(reason),"memory_kb=",tostring(available),
             "minimum_kb=",tostring(minimum),"checkpoint=",tostring(from_checkpoint),
             "book=",tostring(book and book.bookId or ""))
-        return false,"当前可用内存较低，已暂缓启动下载以避免 KOReader 被系统终止。请关闭其他界面后再试，已有断点不会丢失。","low_memory"
+        -- Stable machine-readable reason: both manual and resumed tasks must
+        -- keep their checkpoints and enter the same resource-waiting pipeline.
+        return false,"low_memory"
     end
 
     local stamp = tostring(os.time()) .. "-" .. tostring(math.random(10000, 99999))

@@ -30,7 +30,7 @@ local r=R.decide{
 }
 assert(r.winner=="local","new local event after shared anchor must remain recoverable")
 
--- If both sides changed inside the clock-skew grace window, recovery must defer rather than overwrite.
+-- Both sides changed: compare actual reading times, never invent a clock conflict.
 r=R.decide{
     local_position=p(131,8748,3000),
     remote_position=p(129,6000,3050),
@@ -39,6 +39,6 @@ r=R.decide{
     local_updated_at=3000,remote_updated_at=3050,
     clock_skew_grace=120,
 }
-assert(r.winner=="conflict","ambiguous dual-device change must remain deferred")
+assert(r.winner=="remote","newer server reading event wins even when within 30 seconds")
 
 print("beta6 sync contract: PASS")

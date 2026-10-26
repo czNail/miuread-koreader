@@ -1,5 +1,58 @@
 # Changelog
 
+## 6.1.0-beta.9 — PR #156 follow-up: fresh open-sync and time-report recovery
+
+- Keep PR #156 verified-sequence callback fix and twelve transaction regression scenarios.
+- Remove the cached exact-alignment shortcut on new book opens; fetch fresh Web progress asynchronously.
+- Parse isolated reading-time Web progress consistently, validate chapter UID/index before committing the anchor, and retain safe unsent time on context/authentication failure.
+- Distinguish accepted-but-unconfirmed progress from actual write failure, including subsequent cloud changes; never replay old writes blindly.
+- Preserve end-of-reading-only network uploads and Schema 136; leave downloads, annotations and account transport unchanged.
+
+## 6.1.0-beta.8 — Progress lifecycle regression repairs
+
+- Revert beta.6 low-level ReaderUI upload vetoes; retain the established end-of-reading upload lifecycle and the removed one-shot upload on book open.
+- Anchor-aware latest-wins decision: prefer independently verified common chapter/co over server write timestamps; no 30-second ambiguous conflict UI.
+- When the server is newer, keep an UNSENT local transaction until cloud position is verified on the device; never erase it after merely fetching cloud progress.
+- Preserve Web-only verification of uploaded chapter/co, pending progress on failure, and account/sequence isolation.
+- Revert global menu greying/truncation changes; use opt-in readable readonly rows and a full-text reason dialog for progress details.
+- Keep reading-time and legacy migration data protections; add regression coverage for cloud adoption and retained pending rows.
+- Retain automatic tag releases and changelog normalization. No database schema bump.
+
+## 6.1.0-beta.7 — Beta Tag CI 元数据修复版
+
+- 修正 beta.6 版本日志标题及位置，使 CHANGELOG.md 符合发布工作流既有格式。
+- Tag 发布在校验前自动确保当前版本的 CHANGELOG 条目存在；缺失时从 Tag 提交说明生成，不再要求用户手动补标题。
+- 保留现有 Beta Tag 自动发布和手动发布两条路径；不移动旧 Tag、不修改下载和同步业务逻辑，数据库 Schema 仍为 136。
+- 进度同步改动与 beta.6 保持一致；仍需在真实 Kindle 和微信读书服务端验证双向精确同步。
+
+## 6.1.0-beta.6 — automatic end-of-reading sync repair (candidate)
+
+- Resolve local/cloud positions using reading-event timestamps; remove the 30-second ambiguous-clock conflict gate and prefer the latest cloud observation even within 30 seconds.
+- Allow legacy fenced UNSENT progress to re-enter automatic upload after cloud freshness comparison; preserve superseded local snapshots and choose newest Web/Agent observation without user conflict dialogs.
+- Keep progress uploads only on reading-end events (including on-open local-newer branch); remove periodic reading-time HTTP writes while an active reader is open.
+- Interpret a nil KOReader text-search result as no match, with short UTF-8 anchor fallbacks; exact chapter/co still requires Kindle verification.
+- Prevent retry-budget drops of provably unsent reading time, retain verified safe carry and its journal through restarts, and improve fixed-height status-row contrast.
+- Preserve schema 136, Web-only post-write verification, existing download paths and Tag-triggered beta CI.
+- Kindle and live WeRead verification still required.
+
+## 6.1.0-beta.5 — 修复整合与功能回归候选版
+
+- 以 beta.2 为基线，选择性移植进度恢复锚点、E-Ink ZIP、HTTP 暂停与 KOReader 退出修复。
+- Web 上传只由 Web 回读确认；普通云端进度仍使用 Web/Agent 综合读取，保留原坐标字段优先级及原持久化写入。
+- 阅读时间兼容写入采用 Web 进度；缺失章节索引时只允许同章节 UID 的目录信息补齐。缺少可信上下文时保持既有失败补报路径。
+- 下载等待队列在延迟启动前重查队列身份和运行条件；历史无账号标记的等待任务需要手动确认后才能自动运行。
+- 同一笔进度上传的重复校验共享回调；扩充功能等价和异常恢复测试。
+- 本版未更改 SQLite Schema、下载协议、登录协议、原有 Tag 自动发布触发条件。
+- 尚未通过真实微信读书服务端与 Kindle 实机验证；历史 `co=368 → co=0` 的服务器侧原因仍待确认。
+
+
+## 6.1.0-beta.2 - Beta Update
+
+- 修复低内存下载启动时任务被直接拒绝的问题，复用原有持久化队列自动等待和重试
+- 统一休眠恢复与新建下载子进程的内存安全检查，避免 72 MiB 与 96 MiB 冲突
+- 增加后台工作租约存活校验，防止超时误释放导致进程重叠
+- 增加下载资源诊断、重试退避和恢复后的唤醒，并保留账号及同步逻辑
+
 ## 6.0.0 - Stable Release
 
 - 正式版基于 6.0.0-beta.1 收口，继承 5.9.1-beta.4 的功能与修复；Schema 保持 136，不把 Beta 发布通道变成正式版通道。

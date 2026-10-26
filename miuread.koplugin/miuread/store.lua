@@ -570,18 +570,25 @@ function Store:new(options)
             logger.warn("[MiuRead][StoreRepair] position snapshots compacted at startup","sessions=",tostring(count))
         end
     end
-    -- beta.5: reading-time debt is no longer durable. Clear only historical
-    -- time-report retry/failure fields; progress/annotation recovery is untouched.
+    -- beta.6: preserve SAFE, provably unsent reading-time carry across restarts.
+    -- The old startup scrub cleared it unconditionally, making long sessions
+    -- lose the excess over the single-request limit after every KOReader restart.
+    -- Only repair legacy dropped state when no verified safe carry exists.
     do
         local sessions=o.db:readSetting("sessions",{}) or {}
         local cleaned=0
         for _,session in pairs(sessions) do
             if type(session)=="table" then
                 local changed=false
-                if tonumber(session.pending_report_seconds or 0)~=0 then session.pending_report_seconds=0; changed=true end
-                if session.pending_report_safe==true then session.pending_report_safe=false; changed=true end
+                local seconds=math.max(0,math.floor(tonumber(session.pending_report_seconds) or 0))
+                if session.pending_report_safe~=true and seconds>0 then
+                    -- Old unmarked time may already have been sent; do not replay.
+                    session.pending_report_seconds=0
+                    changed=true
+                end
                 local rs=tostring(session.report_state or "")
-                if rs=="time_only_failed" or rs=="best_effort_retry" or rs=="dropped" then
+                if (rs=="time_only_failed" or rs=="best_effort_retry" or rs=="dropped")
+                    and not (session.pending_report_safe==true and seconds>0) then
                     session.report_state=false
                     session.last_error=false
                     session.last_error_kind=false
@@ -594,9 +601,9 @@ function Store:new(options)
         if cleaned>0 then
             o.db:saveSetting("sessions",sessions)
             startup_dirty=true
-            logger.info("[MiuRead][StoreRepair] reading-time retry state cleared at startup","sessions=",tostring(cleaned))
+            logger.info("[MiuRead][StoreRepair] unsafe legacy read-time state scrubbed", "sessions=",tostring(cleaned))
         end
-        pcall(os.remove,data.."/readtime-recovery-v1.json")
+        -- Retain the validated recovery journal across restarts.
     end
     -- beta.6 regression recovery: beta.5 persisted progress write fences even
     -- though they described only one reconciliation attempt. Remove those
@@ -631,47 +638,10 @@ function Store:new(options)
             logger.warn("[MiuRead][StoreRepair] beta.5 progress fences recovered at startup","sessions=",tostring(cleaned))
         end
     end
-    -- beta.16 one-shot clean-room migration. 5.9 beta.4-15 all used
-    -- schema 136, so downgrading/reinstalling did not invalidate progress
-    -- transactions or CloudAnchor/report-context snapshots. Run once on the
-    -- existing store, advance each book's progress_epoch, and remove only the
-    -- sync control plane. The next open/sync must rebuild its baseline from a
-    -- fresh server observation.
-    if schema_before>=Config.SCHEMA and o.db:readSetting("progress_state_reset_beta16",false)~=true then
-        local sessions=o.db:readSetting("sessions",{}) or {}
-        local cleaned,books,fields=reset_progress_sync_sessions(sessions,"beta16_one_shot_clean_state")
-        o.db:saveSetting("sessions",cleaned)
-        o.db:saveSetting("progress_state_reset_beta16",true)
-        o.db:saveSetting("progress_state_reset_beta16_at",os.time())
-        -- Old best-effort time-recovery payloads must not survive the same reset.
-        pcall(os.remove,data.."/readtime-recovery-v1.json")
-        startup_dirty=true
-        logger.warn("[MiuRead][StoreRepair] beta.16 progress sync state reset",
-            "books=",tostring(books),"fields=",tostring(fields),"preserved=local_display/auth/books/annotations")
-    end
-    -- beta.17 repeats the control-plane reset once because beta.16 exposed a
-    -- cross-Store resurrection bug: an older Home/Reader Store could flush a
-    -- pre-reset pending transaction back over the clean disk row. beta.17 fixes
-    -- that merge below with progress_epoch authority, then performs one final
-    -- reset so installations already affected by beta.16 start clean.
-    if schema_before>=Config.SCHEMA and o.db:readSetting("progress_state_reset_beta17",false)~=true then
-        local sessions=o.db:readSetting("sessions",{}) or {}
-        local cleaned,books,fields=reset_progress_sync_sessions(sessions,"beta17_epoch_authoritative_clean_state")
-        o.db:saveSetting("sessions",cleaned)
-        o.db:saveSetting("progress_state_reset_beta17",true)
-        o.db:saveSetting("progress_state_reset_beta17_at",os.time())
-        pcall(os.remove,data.."/readtime-recovery-v1.json")
-        startup_dirty=true
-        local actionable=0
-        for _,row in pairs(cleaned) do
-            if type(row)=="table" and (type(row.pending_progress)=="table"
-                or type(row.pending_progress_coordinate)=="table") then actionable=actionable+1 end
-        end
-        logger.warn("[MiuRead][StoreRepair] beta.17 progress control reset",
-            "books=",tostring(books),"fields=",tostring(fields),
-            "actionable_after_reset=",tostring(actionable),
-            "preserved=local_display/auth/books/annotations")
-    end
+    -- beta.6: do not repeat historical beta.16/beta.17 control-plane resets.
+    -- They could discard pending_progress and provably unsent reading time on
+    -- a late upgrade whose one-shot marker was missing. Targeted repair above
+    -- recovers obsolete fences without destroying user transactions.
     -- 5.9.1-beta.1 one-shot repair: beta.19 passive exact-cache rows carried
     -- native `chapterUid + wr_data_co` but accidentally omitted `safe=true`.
     -- When such a row became the durable ReadingEnd snapshot, upload rejected
@@ -2572,16 +2542,30 @@ function Store:enqueue_download(job)
     local queue=self:download_queue()
     if #queue>=1 then return nil,"full" end
     queue[1]=U.copy(job or {})
-    self:save_download_queue(queue)
+    -- A resource-wait task is only safe if its durable queue write succeeded.
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then return nil,"queue_save_failed:"..tostring(err or "unknown") end
     return 1
 end
 function Store:dequeue_download()
     local queue=self:download_queue(); if #queue==0 then return nil end
-    local job=table.remove(queue,1); self:save_download_queue(queue); return job
+    local job=table.remove(queue,1)
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then
+        logger.warn("[MiuRead][DownloadQueue] unable to dequeue durable job",tostring(err or "unknown"))
+        return nil
+    end
+    return job
 end
 function Store:remove_queued_download(index)
     local queue=self:download_queue(); index=tonumber(index); if not index or not queue[index] then return false end
-    table.remove(queue,index); self:save_download_queue(queue); return true
+    table.remove(queue,index)
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then
+        logger.warn("[MiuRead][DownloadQueue] unable to remove durable job",tostring(err or "unknown"))
+        return false
+    end
+    return true
 end
 function Store:pending_installs() return self:get("pending_installs",{}) end
 function Store:save_pending_installs(rows) self:set("pending_installs",type(rows)=="table" and rows or {}) end

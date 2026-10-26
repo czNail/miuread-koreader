@@ -51,8 +51,8 @@ local norm=slice(worker,'local function normalize_cloud_anchor','local function 
 assert(norm:find('anchor.protocol_progress or anchor.raw_progress or anchor.raw_percent',1,true),"wire protocol progress not accepted")
 assert(norm:find('book.remote_raw_progress',1,true),"fresh server fallback cannot normalize raw progress")
 local compat=slice(worker,'if reading_time_compat then','local accepted, result')
-assert(compat:find('local refreshed=refresh_remote_anchor(client, book_id, book)',1,true),"reading-time write does not require fresh server GET")
-assert(compat:find('fresh cloud reading position unavailable for reading-time report',1,true),"failed GET can still fall through to a position write")
+assert(compat:find('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)',1,true),"reading-time write does not require fresh server GET")
+assert(compat:find('fresh Web position unavailable:',1,true),"failed GET can still fall through to a position write")
 assert(not compat:find('position_override = normalize_cloud_anchor(job.cloud_anchor, book)',1,true),"reading-time write still trusts cached parent anchor")
 
 -- Manual safe reading-time retry follows the same remote-wire rule.

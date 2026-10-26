@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.0.0-beta.1",
+    VERSION = "6.1.0-beta.9",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -101,17 +101,17 @@ local C = {
     BACKGROUND_PARK_LOG_INTERVAL = 20,
 
     READ_INTERVAL = 60,
-    -- First confirmed reading-time report is intentionally earlier than the
-    -- steady 60 s cadence so the user can verify sync without waiting a minute.
-    -- This is an internal strategy, not another user-facing setting.
+    -- Service clock starts early, but all Web reading-time writes are deferred
+    -- until the reading-end flush.  This remains a scheduling/health parameter,
+    -- NOT a permission to write during active reading.
     READ_FIRST_DELAY = 15,
     -- beta.24 never replays historical/suspend reading-time debt. Normal
     -- reports stay on the established one-minute cadence and every request is
     -- independently capped, avoiding burst uploads after reconnect/resume.
     READ_REPORT_MAX_ELAPSED_SECONDS = 60,
-    -- beta.5: reading time is statistics, not durable reading position. One normal
-    -- attempt plus one runtime retry is enough; failures never survive restart.
-    READ_TIME_BEST_EFFORT = true,
+    -- beta.6: report only after reading. Only *provably unsent* seconds may be
+    -- persisted and retried after restart; unknown dispatches are NEVER replayed.
+    READ_TIME_BEST_EFFORT = false,
     READ_TIME_MAX_ATTEMPTS = 2,
     -- beta.13: progress writes have priority over periodic reading-time writes.
     -- The fence is a soft preemption: an already-dispatched time request is
@@ -137,7 +137,6 @@ local C = {
     OPEN_SYNC_SOFT_TIMEOUT_SECONDS = 6.0,
     OPEN_SYNC_HARD_TIMEOUT_SECONDS = 8,
     LATE_REMOTE_APPLY_WINDOW_SECONDS = 15,
-    OPEN_SYNC_READ_DEBOUNCE_SECONDS = 60,
     -- beta.7: 120s was too conservative on real devices. It turned a clearly
     -- newer cloud chapter into an ambiguous conflict and made open-sync look
     -- like it had silently stalled. Keep a small device/server skew guard, but
@@ -329,12 +328,16 @@ local C = {
     -- exhaust old Kindle memory well before the global critical threshold.
     HEAVY_NATIVE_HIBERNATE_KB = 96 * 1024,
     HEAVY_NATIVE_CRITICAL_KB = 64 * 1024,
-    HEAVY_DOWNLOAD_RESUME_MIN_KB = 72 * 1024,
+    -- A hibernated download is restarted by forking a NEW worker.
+    -- Its admission threshold must match a fresh start; the lower RUNNING
+    -- threshold below applies only while an existing child is alive.
+    HEAVY_DOWNLOAD_RESUME_MIN_KB = 96 * 1024,
     -- Ref #91: do not fork a fresh book-download worker when the device is
-    -- already at the low-memory boundary observed on KPW6. Resume remains a
-    -- little more permissive because a checkpointed worker has already paid
-    -- most of its setup cost.
+    -- already at the low-memory boundary observed on KPW6. A resumed worker
+    -- forks afresh and therefore needs the same admission margin.
     HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024,
+    DOWNLOAD_RESOURCE_RETRY_FIRST_SECONDS = 5,
+    DOWNLOAD_RESOURCE_RETRY_MAX_SECONDS = 60,
     -- beta.26 continuously samples memory while a heavy worker stage is active.
     -- Two consecutive low-memory samples are required before checkpointed
     -- hibernation, avoiding task churn on a single transient dip.

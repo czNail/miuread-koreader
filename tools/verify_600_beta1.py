@@ -52,7 +52,7 @@ ok('local_coordinate_unresolved=true' in main,'unresolved state included in fail
 ok('can_clear_stale=replayable~=true and not (anchor_only and saved_anchor~=nil)' in main,'recoverable anchors not stale')
 ok('text="恢复精确位置"' in main,'manual anchor recovery action')
 ok('lightweight service exited after requested stop' in sync,'ReadReport requested stop is informational')
-ok('local refreshed=refresh_remote_anchor(client, book_id, book)' in worker,'ReadReport fresh GET cloud guard retained')
+ok('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)' in worker,'ReadReport fresh GET cloud guard retained')
 ok('remote_wire_anchor' in sync,'remote wire anchor retained')
 ok('POSITION_CLOCK_SKEW_GRACE_SECONDS = 30' in config,'30s clock skew guard retained')
 ok('lua5.1 tools/test_591_beta1_progress_recovery.lua' in workflow,'new recovery contract in release workflow')

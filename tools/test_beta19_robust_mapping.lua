@@ -25,7 +25,7 @@ assert(main:find('reliable_text_anchor_landing',1,true),"quiet reliable text-anc
 assert(main:find('if same_chapter and text_anchor_attempted and not reliable_text_anchor_landing',1,true),"percent fallback can still override text-anchor landing")
 assert(not main:find('精确章节内位置暂未确认',1,true),"old misleading exact-position warning still present")
 assert(main:find('已定位到云端章节附近',1,true),"real chapter-only fallback warning missing")
-assert(worker:find('local refreshed=refresh_remote_anchor(client, book_id, book)',1,true),"ReadReport fresh GET guard lost")
+assert(worker:find('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)',1,true),"ReadReport fresh GET guard lost")
 
 -- Minimal UTF-8 splitter for Lua 5.1/5.3 test portability.
 local function split_chars(s)

@@ -39,10 +39,10 @@ local EXPECTED={
     [256*1024]={start_min=52429,resume_min=49807,running_min=41943,native_hibernate=62915,
         native_critical=36864,cover_coexist=65536,typography_hibernate=52429,typography_critical=32768,
         soft=65536,critical=40960},
-    [512*1024]={start_min=98304,resume_min=73728,running_min=73728,native_hibernate=98304,
+    [512*1024]={start_min=98304,resume_min=98304,running_min=73728,native_hibernate=98304,
         native_critical=65536,cover_coexist=81920,typography_hibernate=73728,typography_critical=49152,
         soft=65536,critical=41943},
-    [1024*1024]={start_min=98304,resume_min=73728,running_min=73728,native_hibernate=98304,
+    [1024*1024]={start_min=98304,resume_min=98304,running_min=73728,native_hibernate=98304,
         native_critical=65536,cover_coexist=81920,typography_hibernate=73728,typography_critical=49152,
         soft=125829,critical=81920},
 }
@@ -80,12 +80,17 @@ assert(runtime_pressure:find("function RuntimePressure.total_kb",1,true),"total_
 assert(runtime_pressure:find("function RuntimePressure.tier",1,true),"tier missing")
 assert(runtime_pressure:find("local thresholds=RuntimePressure.thresholds()"),"memory_snapshot not using scaled levels")
 
--- download_task consumes scaled thresholds; absolute keys survive only as caps.
-assert(download_task:find("thresholds.resume_min or thresholds.start_min"),"start gate checkpoint branch missing")
+-- download_task consumes the admission module; absolute keys survive only as caps.
+assert(download_task:find("DownloadAdmission.check(memory,Config,from_checkpoint)",1,true),"start admission missing checkpoint flag")
+assert(download_task:find("DownloadAdmission.check(memory,Config,true)",1,true),"resume admission missing checkpoint flag")
 assert(download_task:find("RuntimePressure.thresholds().running_min"),"running guard not scaled")
 assert(download_task:find("RuntimePressure.thresholds().native_hibernate"),"heavy watch native line not scaled")
 assert(not download_task:find("Config.HEAVY_DOWNLOAD_START_MIN_KB",1,true),"start gate still uses the absolute key")
-assert(not download_task:find("download_start_low_memory",1,true),"30-minute global lockout still armed on deferral")
+assert(download_task:find('err=="low_memory"',1,true),"machine-readable low_memory mapping missing")
+local admission=assert(io.open(root.."/miuread.koplugin/miuread/download_admission.lua","rb")):read("*a")
+assert(admission:find('pcall(require, "miuread.runtime_pressure")',1,true),"admission not wired to the scaled profile")
+assert(admission:find("thresholds.resume_min",1,true),"admission checkpoint line missing")
+assert(admission:find("thresholds.start_min",1,true),"admission fresh line missing")
 assert(download_task:find("_from_checkpoint=true"),"checkpoint restart flag not wired")
 assert(download_task:find("_park_after_restart_fuse"),"restart-fuse parking missing")
 assert(download_task:find('reason="restart_fuse"'),"restart-fuse reason missing")

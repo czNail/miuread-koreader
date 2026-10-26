@@ -165,7 +165,21 @@ def runtime(zlib_path=None, root=None):
         } end
         if zlib_path then
             local ffi=require('ffi')
-            ffi.loadlib=function(name) assert(name=='z'); return ffi.load(zlib_path) end
+            local real_ffi_load=ffi.load
+            -- The production inflater uses ffi.load(), with several valid
+            -- platform names. Intercept that actual entry point, not the
+            -- obsolete ffi.loadlib() test shim. A missing-library fixture
+            -- must fail even if the CI runner has system zlib installed.
+            ffi.load=function(name,...)
+                if name=='z' or name=='libz.so.1' or name=='libz.so' or name=='zlib1' then
+                    zlib_load_attempts=(zlib_load_attempts or 0)+1
+                    if zlib_path=='miuread-unavailable-zlib-for-test' then
+                        error('synthetic zlib unavailable',0)
+                    end
+                    return real_ffi_load(zlib_path,...)
+                end
+                return real_ffi_load(name,...)
+            end
         else
             -- --zlib exercises the actual production FFI inflate adapter.
             require('miuread.eink_crypto').inflate=function(data,size) return py_inflate(data,size) end
@@ -225,6 +239,7 @@ def main():
                 assert(not ok and tostring(err):find('E-Ink 解压组件不可用',1,true))
             end
         """.encode())
+        assert unavailable.eval(b'zlib_load_attempts') > 0, 'Unavailability fixture did not intercept ffi.load()'
         print('Native crypto/inflate capability diagnostics: PASS')
         read = lua.eval(b"function(path) return require('miuread.eink_archive').read(path,envelope,vid,fixture_root,{}) end")
         html = '<html><head></head><body><p id="p1">测试正文 👋</p></body></html>'.encode()

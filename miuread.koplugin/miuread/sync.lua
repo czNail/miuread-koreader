@@ -194,10 +194,17 @@ local function choose_remote_progress(web,agent,threshold)
         end
         if web_uid and agent_uid then
             if web_uid~=agent_uid or math.abs(web_offset-agent_offset)>32 then
-                return {
-                    conflict=true,conflict_reason="coordinate_mismatch",
-                    web=web,agent=agent,source="conflict",fetched_at=os.time(),
-                }
+                -- beta.6: conflicting *observations* are not a user conflict.
+                -- Use the most recently modified source; equal/unknown server
+                -- timestamps prefer the canonical Web cookie view. Actual
+                -- Web uploads are still verified only by Web readback.
+                local selected=newest()
+                selected.selection_reason="latest_cloud_coordinate"
+                selected.source_disagreement=true
+                logger.info("[MiuRead][ProgressSources] newest cloud coordinate selected",
+                    "source=",tostring(selected.source or "-"),
+                    "web_updated=",tostring(wt),"agent_updated=",tostring(at))
+                return selected
             end
             local selected=newest()
             selected.selection_reason="coordinate_match"
@@ -211,10 +218,10 @@ local function choose_remote_progress(web,agent,threshold)
         end
         local delta=math.abs((tonumber(web.percent) or 0)-(tonumber(agent.percent) or 0))
         if delta>threshold then
-            return {
-                conflict=true,conflict_reason="percent_mismatch",
-                web=web,agent=agent,source="conflict",fetched_at=os.time(),
-            }
+            local selected=newest()
+            selected.selection_reason="latest_cloud_percent"
+            selected.source_disagreement=true
+            return selected
         end
         local selected=newest()
         selected.selection_reason="percent_match"
@@ -1285,14 +1292,16 @@ function Sync:resolve_local_progress(callback, options)
     -- catalog preparation on the foreground close/suspend edge.
     if options.source_first==true and options.precise~=false then
         emit("position_locating","source_first")
-        local started, source_error = self:_source_position_async(function(position, err)
+        local started, source_error = self:_source_position_async(function(position, err, source_meta)
             if position then
                 deliver_source_position(position,options._catalog_prepared==true,"source_first")
                 return
             end
             emit("position_fallback",err)
             if options.require_cloud_coordinate==true then
-                if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),{error_kind="position"}) end
+                local meta=type(source_meta)=="table" and U.copy(source_meta) or {}
+                meta.error_kind=meta.error_kind or "position"
+                if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),meta) end
             else
                 complete_fallback(false,err)
             end
@@ -1343,14 +1352,16 @@ function Sync:resolve_local_progress(callback, options)
     end
 
     emit("position_locating", catalog_source)
-    local started, source_error = self:_source_position_async(function(position, err)
+    local started, source_error = self:_source_position_async(function(position, err, source_meta)
         if position then
             deliver_source_position(position,prepared,"normal")
             return
         end
         emit("position_fallback", err)
         if options.require_cloud_coordinate==true then
-            if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),{error_kind="position"}) end
+            local meta=type(source_meta)=="table" and U.copy(source_meta) or {}
+            meta.error_kind=meta.error_kind or "position"
+            if callback then callback(nil,tostring(err or "cloud_coordinate_unavailable"),meta) end
             return
         end
         complete_fallback(prepared, err)
@@ -1874,42 +1885,43 @@ function Sync:text_anchor_rescue(remote,options)
     local query_valid,invalid_at=U.is_valid_utf8(query)
     local search=ui and ui.search or nil
     local flags=search and search.current_search_type and search.current_search_type.flags or nil
+    local strategy="exact"
     local ok,hits=pcall(document.findAllText,document,query,true,3,40,false,flags)
-    local strategy="standard"
-    local first_error=not ok and tostring(hits) or (type(hits)~="table" and ("return_type:"..type(hits)) or nil)
-    if not ok or type(hits)~="table" then
-        strategy="compat"
-        ok,hits=pcall(document.findAllText,document,query,true,3,40)
+    local first_error=not ok and tostring(hits) or nil
+    -- A nil/empty result means no match, not an incompatible API return.
+    -- Try shorter UTF-8-safe textual windows. Keep the original chapter and
+    -- multiple-hit verification below; never claim a match solely by percent.
+    if not ok or type(hits)~="table" or #hits==0 then
+        local qlen=U.utf8_len(query)
+        for _,window in ipairs({24,16,12}) do
+            if qlen>window then
+                local probe=U.utf8_sub(query,1,window)
+                strategy="prefix_"..tostring(window)
+                local retry_ok,retry_hits=pcall(document.findAllText,document,probe,true,3,40,false,flags)
+                if not retry_ok then
+                    retry_ok,retry_hits=pcall(document.findAllText,document,probe,true,3,40)
+                end
+                if retry_ok and type(retry_hits)=="table" and #retry_hits>0 then
+                    ok,hits=true,retry_hits
+                    break
+                end
+            end
+        end
     end
     if not ok then
-        logger.warn("[MiuRead][TextAnchorDiagnostic]",
-            "state=call_failed","book=",tostring(record.book and record.book.book_id or "-"),
-            "chapter=",remote_uid,"co=",tostring(remote.offset or remote.chapter_offset or "-"),
-            "strategy=",strategy,"query_chars=",tostring(U.utf8_len(query)),
-            "query_bytes=",tostring(#query),"utf8_valid=",tostring(query_valid),
-            "invalid_at=",tostring(invalid_at or "-"),"query_hash=",query_hash,
-            "first_error=",U.first_line(first_error or "-",160),
-            "error=",U.first_line(tostring(hits),220))
+        logger.warn("[MiuRead][TextAnchorDiagnostic]", "state=call_failed",
+            "book=",tostring(record.book and record.book.book_id or "-"),
+            "chapter=",remote_uid,"strategy=",strategy,
+            "query_hash=",query_hash,"error=",U.first_line(first_error or "-",160))
         return false,"text_anchor_search_call_failed"
     end
-    if type(hits)~="table" then
-        logger.warn("[MiuRead][TextAnchorDiagnostic]",
-            "state=invalid_return","book=",tostring(record.book and record.book.book_id or "-"),
-            "chapter=",remote_uid,"co=",tostring(remote.offset or remote.chapter_offset or "-"),
-            "strategy=",strategy,"return_type=",type(hits),
-            "query_chars=",tostring(U.utf8_len(query)),"query_bytes=",tostring(#query),
-            "utf8_valid=",tostring(query_valid),"query_hash=",query_hash,
-            "first_error=",U.first_line(first_error or "-",160))
-        return false,"text_anchor_search_invalid_return"
-    end
-    if #hits==0 then
-        logger.warn("[MiuRead][TextAnchorDiagnostic]",
-            "state=zero_hits","book=",tostring(record.book and record.book.book_id or "-"),
-            "chapter=",remote_uid,"co=",tostring(remote.offset or remote.chapter_offset or "-"),
-            "strategy=",strategy,"query_chars=",tostring(U.utf8_len(query)),
-            "query_bytes=",tostring(#query),"utf8_valid=",tostring(query_valid),
-            "query_hash=",query_hash,"first_error=",U.first_line(first_error or "-",160))
-        return false,"text_anchor_search_zero_hits"
+    if type(hits)~="table" or #hits==0 then
+        logger.info("[MiuRead][TextAnchorDiagnostic]", "state=no_match",
+            "book=",tostring(record.book and record.book.book_id or "-"),
+            "chapter=",remote_uid,"strategy=",strategy,
+            "query_chars=",tostring(U.utf8_len(query)),
+            "utf8_valid=",tostring(query_valid),"query_hash=",query_hash)
+        return false,"text_anchor_search_no_match"
     end
     local candidates={}
     for _,hit in ipairs(hits) do
@@ -2421,7 +2433,12 @@ function Sync:remote(book_id, callback, options)
     } or nil
     local reader_snapshot=self.reader
     local ok, err = self.async:run("remote_progress", function()
-        local out=self.api:progress_sources(book_id)
+        local out
+        if options.web_only==true then
+            out={web=self.api:web_progress(book_id)}
+        else
+            out=self.api:progress_sources(book_id)
+        end
 
         local function normalize_native(value,source)
             local progress=sourced_progress(value,book_id,source)
@@ -2473,6 +2490,23 @@ function Sync:remote(book_id, callback, options)
             sourced_progress(value.web,book_id,"web_cookie"),book_id)
         local agent=value.agent_progress or self:_normalize_remote_progress(
             sourced_progress(value.agent,book_id,"agent_gateway"),book_id)
+        -- Log only non-secret wire coordinates. This distinguishes a true
+        -- Web co=0 from an Agent/Web source disagreement after a POST.
+        logger.info("[MiuRead][ProgressWireReadback]",
+            "book=",tostring(book_id),
+            "web_uid=",tostring(web and web.chapter_uid or "-"),
+            "web_co=",tostring(web and web.offset or "-"),
+            "web_basis=",tostring(web and web.position_basis or "-"),
+            "agent_uid=",tostring(agent and agent.chapter_uid or "-"),
+            "agent_co=",tostring(agent and agent.offset or "-"),
+            "agent_basis=",tostring(agent and agent.position_basis or "-"))
+        if options.verify_only==true then
+            -- Reconcile a Web write with the Web response alone; no session
+            -- baseline change, no flash write and no Agent-only acceptance.
+            if web then callback(web,nil)
+            else callback(nil,tostring(value.web_error or "web_progress_unavailable")) end
+            return
+        end
         local remote=choose_remote_progress(web,agent,threshold)
         if not remote then
             local remote_error=tostring(value.web_error or value.agent_error or "remote progress unavailable")
@@ -3271,6 +3305,18 @@ function Sync:upload(elapsed, callback, options)
         end
         local attempts_count = #(value.attempts or {})
         local public = value.payload_public or {}
+        -- The values below are from the actual signed Web POST payload, not
+        -- the in-memory local snapshot. Exclude cookies, token and signature.
+        logger.info("[MiuRead][ReadReportWire]",
+            "book=",book_id,
+            "mode=",tostring(public.report_mode or "-"),
+            "uid=",tostring(public.report_chapter_uid or "-"),
+            "ci=",tostring(public.ci or "-"),
+            "co=",tostring(public.co or "-"),
+            "pr=",tostring(public.pr or "-"),
+            "rt=",tostring(public.rt or "-"),
+            "source=",tostring(public.position_source or "-"),
+            "result=",tostring(value.accepted==true and "accepted" or "not_accepted"))
         self.last_path = value.path
         self.last_response_summary = value.response_summary or value.error
         self.last_http_code = value.meta and value.meta.code or nil
@@ -3444,60 +3490,94 @@ function Sync:retry_safe_reading_time(book_id,record_override,position_override,
             "book=",book_id)
     end
     local core_hash=self:_core_map_hash(record_override)
-    local started=self:upload(seconds,function(ok,result,_position,value)
-        value=type(value)=="table" and value or {}
-        local meta=type(value.meta)=="table" and value.meta or {}
-        local kind=tostring(value.error_kind or "")
-        if ok==true then
-            self:_save_safe_pending_state(book_id,0,core_hash)
+    local maximum=math.max(10,tonumber(Config.READ_REPORT_MAX_ELAPSED_SECONDS) or 60)
+    local remaining=seconds
+    local finished=false
+    local function finish(ok,message,kind)
+        if finished then return end
+        finished=true
+        callback(ok,message,kind)
+    end
+    -- Only provably UNSENT seconds can enter this queue.  After each accepted
+    -- batch save the remainder before beginning the next request, so a crash or
+    -- timeout cannot make the entire original interval replay twice.
+    local send_next
+    send_next=function()
+        if finished then return false end
+        if remaining<=0 then
             self.store:save_session(book_id,{
                 report_state="ok",last_error=false,last_error_kind=false,
                 last_unconfirmed=false,last_unconfirmed_at=false,
-                last_report_reason="manual_safe_retry",last_upload=os.time(),last_elapsed=seconds,
+                last_report_reason="safe_retry_all_batches_accepted",last_upload=os.time(),
+                last_elapsed=seconds,
             })
-            logger.info("[MiuRead][ReadingTimeRetry] accepted","book=",book_id,"seconds=",tostring(seconds))
-            callback(true,"微信读书已确认接收","accepted")
-            return
+            finish(true,"微信读书已确认接收全部待报时长","accepted")
+            return true
         end
-
-        local dispatch_unknown=value.uncertain==true or kind=="unconfirmed"
-            or (kind=="transport" and meta.request_dispatched==true)
-        if dispatch_unknown then
-            -- Once a request may have reached WeRead, those seconds are no longer
-            -- provably unsent. Remove them from the replay pool so a second click
-            -- can never double-count reading time.
-            self:_save_safe_pending_state(book_id,0,core_hash)
-            self.store:save_session(book_id,{
-                report_state="unconfirmed",
-                last_unconfirmed=tostring(result or value.response_summary or "请求已发出但结果不明确"),
-                last_unconfirmed_at=os.time(),
-                last_report_reason="manual_safe_retry_unconfirmed",
-            })
-            logger.warn("[MiuRead][ReadingTimeRetry] dispatch unconfirmed; replay disabled",
-                "book=",book_id,"seconds=",tostring(seconds),"kind=",kind)
-            callback(false,"请求可能已到达微信读书；为避免重复计时，已停止再次重传","unconfirmed")
-            return
+        if self.host and type(self.host._active_reader_ui)=="function"
+            and self.host:_active_reader_ui() then
+            finish(false,"正在阅读；剩余时长已保留，结束阅读后再补报","reading_active")
+            return false
         end
-
-        -- Explicit server/auth/context rejection means the interval was not
-        -- accepted. Keep the SAFE carry so a later authenticated click can retry.
-        logger.warn("[MiuRead][ReadingTimeRetry] explicit failure retained",
-            "book=",book_id,"seconds=",tostring(seconds),"kind=",kind,
-            "error=",tostring(result or value.error or "-"))
-        callback(false,tostring(result or value.error or "阅读时间同步失败"),kind~="" and kind or "failed")
-    end,{
-        silent=true,
-        reading_time_retry=true,
-        time_only=true,
-        report_mode="reading_time_compat",
-        cloud_anchor=anchor,
-        position_override=position,
-        record_override=record_override,
-        allow_same_book_generation_change=true,
-        allow_book_switch_result=true,
-    })
-    if not started then callback(false,"阅读时间同步任务正在运行","busy") end
-    return started
+        local chunk=math.min(maximum,remaining)
+        local completed=false
+        local started=self:upload(chunk,function(ok,result,_position,value)
+            if completed or finished then return end
+            completed=true
+            value=type(value)=="table" and value or {}
+            local meta=type(value.meta)=="table" and value.meta or {}
+            local kind=tostring(value.error_kind or "")
+            if ok==true then
+                remaining=remaining-chunk
+                self:_save_safe_pending_state(book_id,remaining,core_hash)
+                logger.info("[MiuRead][ReadingTimeRetry] batch accepted",
+                    "book=",book_id,"seconds=",tostring(chunk),"remaining=",tostring(remaining))
+                -- The next batch is dispatched only after the previous worker
+                -- has completed and only while outside an active ReaderUI.
+                UIManager:scheduleIn(.15,send_next)
+                return
+            end
+            local dispatch_unknown=value.uncertain==true or kind=="unconfirmed"
+                or (kind=="transport" and meta.request_dispatched==true)
+                or value.dispatch_state_uncertain==true
+            if dispatch_unknown then
+                -- The attempted chunk might have reached WeRead; never replay
+                -- it.  The unattempted remainder is still provably safe.
+                remaining=math.max(0,remaining-chunk)
+                self:_save_safe_pending_state(book_id,remaining,core_hash)
+                self.store:save_session(book_id,{
+                    report_state="unconfirmed",
+                    last_unconfirmed=tostring(result or value.response_summary or "请求已发出但结果不明确"),
+                    last_unconfirmed_at=os.time(),
+                    last_report_reason="safe_retry_chunk_unconfirmed",
+                })
+                logger.warn("[MiuRead][ReadingTimeRetry] uncertain chunk excluded from replay",
+                    "book=",book_id,"attempted=",tostring(chunk),"safe_remaining=",tostring(remaining))
+                finish(false,"本次请求的结果不确定；未尝试的剩余时长已安全保留","unconfirmed")
+                return
+            end
+            -- A proven pre-dispatch failure leaves the current batch and all
+            -- later batches unchanged in the safe durable journal.
+            logger.warn("[MiuRead][ReadingTimeRetry] batch rejected, safe time retained",
+                "book=",book_id,"remaining=",tostring(remaining),"kind=",kind)
+            finish(false,tostring(result or value.error or "阅读时间同步失败"),kind~="" and kind or "failed")
+        end,{
+            silent=true,
+            reading_time_retry=true,
+            time_only=true,
+            report_mode="reading_time_compat",
+            cloud_anchor=anchor,
+            position_override=position,
+            record_override=record_override,
+            allow_same_book_generation_change=true,
+            allow_book_switch_result=true,
+        })
+        if not started and not completed then
+            finish(false,"阅读时间同步任务暂时不可用；剩余时长已保留","busy")
+        end
+        return started~=false
+    end
+    return send_next()
 end
 
 function Sync:begin_progress_write(reason, callback)
@@ -4744,6 +4824,19 @@ function Sync:_import_daemon_status(force)
             elseif not time_only and error_kind=="authentication" and not repair_required then
                 self:_recover_auth_once("read_report",self.last_error,function(ok_recover)
                     if ok_recover and not self.suspended and self:record() then self:start("auth_recovered") end
+                end,false)
+            elseif time_only and error_kind=="authentication"
+                and self.reader and type(self.reader._recover_login_session)=="function"
+                and self.host and type(self.host._active_reader_ui)=="function"
+                and not self.host:_active_reader_ui() then
+                -- The isolated worker must NOT call KOReader/UI login recovery.
+                -- Ask the parent to renew credentials only after reading ended.
+                -- Unsent time remains in the existing durable safe-carry journal;
+                -- the next eligible non-reading retry uses the updated auth.
+                self:_recover_auth_once("reading_time",report_error,function(recovered)
+                    logger.info("[MiuRead][ReadingTime] parent auth recovery",
+                        "book=",status_book_id,"ok=",tostring(recovered==true),
+                        "safe_pending_retained=true")
                 end,false)
             elseif error_kind=="context" and not time_only and not repair_required and not self.auto_repair_busy then
                 self.auto_repair_busy=true

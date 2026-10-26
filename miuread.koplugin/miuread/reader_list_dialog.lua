@@ -225,6 +225,8 @@ end
 
 function Dialog:_row_widget(item, width, height, index)
     local enabled = item.enabled ~= false
+    -- Opt-in readonly rows keep readable contrast without making them tappable.
+    local readable = enabled or item.readonly_label == true
     local pad = Skin.dp(7, 6, 10)
     local icon_w = tostring(item.icon or "") ~= "" and Skin.dp(31, 27, 41) or 0
     local value = tostring(item.value or item.post_text or "")
@@ -247,7 +249,7 @@ function Dialog:_row_widget(item, width, height, index)
             Skin.face("cfont", detail ~= "" and 11.1 or 11.6, detail ~= "" and 14.9 or 15.6, detail ~= "" and 9.4 or 9.9), {
                 bold = item.bold == true or item.checked == true,
                 alignment = "left",
-                fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+                fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             }),
     }
     if detail ~= "" then
@@ -255,7 +257,7 @@ function Dialog:_row_widget(item, width, height, index)
             x_off = 0, y_off = label_h,
             Ui.textbox(detail, text_w, detail_h, Skin.face("smallinfofont", 9.0, 11.9, 7.7), {
                 alignment = "left",
-                fgcolor = enabled and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_GRAY,
+                fgcolor = readable and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_GRAY,
             }),
         }
     end
@@ -265,7 +267,7 @@ function Dialog:_row_widget(item, width, height, index)
         row[#row + 1] = Ui.icon(tostring(item.icon), icon_w, height - pad * 2, Skin.dp(19, 16, 25), {
             icon_key = tostring(item.icon),
             face = Skin.face("cfont", 14.5, 19.5, 12.2),
-            fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
         row[#row + 1] = HorizontalSpan:new{width = gap}
     end
@@ -275,14 +277,14 @@ function Dialog:_row_widget(item, width, height, index)
         row[#row + 1] = Ui.textbox(value, value_w, height - pad * 2, Skin.face("cfont", 10.5, 13.9, 8.9), {
             bold = item.value_bold == true or item.checked == true,
             alignment = "right", halign = "right",
-            fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
     end
     if arrow_w > 0 then
         row[#row + 1] = HorizontalSpan:new{width = gap}
         row[#row + 1] = Ui.icon("chevron-right", arrow_w, height - pad * 2, Skin.dp(14, 12, 19), {
             face = Skin.face("cfont", 12.8, 17.2, 10.8),
-            fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
     end
 
@@ -334,7 +336,7 @@ function Dialog:_inline_actions_widget(item, width, height)
             Skin.face("smallinfofont", count >= 4 and 8.6 or 9.3, count >= 4 and 11.4 or 12.3, count >= 4 and 7.2 or 7.9), {
                 bold = action.danger == true or action.bold == true,
                 alignment = "center", halign = "center",
-                fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+                fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             }))
         group[#group + 1] = tap
         if index < count then group[#group + 1] = HorizontalSpan:new{width = gap} end

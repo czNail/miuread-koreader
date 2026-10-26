@@ -19,17 +19,17 @@ local d1 = R.decide{
     clock_skew_grace=30,
 }
 assert(d1.winner=="remote", "76s newer cloud should win outside 30s grace")
-assert(d1.reason=="remote_newer_timestamp", "expected timestamp winner")
+assert(d1.reason=="remote_newer_read_event", "expected real reading-event winner")
 
--- The original dangerous close-clock class remains protected.
+-- A close-clock difference is not automatically a two-device conflict.
 local d2 = R.decide{
     local_position=pos(132,4992), remote_position=pos(169,19588),
     verified_anchor=anchor, local_seq=3, verified_seq=1,
     local_updated_at=1791014909, remote_updated_at=1791014930,
     clock_skew_grace=30,
 }
-assert(d2.winner=="conflict", "21s difference must remain conflict")
-assert(d2.reason=="ambiguous_clock_conflict", "expected close-clock conflict")
+assert(d2.winner=="remote", "21s later remote reading event wins")
+assert(d2.reason=="remote_newer_read_event", "expected latest reading event")
 
 -- Exact equality stays aligned regardless of timestamps.
 local d3 = R.decide{

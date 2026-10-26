@@ -501,19 +501,53 @@ local function normalize_cloud_anchor(anchor, book)
 end
 
 local function refresh_remote_anchor(client, book_id, book)
-    local ok, result = pcall(function() return client:get_progress(book_id) end)
-    if not ok or type(result) ~= "table" then return false end
-    local remote = type(result.book) == "table" and result.book or result
-    local uid = remote.chapterUid or remote.chapterId or remote.chapter_uid
-    local idx = tonumber(remote.chapterIdx or remote.chapterIndex or remote.chapter_idx)
-    local offset = tonumber(remote.chapterOffset or remote.chapterPos or remote.offset)
-    local progress = tonumber(remote.progress)
-    if tostring(uid or "") == "" or offset == nil or progress == nil then return false end
-    book.remote_raw_progress = progress
-    book.remote_chapter_uid = uid
-    book.remote_chapter_idx = idx or tonumber(book.chapter_idx) or 0
-    book.remote_chapter_offset = offset
-    book.remote_progress_loaded = true
+    -- Never promote Agent progress or a stale chapter index to a Web position.
+    local ok,result=pcall(function() return client:get_web_progress(book_id) end)
+    if not ok then
+        local err=tostring(result or "web_progress_failed")
+        local lower=err:lower()
+        local kind=(lower:find("401",1,true) or lower:find("403",1,true)
+            or lower:find("login",1,true) or lower:find("cookie",1,true)
+            or err:find("登录",1,true)) and "authentication"
+            or ((lower:find("timeout",1,true) or lower:find("network",1,true)
+            or lower:find("connection",1,true)) and "transport" or "context")
+        return false,err,kind
+    end
+    local remote,err,kind=client:parse_web_progress(result,book_id)
+    if not remote then return false,err,kind end
+    local uid=tostring(remote.chapter_uid)
+    local idx=remote.chapter_idx
+    local old_uid=tostring(book.remote_chapter_uid or "")
+    local old_idx=tonumber(book.remote_chapter_idx)
+    local catalog_idx
+    for _,chapter in ipairs(type(book.chapters)=="table" and book.chapters or {}) do
+        if tostring(chapter_uid(chapter) or "")==uid then
+            catalog_idx=tonumber(chapter.chapterIdx or chapter.chapterIndex
+                or chapter.chapter_index or chapter.chapter_idx or chapter.index)
+            break
+        end
+    end
+    -- If the catalog knows this UID, it also validates the Web index.
+    if catalog_idx~=nil then
+        if idx~=nil and idx~=catalog_idx then
+            return false,"web_chapter_index_disagrees_with_catalog","context"
+        end
+        idx=catalog_idx
+    elseif idx==nil and tostring(book.chapter_uid or "")==uid then
+        idx=tonumber(book.chapter_idx)
+    elseif idx==nil and old_uid==uid then
+        -- Important: compare BEFORE updating remote_chapter_uid.
+        idx=old_idx
+    end
+    if idx==nil or idx<0 or idx~=math.floor(idx) then
+        return false,"web_chapter_index_unresolved","context"
+    end
+    -- Publish a complete, same-response Web tuple atomically only on success.
+    book.remote_chapter_uid=remote.chapter_uid
+    book.remote_chapter_idx=idx
+    book.remote_chapter_offset=remote.chapter_offset
+    book.remote_raw_progress=remote.protocol_progress
+    book.remote_progress_loaded=true
     return true
 end
 
@@ -756,16 +790,19 @@ function Worker.run(job)
     local protocol_time_only = job.time_only == true and not reading_time_compat
     local position_override
     if reading_time_compat then
-        -- beta.15 integrity rule: every compatibility time write first GETs the
-        -- current server position and then echoes that exact wire coordinate in
-        -- the POST. Never fall back to a cached/local/pending anchor when the GET
-        -- fails; dropping one time interval is safer than reverting cloud progress.
-        local refreshed=refresh_remote_anchor(client, book_id, book)
-        if refreshed then position_override = normalize_cloud_anchor(nil, book) end
+        -- beta.3: a full read-time report must echo the *Web* position it may
+        -- overwrite, never the Agent gateway position.  If Web cannot expose a
+        -- trustworthy coordinate, defer the time report rather than risk a
+        -- destructive position write.  The parent retains retry-safe intervals.
+        local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)
+        if refreshed then
+            position_override = normalize_cloud_anchor(nil, book)
+            if position_override then position_override.source="web_cookie_read_time_guard" end
+        end
         if not position_override then
             return finish(settings, book, {
-                ok=false,error="fresh cloud reading position unavailable for reading-time report",error_kind="context",
-                meta={request_dispatched=false},
+                ok=false,error="fresh Web position unavailable: "..tostring(web_error or "incomplete coordinates"),
+                error_kind=web_error_kind or "context",meta={request_dispatched=false},
             }, context_changed)
         end
     end

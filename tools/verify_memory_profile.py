@@ -75,13 +75,13 @@ EXPECTED = {
         "soft": 65536, "critical": 40960,
     },
     512 * 1024: {
-        "start_min": 98304, "resume_min": 73728, "running_min": 73728,
+        "start_min": 98304, "resume_min": 98304, "running_min": 73728,
         "native_hibernate": 98304, "native_critical": 65536, "cover_coexist": 81920,
         "typography_hibernate": 73728, "typography_critical": 49152,
         "soft": 65536, "critical": 41943,
     },
     1024 * 1024: {
-        "start_min": 98304, "resume_min": 73728, "running_min": 73728,
+        "start_min": 98304, "resume_min": 98304, "running_min": 73728,
         "native_hibernate": 98304, "native_critical": 65536, "cover_coexist": 81920,
         "typography_hibernate": 73728, "typography_critical": 49152,
         "soft": 125829, "critical": 81920,
@@ -111,15 +111,17 @@ for name, (ratio_key, floor_key, cap_key) in SPECS.items():
         check(actual == expected[name],
               "%s(total=%s) = %d, expected %d" % (name, total_kb or "fallback", actual, expected[name]))
 
-# The historical absolutes must survive unchanged as caps so >=512 MiB devices
-# keep their exact previous thresholds.
+# The historical absolutes must survive as caps so >=512 MiB devices keep
+# their exact previous thresholds. RESUME was raised to 96 MiB by beta's
+# admission unification (a resumed worker forks afresh); scaling keeps that
+# intent on large devices while lowering the line on small ones.
 for key, value in (("HEAVY_DOWNLOAD_START_MIN_KB", 96 * 1024),
-                   ("HEAVY_DOWNLOAD_RESUME_MIN_KB", 72 * 1024),
+                   ("HEAVY_DOWNLOAD_RESUME_MIN_KB", 96 * 1024),
                    ("HEAVY_DOWNLOAD_RUNNING_MIN_KB", 72 * 1024),
                    ("HEAVY_NATIVE_HIBERNATE_KB", 96 * 1024),
                    ("HEAVY_NATIVE_CRITICAL_KB", 64 * 1024),
                    ("DOWNLOAD_COVER_COEXIST_MIN_KB", 80 * 1024)):
-    check(config_number(key) == value, "%s keeps the historical %d KiB cap" % (key, value))
+    check(config_number(key) == value, "%s keeps the %d KiB cap" % (key, value))
 
 # New behavior keys exist.
 for key in ("MEMORY_SMALL_TIER_TOTAL_KB", "DOWNLOAD_WORKER_OOM_SCORE_ADJ",
@@ -147,14 +149,21 @@ for source, label in ((download_task, "download_task.lua"), (main_lua, "main.lua
     for key in absolute_keys + ("DOWNLOAD_COVER_COEXIST_MIN_KB",):
         check(("Config.%s" % key) not in source, "%s does not consume Config.%s directly" % (label, key))
 
-for needle in ("thresholds.resume_min or thresholds.start_min",
+for needle in ("DownloadAdmission.check(memory,Config,from_checkpoint)",
+               "DownloadAdmission.check(memory,Config,true)",
                "RuntimePressure.thresholds().running_min",
                "RuntimePressure.thresholds().native_hibernate",
                "_from_checkpoint", "_park_after_restart_fuse",
-               "oom_score_adj", "cooldown_until", ',"low_memory"'):
+               "oom_score_adj", "cooldown_until", ',"low_memory"', 'err=="low_memory"'):
     check(needle in download_task, "download_task.lua contains %s" % needle)
-check("download_start_low_memory" not in download_task,
-      "start deferral no longer activates the 30-minute global runtime-pressure lockout")
+
+# The admission module keeps beta's pipeline contract (machine-readable
+# low_memory, queue retry) while taking its minimum from the scaled profile.
+admission = read(PLUGIN / "miuread" / "download_admission.lua")
+for needle in ('pcall(require, "miuread.runtime_pressure")',
+               "thresholds.resume_min", "thresholds.start_min",
+               "HEAVY_DOWNLOAD_START_MIN_KB", "HEAVY_DOWNLOAD_RESUME_MIN_KB"):
+    check(needle in admission, "download_admission.lua contains %s" % needle)
 
 # main.lua: scaled native/cover lines, idle pump, telemetry.
 for needle in ("thresholds().cover_coexist", "thresholds().native_critical",

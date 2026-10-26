@@ -366,9 +366,7 @@ function Service.run(job)
                 consecutive_unconfirmed = 0
                 blocked = kind == "authentication"
             end
-            local drop_time = time_only and Config.READ_TIME_BEST_EFFORT==true
-                and not result.accepted and not uncertain
-                and consecutive_failures >= math.max(2,tonumber(Config.READ_TIME_MAX_ATTEMPTS) or 2)
+            local drop_time = false -- beta.6: failed time reports keep provably unsent carry
             out.generation = generation
             out.seq = sequence
             out.state = drop_time and "dropped" or (result.accepted and "waiting" or (uncertain and "unconfirmed" or "error"))
@@ -427,8 +425,7 @@ function Service.run(job)
         local kind=classify_error(nil,result)
         if kind == "transport" then SubprocessHygiene.reset_resolver() end
         blocked = kind == "authentication"
-        local drop_time=time_only and Config.READ_TIME_BEST_EFFORT==true
-            and consecutive_failures >= math.max(2,tonumber(Config.READ_TIME_MAX_ATTEMPTS) or 2)
+        local drop_time=false -- never silently discard accumulated time
         local dropped_error=tostring(result or "read report service failed")
         if drop_time then
             carry_remaining=0
@@ -670,8 +667,10 @@ function Service.run(job)
                     if busy_until > now then
                         next_due = math.max(next_due, busy_until + 1)
                     elseif idle <= idle_timeout then
-                        local elapsed = math.max(1, now - last_report_at)
-                        next_due = run_report(control, elapsed, false, "interval")
+                        -- beta.6: the worker keeps a clock but performs NO
+                        -- position-bearing Web request during active reading.
+                        -- stop_fast() flushes elapsed time after reading ends.
+                        next_due = now + interval
                     else
                         next_due = now + interval
                     end
