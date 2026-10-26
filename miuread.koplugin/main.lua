@@ -22340,7 +22340,7 @@ function Plugin:progress_sync_label()
         if kind=="context" or kind=="position" then return "需要修复" end
     end
     local state=session and session.progress_sync_state or nil
-    local labels={checking="正在检查",retrying="同步中",mapping_pending="同步中",mapping_preparing="同步中",mapping_failed="同步失败",position_locating="同步中",aligned="已同步",local_selected="结束阅读后上传",local_uploaded="已同步",uploading="同步中",verifying_upload="同步中",upload_failed="同步失败",upload_unconfirmed="同步失败",source_conflict="同步失败",remote_selected="已同步",different="同步失败",deferred="同步失败",remote_unavailable="同步失败",remote_jump_unconfirmed="同步失败",waiting_network="同步失败"}
+    local labels={checking="正在检查",retrying="同步中",mapping_pending="同步中",mapping_preparing="同步中",mapping_failed="同步失败",position_locating="同步中",aligned="已同步",local_selected="结束阅读后上传",local_uploaded="已同步",uploading="同步中",verifying_upload="同步中",upload_failed="同步失败",upload_unconfirmed="待云端确认",source_conflict="同步失败",remote_selected="已同步",different="同步失败",deferred="同步失败",remote_unavailable="同步失败",remote_jump_unconfirmed="同步失败",waiting_network="同步失败"}
     return labels[state] or "阅读中自动"
 end
 
@@ -23044,7 +23044,7 @@ function Plugin:_progress_sync_issue_items()
     local library=self:_persisted_library()
     local items={}
     local labels={
-        upload_unconfirmed="同步失败",verifying_upload="同步中",submitted="同步失败",settling="同步失败",
+        upload_unconfirmed="待云端确认",verifying_upload="同步中",submitted="待云端确认",settling="待云端确认",
         waiting_network="同步失败",upload_failed="同步失败",
         remote_jump_unconfirmed="同步失败",verification_required="同步失败",
         uploading="同步中",retrying="同步中",finalizing="同步中",deferred="同步失败",mapping_preparing="同步失败",
@@ -25067,7 +25067,7 @@ function Plugin:ensure_read_report_progress(reason,automatic)
     if automatic~=true and not self:is_online() then
         self:_save_progress_state(id,"waiting_network","等待 Wi-Fi 恢复后读取云端位置",nil,nil)
         self.sync:end_progress_sync("等待网络恢复")
-        self:info("Wi-Fi 尚未恢复。\n\n本地阅读位置已保留。阅读时间失败部分不会补传，联网后会重新确认当前进度。")
+        self:info("Wi-Fi 尚未恢复。\n\n本地阅读位置已保留。待报阅读时间会保留；联网后可继续确认进度。")
         return false
     end
     if self._progress_check_running then
@@ -25116,20 +25116,10 @@ function Plugin:ensure_read_report_progress(reason,automatic)
     local frozen_co=tonumber(frozen_local and (frozen_local.canonical_offset or frozen_local.chapter_offset or frozen_local.offset))
     if automatic==true and frozen_uid~="" and frozen_co~=nil then
         local localp=math.floor((tonumber(frozen_local.progress) or chapter_percent)+.5)
-        local cached_state=type((self.store:session(id) or {}).position_state)=="table"
-            and (self.store:session(id) or {}).position_state or {}
-        local cached_remote=type(cached_state.remote_position)=="table" and U.copy(cached_state.remote_position) or nil
-        local cached_age=cached_remote and (os.time()-(tonumber(cached_remote.fetched_at or 0) or 0)) or math.huge
-        local debounce=tonumber(Config.OPEN_SYNC_READ_DEBOUNCE_SECONDS) or 60
-        if cached_remote and cached_age>=0 and cached_age<=debounce and self:_remote_matches(cached_remote,frozen_local)==true then
-            -- Debounce is only used for an already-aligned exact coordinate. A
-            -- stale cache is never allowed to authorize a local overwrite.
-            self._progress_check_running=false
-            self:on_remote_progress(id,localp,cached_remote,true,frozen_local)
-            logger.info("[MiuRead][Sync] remote metadata fetch debounced",
-                "book=",id,"age=",tostring(cached_age),"reason=exact_cached_alignment")
-            return true
-        end
+        -- beta.9: a previous Web observation is useful for initial rendering,
+        -- but can never prove that the cloud is STILL aligned on a new open.
+        -- Always make a fresh asynchronous Web read for this opening session.
+        -- _progress_check_running already coalesces duplicate requests.
         self:_save_progress_state(id,"checking","正在后台确认云端位置",localp,nil)
         local remote_started,remote_start_error=self.sync:remote(id,function(remote,remote_err)
             self._progress_check_running=false
@@ -25676,6 +25666,20 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
                         tonumber(submitted_position.progress),remote and remote.percent,submitted_seq)
                     verify()
                 else
+                    -- A later, well-formed Web reading event is not proof the
+                    -- POST failed: it may be an independent newer device event.
+                    -- Keep the immutable submission pending for reconciliation;
+                    -- never re-POST it merely because the cloud moved.
+                    if remote and tostring(remote.chapter_uid or "")~=""
+                        and remote_co~=nil and remote_co>=0 and remote_updated>submitted_at
+                        and not tostring(remote.position_basis or ""):find("unresolved",1,true)
+                        and meta.reason~="stale_remote" then
+                        meta.cloud_position_changed=true
+                        meta.reason="cloud_position_changed"
+                        logger.info("[MiuRead][ProgressVerify] later Web position observed",
+                            "book=",book_id,"seq=",tostring(submitted_seq),
+                            "remote_chapter=",tostring(remote.chapter_uid),"remote_co=",tostring(remote_co))
+                    end
                     finish(false,remote,remote_err or meta.reason or "cloud_not_confirmed",meta)
                 end
             end,{force=true,raw_coordinate=true,web_only=true,verify_only=true,
@@ -25769,7 +25773,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             end
             self:_save_pending_progress(book_id,snapshot,verify_error or "cloud_not_confirmed")
             self:_save_progress_state(book_id,"upload_unconfirmed",
-                options.unconfirmed_message or "请求已提交，但云端位置尚未确认",
+                (verify_meta and verify_meta.cloud_position_changed) and "进度请求已提交；云端出现更新的位置，等待新旧裁决"
+                    or options.unconfirmed_message or "请求已提交，但云端位置尚未确认",
                 tonumber(snapshot.progress),remote and remote.percent,seq)
             finish(false,remote,verify_error or "cloud_not_confirmed",verify_meta)
         end)
@@ -25879,7 +25884,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             else
                 self:_save_pending_progress(book_id,snapshot,verify_error or "cloud_not_confirmed")
                 self:_save_progress_state(book_id,"upload_unconfirmed",
-                    options.unconfirmed_message or "原提交位置仍等待微信确认",
+                    (meta and meta.cloud_position_changed) and "云端出现新的阅读位置；原提交待裁决"
+                        or options.unconfirmed_message or "原提交位置仍等待微信确认",
                     tonumber(snapshot.progress),remote and remote.percent,seq)
                 finish(false,remote,verify_error or "cloud_not_confirmed",meta)
             end

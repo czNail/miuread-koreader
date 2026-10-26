@@ -3,6 +3,7 @@
 local ltn12 = require("ltn12")
 local Cookie = require("miuread.legacy.cookie")
 local WeRead = require("miuread.legacy.weread")
+local WebProgressWire = require("miuread.legacy.web_progress_wire")
 local U = require("miuread.util")
 
 local ok_https, https = pcall(require, "ssl.https")
@@ -195,6 +196,10 @@ function Client:get_web_progress(book_id)
         referer=WeRead.reader_url(book_id),
     })
     return self:json_decode(body)
+end
+
+function Client:parse_web_progress(result,book_id)
+    return WebProgressWire.parse(result,book_id)
 end
 
 function Client:get_progress(book_id)

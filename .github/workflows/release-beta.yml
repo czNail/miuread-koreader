@@ -335,6 +335,8 @@ jobs:
           luajit tools/test_beta8_sync_behavior.lua
           lua5.1 tools/test_progress_confirmation.lua
           luajit tools/test_progress_confirmation.lua
+          lua5.1 tools/test_beta9_sync_readtime.lua
+          luajit tools/test_beta9_sync_readtime.lua
           lua5.1 tools/test_position_state_hotfix.lua
           lua5.1 tools/test_open_sync_contract.lua
           lua5.1 tools/test_beta6_end_reading_latest_wins.lua

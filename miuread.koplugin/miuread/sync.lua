@@ -4825,6 +4825,19 @@ function Sync:_import_daemon_status(force)
                 self:_recover_auth_once("read_report",self.last_error,function(ok_recover)
                     if ok_recover and not self.suspended and self:record() then self:start("auth_recovered") end
                 end,false)
+            elseif time_only and error_kind=="authentication"
+                and self.reader and type(self.reader._recover_login_session)=="function"
+                and self.host and type(self.host._active_reader_ui)=="function"
+                and not self.host:_active_reader_ui() then
+                -- The isolated worker must NOT call KOReader/UI login recovery.
+                -- Ask the parent to renew credentials only after reading ended.
+                -- Unsent time remains in the existing durable safe-carry journal;
+                -- the next eligible non-reading retry uses the updated auth.
+                self:_recover_auth_once("reading_time",report_error,function(recovered)
+                    logger.info("[MiuRead][ReadingTime] parent auth recovery",
+                        "book=",status_book_id,"ok=",tostring(recovered==true),
+                        "safe_pending_retained=true")
+                end,false)
             elseif error_kind=="context" and not time_only and not repair_required and not self.auto_repair_busy then
                 self.auto_repair_busy=true
                 UIManager:scheduleIn(.35,function()

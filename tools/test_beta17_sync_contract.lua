@@ -55,8 +55,8 @@ assert(detail:find('{text="清除失效记录"',1,true),"stale delete UI missing
 
 -- Retain beta.15/16 reading-time safety.
 local compat=slice(worker,'if reading_time_compat then','local accepted, result')
-assert(compat:find('local refreshed=refresh_remote_anchor(client, book_id, book)',1,true),"fresh GET before time POST lost")
-assert(compat:find('fresh cloud reading position unavailable for reading-time report',1,true),"GET failure does not block time POST")
+assert(compat:find('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)',1,true),"fresh GET before time POST lost")
+assert(compat:find('fresh Web position unavailable:',1,true),"GET failure does not block time POST")
 assert(not compat:find('position_override = normalize_cloud_anchor(job.cloud_anchor, book)',1,true),"cached canonical anchor trusted again")
 
 print("beta17 progress failure lifecycle / epoch authority contract: PASS")

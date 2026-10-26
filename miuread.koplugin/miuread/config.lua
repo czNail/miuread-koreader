@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.1.0-beta.8",
+    VERSION = "6.1.0-beta.9",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -137,7 +137,6 @@ local C = {
     OPEN_SYNC_SOFT_TIMEOUT_SECONDS = 6.0,
     OPEN_SYNC_HARD_TIMEOUT_SECONDS = 8,
     LATE_REMOTE_APPLY_WINDOW_SECONDS = 15,
-    OPEN_SYNC_READ_DEBOUNCE_SECONDS = 60,
     -- beta.7: 120s was too conservative on real devices. It turned a clearly
     -- newer cloud chapter into an ambiguous conflict and made open-sync look
     -- like it had silently stalled. Keep a small device/server skew guard, but

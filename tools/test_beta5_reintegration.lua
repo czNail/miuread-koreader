@@ -61,22 +61,24 @@ test('source mapping failure propagates recovery anchor metadata',function()
   assert(select(2,sync:gsub('function%(position, err, source_meta%)',''))==2)
   assert(sync:find('meta=type(source_meta)=="table" and U.copy(source_meta) or {}',1,true))
 end)
+package.path='./miuread.koplugin/?.lua;./miuread.koplugin/?/init.lua;'..package.path
+local WebWire=require('miuread.legacy.web_progress_wire')
 local helpers=extract(worker,'local function normalize_cloud_anchor(', '\nlocal function last_readable_chapter_uid(')
 local helper_env=setmetatable({Content={is_structural_chapter=function() return false end},chapter_uid=function(c) return c.chapterUid or c.chapter_uid end}, {__index=base})
 compile(helpers..'\n_G.__beta5_refresh=refresh_remote_anchor\n','@webreadtime',helper_env)()
 test('reading-time report uses Web and same-book matching chapter index',function()
   local book={chapter_uid='old',chapter_idx=99,chapters={{chapterUid='41',chapterIdx=6}}}
-  local c={get_web_progress=function()return {book={bookId='book1',chapterUid='41',chapterOffset=368,progress=87}}end}
+  local c={get_web_progress=function()return {book={bookId='book1',chapterUid='41',chapterOffset=368,progress=87}}end, parse_web_progress=function(_,r,id) return WebWire.parse(r,id) end}
   assert(_G.__beta5_refresh(c,'book1',book)==true)
   assert(book.remote_chapter_idx==6 and book.remote_chapter_offset==368)
 end)
 test('missing chapter index does not reuse stale index',function()
   local book={chapter_uid='old',chapter_idx=99}
-  local c={get_web_progress=function() return {book={bookId='book1',chapterUid='41',chapterOffset=368,progress=87}}end}
+  local c={get_web_progress=function() return {book={bookId='book1',chapterUid='41',chapterOffset=368,progress=87}}end, parse_web_progress=function(_,r,id) return WebWire.parse(r,id) end}
   assert(_G.__beta5_refresh(c,'book1',book)==false)
 end)
 test('Web chapter index accepted when response complete',function()
-  local c={get_web_progress=function()return {book={bookId='book1',chapterUid='41',chapterOffset=368,chapterIdx=5,progress=87}}end}
+  local c={get_web_progress=function()return {book={bookId='book1',chapterUid='41',chapterOffset=368,chapterIdx=5,progress=87}}end, parse_web_progress=function(_,r,id) return WebWire.parse(r,id) end}
   local book={}
   assert(_G.__beta5_refresh(c,'book1',book)==true)
   assert(book.remote_chapter_idx==5)

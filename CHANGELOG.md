@@ -1,5 +1,13 @@
 # Changelog
 
+## 6.1.0-beta.9 — PR #156 follow-up: fresh open-sync and time-report recovery
+
+- Keep PR #156 verified-sequence callback fix and twelve transaction regression scenarios.
+- Remove the cached exact-alignment shortcut on new book opens; fetch fresh Web progress asynchronously.
+- Parse isolated reading-time Web progress consistently, validate chapter UID/index before committing the anchor, and retain safe unsent time on context/authentication failure.
+- Distinguish accepted-but-unconfirmed progress from actual write failure, including subsequent cloud changes; never replay old writes blindly.
+- Preserve end-of-reading-only network uploads and Schema 136; leave downloads, annotations and account transport unchanged.
+
 ## 6.1.0-beta.8 — Progress lifecycle regression repairs
 
 - Revert beta.6 low-level ReaderUI upload vetoes; retain the established end-of-reading upload lifecycle and the removed one-shot upload on book open.
