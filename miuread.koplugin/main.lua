@@ -19594,8 +19594,16 @@ function Plugin:_download_status_label()
             return wait>0 and ("后台下载 · 请求受限，"..tostring(wait).."秒后继续") or "后台下载 · 请求受限，等待恢复"
         end
         if state.stage=="restart" then return "后台下载 · 正在从断点恢复" end
-        if state.stage=="hibernated" and state.hibernate_reason=="network_offline" then
-            return "后台下载 · 网络暂停，联网后继续"
+        if state.stage=="resume" then return "后台下载 · 正在继续下载" end
+        if state.stage=="hibernated" then
+            if state.hibernate_reason=="network_offline" then
+                return "后台下载 · 网络暂停，联网后继续"
+            elseif state.hibernate_reason=="restart_fuse" then
+                return "后台下载 · 多次中断，稍后自动继续"
+            elseif state.hibernate_reason=="memory_pressure" then
+                return "后台下载 · 内存紧张，稍后自动继续"
+            end
+            return "后台下载 · 已休眠，稍后自动继续"
         end
         if state.waiting_network==true or state.stage=="waiting_network" then return "后台下载 · 等待网络，已保存进度" end
         local title=U.utf8_truncate(state.title or "未命名",9)
