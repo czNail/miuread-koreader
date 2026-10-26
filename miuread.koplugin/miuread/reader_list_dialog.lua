@@ -16,7 +16,6 @@ local TransientGuard = require("miuread.transient_guard")
 local DialogTransition = require("miuread.dialog_transition")
 local Skin = require("miuread.reader_skin")
 local Ui = require("miuread.ui_components")
-local U = require("miuread.util")
 
 local Screen = Device.screen
 local live_dialog
@@ -226,12 +225,11 @@ end
 
 function Dialog:_row_widget(item, width, height, index)
     local enabled = item.enabled ~= false
+    -- Opt-in readonly rows keep readable contrast without making them tappable.
+    local readable = enabled or item.readonly_label == true
     local pad = Skin.dp(7, 6, 10)
     local icon_w = tostring(item.icon or "") ~= "" and Skin.dp(31, 27, 41) or 0
     local value = tostring(item.value or item.post_text or "")
-    -- A fixed-height list row cannot safely render multi-line trailing notes.
-    -- Constrain the visible value to one line; the source remains untouched.
-    value = value:gsub("[\r\n]+", " ")
     local value_w = value ~= "" and math.max(Skin.dp(92, 76, 126), math.floor(width * .30)) or 0
     local inline_actions = self:_inline_actions(item)
     local arrow = item.arrow ~= false and ((#inline_actions > 0) or item.children_provider ~= nil or item.children ~= nil
@@ -241,22 +239,17 @@ function Dialog:_row_widget(item, width, height, index)
     local text_w = math.max(1, width - pad * 2 - icon_w - value_w - arrow_w
         - gap * ((icon_w > 0 and 1 or 0) + (value_w > 0 and 1 or 0) + (arrow_w > 0 and 1 or 0)))
     local detail = tostring(item.detail or "")
-    local trailing_chars = math.max(5, math.floor(value_w / math.max(1,Skin.dp(16,13,20))))
-    value = U.utf8_truncate(value, trailing_chars)
-    local label_chars = math.max(6, math.floor(text_w / math.max(1,Skin.dp(16,13,20))))
-    local label = U.utf8_truncate(tostring(item.label or item.text or ""):gsub("[\r\n]+", " "), label_chars)
-    detail = U.utf8_truncate(detail:gsub("[\r\n]+", " "), label_chars * 2)
     local label_h = detail ~= "" and math.floor(height * .52) or height
     local detail_h = math.max(1, height - label_h)
 
     local text_layers = OverlapGroup:new{dimen = Geom:new{w = text_w, h = height}, allow_mirroring = false}
     text_layers[#text_layers + 1] = OffsetContainer:new{
         x_off = 0, y_off = 0,
-        Ui.textbox(label, text_w, label_h,
+        Ui.textbox(tostring(item.label or item.text or ""), text_w, label_h,
             Skin.face("cfont", detail ~= "" and 11.1 or 11.6, detail ~= "" and 14.9 or 15.6, detail ~= "" and 9.4 or 9.9), {
                 bold = item.bold == true or item.checked == true,
                 alignment = "left",
-                fgcolor = Blitbuffer.COLOR_BLACK,
+                fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             }),
     }
     if detail ~= "" then
@@ -264,7 +257,7 @@ function Dialog:_row_widget(item, width, height, index)
             x_off = 0, y_off = label_h,
             Ui.textbox(detail, text_w, detail_h, Skin.face("smallinfofont", 9.0, 11.9, 7.7), {
                 alignment = "left",
-                fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+                fgcolor = readable and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_GRAY,
             }),
         }
     end
@@ -274,7 +267,7 @@ function Dialog:_row_widget(item, width, height, index)
         row[#row + 1] = Ui.icon(tostring(item.icon), icon_w, height - pad * 2, Skin.dp(19, 16, 25), {
             icon_key = tostring(item.icon),
             face = Skin.face("cfont", 14.5, 19.5, 12.2),
-            fgcolor = Blitbuffer.COLOR_BLACK,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
         row[#row + 1] = HorizontalSpan:new{width = gap}
     end
@@ -284,14 +277,14 @@ function Dialog:_row_widget(item, width, height, index)
         row[#row + 1] = Ui.textbox(value, value_w, height - pad * 2, Skin.face("cfont", 10.5, 13.9, 8.9), {
             bold = item.value_bold == true or item.checked == true,
             alignment = "right", halign = "right",
-            fgcolor = Blitbuffer.COLOR_BLACK,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
     end
     if arrow_w > 0 then
         row[#row + 1] = HorizontalSpan:new{width = gap}
         row[#row + 1] = Ui.icon("chevron-right", arrow_w, height - pad * 2, Skin.dp(14, 12, 19), {
             face = Skin.face("cfont", 12.8, 17.2, 10.8),
-            fgcolor = Blitbuffer.COLOR_BLACK,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
     end
 
@@ -343,7 +336,7 @@ function Dialog:_inline_actions_widget(item, width, height)
             Skin.face("smallinfofont", count >= 4 and 8.6 or 9.3, count >= 4 and 11.4 or 12.3, count >= 4 and 7.2 or 7.9), {
                 bold = action.danger == true or action.bold == true,
                 alignment = "center", halign = "center",
-                fgcolor = Blitbuffer.COLOR_BLACK,
+                fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             }))
         group[#group + 1] = tap
         if index < count then group[#group + 1] = HorizontalSpan:new{width = gap} end

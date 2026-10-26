@@ -356,7 +356,8 @@ local replay_session
 local remote_callback,submitted,submission_options,replay_error,replay_result,verified
 local replay=setmetatable({sync={}}, {__index=Plugin})
 function replay:_persisted_sessions() return {a=replay_session} end
-replay.store={save_session=function(_,_,update) for k,v in pairs(update) do replay_session[k]=v end end}
+replay.store={save_session=function(_,_,update) for k,v in pairs(update) do replay_session[k]=v end end,
+    session=function() return replay_session end}
 function replay:logged_in() return true end
 function replay:_network_radio_hint() return not offline end
 function replay:_stored_progress_record() return {book={book_id='a'}} end
@@ -416,15 +417,17 @@ assert(replay_result.ok and replay_result.position.progress_sequence==2
 check_replay({chapter_uid='8',offset=300,updated_at=100,percent=30})
 assert(submitted and submission_options.force_write,'newer Kindle reading was blocked by an older phone change')
 check_replay({chapter_uid='8',offset=300,updated_at=300,percent=30})
-assert(not submitted and replay_result.ok and replay_error=='remote_newer_local_unsent_dropped'
-    and replay_session.pending_progress==false,'older Kindle reading overwrote newer phone reading')
+assert(not submitted and replay_result.ok and replay_error=='remote_newer_pending_local_retained'
+    and replay_session.pending_progress and replay_session.progress_upload_state=='remote_newer_pending',
+    'cloud fetch erased an unsent Kindle position before exact local adoption')
 check_replay({chapter_uid='8',offset=200,updated_at=300,percent=20})
 assert(not submitted and verified and replay_error=='already_aligned','already accepted position was sent again')
 check_replay({chapter_uid='8',offset=300,updated_at=220,percent=30})
-assert(not submitted and replay_error=='freshness_conflict' and replay_session.pending_progress
-    and replay_session.progress_sync_state=='deferred','ambiguous reading events were uploaded')
+assert(not submitted and replay_error=='remote_newer_pending_local_retained' and replay_session.pending_progress,
+    'provably newer cloud position should not cause an old local replay')
 check_replay({conflict=true,percent=20})
-assert(not submitted and replay_error=='remote_source_conflict','disagreeing cloud sources were overwritten')
+assert(not submitted and replay_error=='remote_coordinate_unavailable' and replay_session.pending_progress,
+    'cloud observation without verified chapter/co must not delete unsent progress')
 check_replay(nil)
 assert(not submitted and replay_session.progress_sync_state=='waiting_network','failed read dispatched the pending write')
 check_replay({chapter_uid='8',offset=100,updated_at=100,percent=10},function()

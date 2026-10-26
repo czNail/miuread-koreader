@@ -3490,60 +3490,94 @@ function Sync:retry_safe_reading_time(book_id,record_override,position_override,
             "book=",book_id)
     end
     local core_hash=self:_core_map_hash(record_override)
-    local started=self:upload(seconds,function(ok,result,_position,value)
-        value=type(value)=="table" and value or {}
-        local meta=type(value.meta)=="table" and value.meta or {}
-        local kind=tostring(value.error_kind or "")
-        if ok==true then
-            self:_save_safe_pending_state(book_id,0,core_hash)
+    local maximum=math.max(10,tonumber(Config.READ_REPORT_MAX_ELAPSED_SECONDS) or 60)
+    local remaining=seconds
+    local finished=false
+    local function finish(ok,message,kind)
+        if finished then return end
+        finished=true
+        callback(ok,message,kind)
+    end
+    -- Only provably UNSENT seconds can enter this queue.  After each accepted
+    -- batch save the remainder before beginning the next request, so a crash or
+    -- timeout cannot make the entire original interval replay twice.
+    local send_next
+    send_next=function()
+        if finished then return false end
+        if remaining<=0 then
             self.store:save_session(book_id,{
                 report_state="ok",last_error=false,last_error_kind=false,
                 last_unconfirmed=false,last_unconfirmed_at=false,
-                last_report_reason="manual_safe_retry",last_upload=os.time(),last_elapsed=seconds,
+                last_report_reason="safe_retry_all_batches_accepted",last_upload=os.time(),
+                last_elapsed=seconds,
             })
-            logger.info("[MiuRead][ReadingTimeRetry] accepted","book=",book_id,"seconds=",tostring(seconds))
-            callback(true,"微信读书已确认接收","accepted")
-            return
+            finish(true,"微信读书已确认接收全部待报时长","accepted")
+            return true
         end
-
-        local dispatch_unknown=value.uncertain==true or kind=="unconfirmed"
-            or (kind=="transport" and meta.request_dispatched==true)
-        if dispatch_unknown then
-            -- Once a request may have reached WeRead, those seconds are no longer
-            -- provably unsent. Remove them from the replay pool so a second click
-            -- can never double-count reading time.
-            self:_save_safe_pending_state(book_id,0,core_hash)
-            self.store:save_session(book_id,{
-                report_state="unconfirmed",
-                last_unconfirmed=tostring(result or value.response_summary or "请求已发出但结果不明确"),
-                last_unconfirmed_at=os.time(),
-                last_report_reason="manual_safe_retry_unconfirmed",
-            })
-            logger.warn("[MiuRead][ReadingTimeRetry] dispatch unconfirmed; replay disabled",
-                "book=",book_id,"seconds=",tostring(seconds),"kind=",kind)
-            callback(false,"请求可能已到达微信读书；为避免重复计时，已停止再次重传","unconfirmed")
-            return
+        if self.host and type(self.host._active_reader_ui)=="function"
+            and self.host:_active_reader_ui() then
+            finish(false,"正在阅读；剩余时长已保留，结束阅读后再补报","reading_active")
+            return false
         end
-
-        -- Explicit server/auth/context rejection means the interval was not
-        -- accepted. Keep the SAFE carry so a later authenticated click can retry.
-        logger.warn("[MiuRead][ReadingTimeRetry] explicit failure retained",
-            "book=",book_id,"seconds=",tostring(seconds),"kind=",kind,
-            "error=",tostring(result or value.error or "-"))
-        callback(false,tostring(result or value.error or "阅读时间同步失败"),kind~="" and kind or "failed")
-    end,{
-        silent=true,
-        reading_time_retry=true,
-        time_only=true,
-        report_mode="reading_time_compat",
-        cloud_anchor=anchor,
-        position_override=position,
-        record_override=record_override,
-        allow_same_book_generation_change=true,
-        allow_book_switch_result=true,
-    })
-    if not started then callback(false,"阅读时间同步任务正在运行","busy") end
-    return started
+        local chunk=math.min(maximum,remaining)
+        local completed=false
+        local started=self:upload(chunk,function(ok,result,_position,value)
+            if completed or finished then return end
+            completed=true
+            value=type(value)=="table" and value or {}
+            local meta=type(value.meta)=="table" and value.meta or {}
+            local kind=tostring(value.error_kind or "")
+            if ok==true then
+                remaining=remaining-chunk
+                self:_save_safe_pending_state(book_id,remaining,core_hash)
+                logger.info("[MiuRead][ReadingTimeRetry] batch accepted",
+                    "book=",book_id,"seconds=",tostring(chunk),"remaining=",tostring(remaining))
+                -- The next batch is dispatched only after the previous worker
+                -- has completed and only while outside an active ReaderUI.
+                UIManager:scheduleIn(.15,send_next)
+                return
+            end
+            local dispatch_unknown=value.uncertain==true or kind=="unconfirmed"
+                or (kind=="transport" and meta.request_dispatched==true)
+                or value.dispatch_state_uncertain==true
+            if dispatch_unknown then
+                -- The attempted chunk might have reached WeRead; never replay
+                -- it.  The unattempted remainder is still provably safe.
+                remaining=math.max(0,remaining-chunk)
+                self:_save_safe_pending_state(book_id,remaining,core_hash)
+                self.store:save_session(book_id,{
+                    report_state="unconfirmed",
+                    last_unconfirmed=tostring(result or value.response_summary or "请求已发出但结果不明确"),
+                    last_unconfirmed_at=os.time(),
+                    last_report_reason="safe_retry_chunk_unconfirmed",
+                })
+                logger.warn("[MiuRead][ReadingTimeRetry] uncertain chunk excluded from replay",
+                    "book=",book_id,"attempted=",tostring(chunk),"safe_remaining=",tostring(remaining))
+                finish(false,"本次请求的结果不确定；未尝试的剩余时长已安全保留","unconfirmed")
+                return
+            end
+            -- A proven pre-dispatch failure leaves the current batch and all
+            -- later batches unchanged in the safe durable journal.
+            logger.warn("[MiuRead][ReadingTimeRetry] batch rejected, safe time retained",
+                "book=",book_id,"remaining=",tostring(remaining),"kind=",kind)
+            finish(false,tostring(result or value.error or "阅读时间同步失败"),kind~="" and kind or "failed")
+        end,{
+            silent=true,
+            reading_time_retry=true,
+            time_only=true,
+            report_mode="reading_time_compat",
+            cloud_anchor=anchor,
+            position_override=position,
+            record_override=record_override,
+            allow_same_book_generation_change=true,
+            allow_book_switch_result=true,
+        })
+        if not started and not completed then
+            finish(false,"阅读时间同步任务暂时不可用；剩余时长已保留","busy")
+        end
+        return started~=false
+    end
+    return send_next()
 end
 
 function Sync:begin_progress_write(reason, callback)

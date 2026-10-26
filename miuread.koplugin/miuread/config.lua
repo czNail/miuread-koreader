@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.1.0-beta.7",
+    VERSION = "6.1.0-beta.8",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -101,9 +101,9 @@ local C = {
     BACKGROUND_PARK_LOG_INTERVAL = 20,
 
     READ_INTERVAL = 60,
-    -- First confirmed reading-time report is intentionally earlier than the
-    -- steady 60 s cadence so the user can verify sync without waiting a minute.
-    -- This is an internal strategy, not another user-facing setting.
+    -- Service clock starts early, but all Web reading-time writes are deferred
+    -- until the reading-end flush.  This remains a scheduling/health parameter,
+    -- NOT a permission to write during active reading.
     READ_FIRST_DELAY = 15,
     -- beta.24 never replays historical/suspend reading-time debt. Normal
     -- reports stay on the established one-minute cadence and every request is

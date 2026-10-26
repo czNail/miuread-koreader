@@ -1,5 +1,15 @@
 # Changelog
 
+## 6.1.0-beta.8 — Progress lifecycle regression repairs
+
+- Revert beta.6 low-level ReaderUI upload vetoes; retain the established end-of-reading upload lifecycle and the removed one-shot upload on book open.
+- Anchor-aware latest-wins decision: prefer independently verified common chapter/co over server write timestamps; no 30-second ambiguous conflict UI.
+- When the server is newer, keep an UNSENT local transaction until cloud position is verified on the device; never erase it after merely fetching cloud progress.
+- Preserve Web-only verification of uploaded chapter/co, pending progress on failure, and account/sequence isolation.
+- Revert global menu greying/truncation changes; use opt-in readable readonly rows and a full-text reason dialog for progress details.
+- Keep reading-time and legacy migration data protections; add regression coverage for cloud adoption and retained pending rows.
+- Retain automatic tag releases and changelog normalization. No database schema bump.
+
 ## 6.1.0-beta.7 — Beta Tag CI 元数据修复版
 
 - 修正 beta.6 版本日志标题及位置，使 CHANGELOG.md 符合发布工作流既有格式。

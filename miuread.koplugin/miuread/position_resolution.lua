@@ -75,9 +75,15 @@ function M.decide(input)
     local local_changed=seq_local_changed or local_anchor_changed==true
     local remote_changed=remote_anchor_changed==true
 
-    -- beta.6: Compare *reading event* timestamps, not request/verification time.
-    -- A 5-second difference is a difference, not evidence of concurrent edits.
-    -- Explicit durable local events win only when the server isn't demonstrably newer.
+    -- Verified common anchor is stronger than a server write timestamp.
+    -- A Web report can update the server clock without a human page turn.
+    if local_changed and remote_anchor_changed==false then
+        return {winner="local",reason=seq_local_changed and "local_sequence_after_anchor" or "local_changed_after_anchor"}
+    end
+    if remote_changed and local_anchor_changed==false and not seq_local_changed then
+        return {winner="remote",reason="remote_changed_after_anchor"}
+    end
+
     local lt=number(input.local_updated_at,0) or 0
     local rt=number(input.remote_updated_at,0) or 0
     if lt>0 and rt>0 and lt~=rt then
@@ -86,18 +92,8 @@ function M.decide(input)
     end
     if lt>0 and rt<=0 then return {winner="local",reason="local_timestamp_only"} end
     if rt>0 and lt<=0 then
-        if seq_local_changed then
-            -- The local event is known to be unsent, but its wall clock is missing:
-            -- never mistake a cloud fetch timestamp for a reading event.
-            return {winner="local",reason="durable_unsent_local_event"}
-        end
+        if seq_local_changed then return {winner="local",reason="durable_unsent_local_event"} end
         return {winner="remote",reason="remote_timestamp_only"}
-    end
-    if local_changed and not remote_changed then
-        return {winner="local",reason=seq_local_changed and "local_sequence_after_anchor" or "local_changed_after_anchor"}
-    end
-    if remote_changed and not local_changed then
-        return {winner="remote",reason="remote_changed_after_anchor"}
     end
     if seq_local_changed then
         return {winner="local",reason="local_unsent_sequence_tiebreak"}
@@ -121,7 +117,6 @@ function M.prefer_nonstale_remote(incoming, stored, clock_skew_grace)
     if M.same_position(incoming,stored) then return incoming,"same_position" end
     local it=number(incoming.updated_at or incoming.updated,0) or 0
     local st=number(stored.updated_at or stored.updated,0) or 0
-    local grace=math.max(0,number(clock_skew_grace,30) or 30)
     if it>0 and st>0 and st>it then
         return stored,"stored_remote_newer"
     end
