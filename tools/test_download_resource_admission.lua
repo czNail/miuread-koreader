@@ -220,7 +220,7 @@ local d2=assert(download_source:find('function DownloadTask:_restart_interrupted
 local download_methods=download_source:sub(d1,d2-1)
 local env={DownloadTask={},RuntimePressure=sandbox.RuntimePressure,
     Config=config,DownloadAdmission=Admission,logger=sandbox.logger,
-    serializable_copy=function(x) return x end,os={remove=function() end},
+    serializable_copy=function(x) return x end,os={time=os.time,remove=function() end},
     tonumber=tonumber,type=type,tostring=tostring,math=math}
 compile(download_methods,'@resume_fork_admission',env)()
 test('hibernated task cannot fork at 85 MiB',function()
