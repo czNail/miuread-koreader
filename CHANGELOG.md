@@ -1,0 +1,2219 @@
+# Changelog
+
+## 6.1.0-beta.11 - Beta Update
+
+- 修复新增内存验证脚本与旧发布验证器冲突，并在 CI 中运行两套验证
+- 下载自动恢复统一为单一调度入口，修复内存不足被误判成重启熔断
+- 增强 EPUB 打包边界内存检测，验证失败时清理临时文件
+- 保留阅读进度与阅读时间上报规则、断点缓存和 Schema 136
+
+## 6.1.0-beta.9 — PR #156 follow-up: fresh open-sync and time-report recovery
+
+- Keep PR #156 verified-sequence callback fix and twelve transaction regression scenarios.
+- Remove the cached exact-alignment shortcut on new book opens; fetch fresh Web progress asynchronously.
+- Parse isolated reading-time Web progress consistently, validate chapter UID/index before committing the anchor, and retain safe unsent time on context/authentication failure.
+- Distinguish accepted-but-unconfirmed progress from actual write failure, including subsequent cloud changes; never replay old writes blindly.
+- Preserve end-of-reading-only network uploads and Schema 136; leave downloads, annotations and account transport unchanged.
+
+## 6.1.0-beta.8 — Progress lifecycle regression repairs
+
+- Revert beta.6 low-level ReaderUI upload vetoes; retain the established end-of-reading upload lifecycle and the removed one-shot upload on book open.
+- Anchor-aware latest-wins decision: prefer independently verified common chapter/co over server write timestamps; no 30-second ambiguous conflict UI.
+- When the server is newer, keep an UNSENT local transaction until cloud position is verified on the device; never erase it after merely fetching cloud progress.
+- Preserve Web-only verification of uploaded chapter/co, pending progress on failure, and account/sequence isolation.
+- Revert global menu greying/truncation changes; use opt-in readable readonly rows and a full-text reason dialog for progress details.
+- Keep reading-time and legacy migration data protections; add regression coverage for cloud adoption and retained pending rows.
+- Retain automatic tag releases and changelog normalization. No database schema bump.
+
+## 6.1.0-beta.7 — Beta Tag CI 元数据修复版
+
+- 修正 beta.6 版本日志标题及位置，使 CHANGELOG.md 符合发布工作流既有格式。
+- Tag 发布在校验前自动确保当前版本的 CHANGELOG 条目存在；缺失时从 Tag 提交说明生成，不再要求用户手动补标题。
+- 保留现有 Beta Tag 自动发布和手动发布两条路径；不移动旧 Tag、不修改下载和同步业务逻辑，数据库 Schema 仍为 136。
+- 进度同步改动与 beta.6 保持一致；仍需在真实 Kindle 和微信读书服务端验证双向精确同步。
+
+## 6.1.0-beta.6 — automatic end-of-reading sync repair (candidate)
+
+- Resolve local/cloud positions using reading-event timestamps; remove the 30-second ambiguous-clock conflict gate and prefer the latest cloud observation even within 30 seconds.
+- Allow legacy fenced UNSENT progress to re-enter automatic upload after cloud freshness comparison; preserve superseded local snapshots and choose newest Web/Agent observation without user conflict dialogs.
+- Keep progress uploads only on reading-end events (including on-open local-newer branch); remove periodic reading-time HTTP writes while an active reader is open.
+- Interpret a nil KOReader text-search result as no match, with short UTF-8 anchor fallbacks; exact chapter/co still requires Kindle verification.
+- Prevent retry-budget drops of provably unsent reading time, retain verified safe carry and its journal through restarts, and improve fixed-height status-row contrast.
+- Preserve schema 136, Web-only post-write verification, existing download paths and Tag-triggered beta CI.
+- Kindle and live WeRead verification still required.
+
+## 6.1.0-beta.5 — 修复整合与功能回归候选版
+
+- 以 beta.2 为基线，选择性移植进度恢复锚点、E-Ink ZIP、HTTP 暂停与 KOReader 退出修复。
+- Web 上传只由 Web 回读确认；普通云端进度仍使用 Web/Agent 综合读取，保留原坐标字段优先级及原持久化写入。
+- 阅读时间兼容写入采用 Web 进度；缺失章节索引时只允许同章节 UID 的目录信息补齐。缺少可信上下文时保持既有失败补报路径。
+- 下载等待队列在延迟启动前重查队列身份和运行条件；历史无账号标记的等待任务需要手动确认后才能自动运行。
+- 同一笔进度上传的重复校验共享回调；扩充功能等价和异常恢复测试。
+- 本版未更改 SQLite Schema、下载协议、登录协议、原有 Tag 自动发布触发条件。
+- 尚未通过真实微信读书服务端与 Kindle 实机验证；历史 `co=368 → co=0` 的服务器侧原因仍待确认。
+
+
+## 6.1.0-beta.2 - Beta Update
+
+- 修复低内存下载启动时任务被直接拒绝的问题，复用原有持久化队列自动等待和重试
+- 统一休眠恢复与新建下载子进程的内存安全检查，避免 72 MiB 与 96 MiB 冲突
+- 增加后台工作租约存活校验，防止超时误释放导致进程重叠
+- 增加下载资源诊断、重试退避和恢复后的唤醒，并保留账号及同步逻辑
+
+## 6.0.0 - Stable Release
+
+- 正式版基于 6.0.0-beta.1 收口，继承 5.9.1-beta.4 的功能与修复；Schema 保持 136，不把 Beta 发布通道变成正式版通道。
+- 保留 5.9 多设备精确阅读进度、云端/本地新旧判断、冲突保护、断线恢复、Progress Recovery Capsule 以及严格的 fail-closed 行为。
+- 纳入微信读书书城、搜索与推荐、书架添加/移除、后台书架进度更新、已读完状态双向同步和书架管理授权。
+- 主登录与书架管理授权继续使用两套独立凭证；同账号主登录刷新保留书架管理凭证，允许单独撤销书架管理授权。不声称已经完成真正的单凭证统一。
+- 保留外文翻译原文/双语/仅译文、书内链接修复、连接复用、扩展中心与 Kindle/Kobo/Android 兼容路径。
+- 发布包切换为正式版 6.0.0，默认 OTA 指向 stable-channel/update.json；Beta 发布配置仍只用于内测分支。
+
+## 6.0.0-beta.1 - 6.0 Beta Baseline
+
+- 以 5.9.1-beta.4 的已收口代码作为 6.0 Beta 基线；不新增实验性认证桥接，不改变 Schema 136、同步主链路或主页结构。
+- 延续安装包减重结果：压缩 stillness 背景，发布包继续排除仅用于编译的 `native/` 源码，运行时 codec 与 Kindle/Kobo/Android 支持保持不变。
+- 延续双登录收口：主登录与书架管理授权继续独立；同账号重新扫码保留既有书架管理授权，并支持单独取消该授权。
+- 延续书城轻量整理与日志降噪；同时修正两条历史回归测试的版本硬编码，使 6.0 系列继续验证功能契约而不是旧版本号。
+
+## 5.9.1-beta.4 - Lean Packaging & UX Polish
+
+- 安装包减重：压缩 stillness 背景，发布包排除仅用于编译的 `native/` 源码；运行时 codec 与平台支持不变。
+- 清理 `main.lua` 中 17 个无生产引用的私有遗留方法和 34 个旧 verifier，保留正式回归测试，不改主页结构和同步主链路。
+- 双登录体验收口：同一微信读书账号重新扫码时保留既有“书架管理授权”；账号状态显示授权状态，并支持只取消书架管理授权、不退出主账号。
+- 书城做轻量文字与分页层级整理，不重做 ShelfView；同时减少低价值 `StorePerf` 正常日志，WARN/ERROR 与认证写入日志继续保留。
+
+## 5.9.1-beta.3 - WeRead Store & Shelf State Sync
+
+- 新增微信读书书城：支持推荐、排行榜、分类、搜索结果衔接、相似书籍与分页浏览，并保留缓存和电子墨水屏交互优化。
+- 新增微信书架管理：可加入/移出微信书架；移出操作使用独立 Native 授权并进行同账号校验，写操作采用回读确认，避免网络异常下重复提交。
+- 完善书架阅读状态：未下载书籍也可在后台刷新阅读百分比，识别手机端独立“已读完”标记，并支持 Kindle 端标记/取消已读完后回写微信读书。
+- 增加离线与竞态保护：读完操作可持久化等待恢复；书架进度读取在用户交互时主动让路，过期回调、账号切换和旧进度事务不能覆盖当前状态。
+- 保留 5.9.1-beta.1 的 Progress Recovery、exact cloud readback、remote-first freshness、ProgressFence、rollback 与 fail-closed 规则。Schema 保持 136。
+
+## 5.9.1-beta.1 - Progress Transaction Recovery
+
+- 修复 beta.19 `passive_exact_cache` 的原生 `chapterUid + wr_data_co` 快照遗漏 `safe=true`：此前同一精确位置可能先记录 `final_position_captured`，Reader 关闭后又被 `upload_progress()` 判成 `position_unavailable`，并留下“有失败记录但没有可执行动作”的 pending；本版统一恢复 `safe / coordinate_safe / precise` 语义，并在启动时一次性修复现有 beta.19 精确 pending。
+- 新增 ReadingEnd `Progress Recovery Capsule`：精确 source mapping 失败时，把 Reader 仍存活时捕获的 immutable source anchor、XPointer、显示进度、sequence/epoch 持久化；Home 可直接用保存的锚点重跑本地 source cache / fresh Web Reader source，无需为了新产生的失败记录重新打开书。
+- `pending_unresolved_position` 正式进入进度恢复状态机：Home/“全部重新同步”优先执行 saved-anchor recovery，再补全整书坐标、fresh GET 云端、按既有 latest-wins 规则发送或验证；失败详情新增“恢复精确位置”。任何旧记录若缺少安全重放坐标和恢复锚点，会明确作为可清理失效记录，不再出现 `items=1` 但 send/verify/resubmit/coordinate 全为 0 的无解释状态。
+- ReadReport 生命周期区分主动停止与真实异常退出：ReadingEnd/进度优先抢占后 worker 正常退出不再记为 `unexpected`，也不会被无意义拉起；Reader 活跃期间真实异常退出仍保留一次自动重启。
+- 不改变 beta.19 的多锚点精确映射、beta.18 fresh context、beta.17 progress epoch/conflict lifecycle、beta.15/16 `remote_wire_anchor + fresh GET before POST`、exact cloud readback、remote-first freshness resolver、ProgressFence 与 rollback。网络或 source mapping 暂不可用时继续 fail closed：最多延迟同步，不允许用近似百分比或未知远端状态覆盖云端。Schema 保持 136。
+
+## 5.9.0 - 2026-10-04
+
+- 正式版基于 5.9.0-beta.19 收口，不改变 beta.19 已验证的运行逻辑；插件版本切换为 `5.9.0`，默认更新通道切换为 `stable-channel/update.json`，Schema 保持 136。
+- 完成 5.9 多设备阅读进度模型：开书按可信锚点、同步因果与真实阅读事件判断本机/云端新旧，保留冲突保护、晚到云端结果防突跳、撤回与 write fence，避免旧设备位置静默覆盖更新云端。
+- 精确进度继续以原生 `chapter_uid + co` 为最终验收依据；本地→云端加入 forward/backward 24/16/12 多级唯一正文锚点、fresh Web Reader source recovery、有限标题/邻章候选与格式字符归一化，坐标冲突或无法唯一确认时 fail closed。
+- 云端→本地在唯一正文 text anchor 已命中正确章节时保留真实落点，不再因反向 co 暂未验证而错误回退或用 percent correction 覆盖；只有真正只能定位到章节附近时才显示近似定位提示。
+- 完成 progress failure lifecycle、progress epoch、clean-state migration、ghost-write guard、verify-first recovery，以及“以云端为准 / 以本机为准”显式冲突处理；ReadReport v30 继续在阅读时间写入前 fresh GET 云端位置。
+- 纳入 5.9 外文翻译能力：支持原文 / 双语 / 仅译文三态、官方译文生成、当前章与下一章有界生成、安全 EPUB 替换及阅读位置/划线迁移；非会员或不支持时不破坏原书。
+- 主页“刷新 / 同步”与同步失败恢复入口统一，未知进度不再显示为 0%；扩展中心、下载链路、锁屏与本地书库继续继承 5.8 后期稳定能力。
+- 正式安装包继续只包含一个 `miuread.koplugin/` 根目录，并保留 AGPL-3.0-only、第三方声明、Lua 语法检查及既有 beta 回归测试资产。
+
+## 5.9.0-beta.19 - Robust Local Mapping & Quiet Position Sync
+
+- 本地→微信精确进度换算从单一 `forward_24` 扩展为同一 XPointer 的双向多级 exact anchors：`forward/backward 24 -> 16 -> 12`；短锚点仍必须在微信坐标源中唯一确定，多个成功锚点若导出不同 native `wr_data_co` 则 fail closed，不猜坐标。
+- `PrecisePosition.capture()` 同时保存多组 immutable source anchors；章节 recovery 在原有限邻章基础上加入本地 TOC 标题的 exact-title 候选，但候选只有通过正文 exact anchor 才能被采用。
+- 新增 progress-source 专用 `PosMap.locateSource()`：只额外忽略 NBSP、零宽字符、soft-hyphen、BOM/word-joiner 等无可见语义格式字符；不做编辑距离、大小写模糊、标点折叠或百分比近似，annotation 定位逻辑保持原样。
+- 保留 beta.18 `fresh_context=true` 作为缓存失败后的第二阶段 recovery：exact cache -> 多锚点 -> fresh Web Reader source -> 多锚点 -> 有限章节候选；最终仍只有 native chapter/co 才允许上传。
+- 云端→本地的 `text_anchor_xpointer` 唯一命中现在视为可靠导航落点：即使反向 local->wr_data_co 验证暂未完成，也不再向用户显示“精确章节内位置暂未确认”，并停止后续 percent correction 破坏已成功的正文落点；内部 exact write fence 继续保留。
+- 真正只到章节附近、没有唯一正文锚点时仍会提示“已定位到云端章节附近”；错误章节继续 rollback。ReadReport v30、ghost-write guard、progress epoch/conflict lifecycle 与 exact cloud readback 全部保持不变。Schema 136。
+
+## 5.9.0-beta.18 - Fresh Progress Source Context
+
+- 修复本地→微信精确进度换算仍可能使用 beta.23+ 240 秒 book-scoped Reader context/psvts 的问题：progress source mapping 的网络源获取现在强制 `fresh_context=true`，针对目标 `chapterUid` 重新生成 Web Reader page/context 后再取得 `coord_html`。
+- 普通整本下载、章节预取与阅读继续保留 Reader context 复用，不回退 beta.23 的下载性能优化；fresh context 仅隔离到精确 progress source mapping。
+- `Reader:_chapter_once()`、`_epub_once()` 与 `_txt_once()` 统一识别 `opt.fresh_context`，避免 EPUB/TXT fallback 或内部直调绕回旧 context。
+- `ProgressSourceDiagnostic stage=network_fetch` 新增 `reader_context=fresh`，下一份 crash 可直接确认精确换算是否实际走了 fresh context。
+- 不修改 `forward_24`、`PosMap.locate()`、`wr_co`、exact-co 容差、progress submit/verify 或云端→本地定位；fresh source 后仍找不到唯一 anchor 时继续 fail closed。
+- 完整保留 beta.17 progress epoch / conflict lifecycle、beta.16 clean-state 与 ReadReport v30 fresh-GET-before-POST。Schema 保持 136。
+
+## 5.9.0-beta.17 - Progress Failure Lifecycle & Conflict Resolution
+
+- 修复 beta.16 clean reset 的跨 Store 漏洞：`progress_epoch` 现在高于 sequence/rank/timestamp；新 generation 可强制旧 Home/Reader Store 接受“pending 已删除”，杜绝 reset 后旧事务重新写回。
+- 首次启动执行一次 beta.17 progress-control reset，清理已被 beta.16 旧 Store 复活的 pending；额外清除 `pending_unresolved_position` 与 `local_read_event_at` 等同步控制元数据，保留本机实际阅读页和 `local_display_progress`。
+- `ambiguous_clock_conflict` 等 authority conflict 不再进入 Home 自动 retry / 全部重新同步的发送或重提交流程，避免“继续上传→冲突→失败记录仍在”的死循环。
+- 进度失败详情新增“以云端为准”：先 fresh GET 云端，成功后递增 epoch、清掉本地 pending/retry，再把刚读取的云端坐标作为新 baseline；GET 失败则完全不删除本地事务。
+- 新增“以本机为准”：只有仍属于当前 epoch 的可重放精确 `chapter/co` 才可显式 force-write，并继续使用 exact chapter/co readback 验证。
+- 无可安全重放坐标的纯失效记录可“清除失效记录”，只删除本地同步事务，不写微信云端。
+- ReadReport 保持 v30 与 fresh-GET-before-POST；text-anchor/source mapping/定位容差均不改。Schema 保持 136。
+
+## 5.9.0-beta.16 - Clean Sync State & Ghost-Write Guard
+
+- 首次启动执行一次性 `progress_state_reset_beta16`：对每本书递增 `progress_epoch`，清除历史 `cloud_anchor / remote_wire_anchor / remote / position_state / local_position_snapshot / pending_progress / progress transaction / verified sequence / report context` 等同步控制面状态；保留登录、书架/下载、本机真实阅读页、批注、最近阅读、阅读时间历史与 `local_display_progress`。
+- 5.9 beta.4–15 一直共用 Schema 136，降级不会自动清理进度状态；本版用独立 marker 执行 clean-state migration，避免旧版本留下的 anchor/pending 在新代码中继续参与同步。
+- `ReadReport` service version 升至 30，启动时淘汰 v1–29 旧 worker/control；v30 daemon control 不再序列化任何 `cloud_anchor_*` 字段，只保留 beta.15 的 `remote_wire_*` 通道。
+- 保留 beta.15 的硬规则：每次 `reading_time_compat` POST 前 worker 都先 GET 当前微信位置并原样回显；GET 失败则不 POST。因此历史 CloudAnchor 即使仍存在于旧文件，也不能再次把服务器位置写回。
+- “重置本书同步状态”改为调用同一套完整 reset，除了旧事务外同时清理 stale remote/CloudAnchor/report-context，并通过 `progress_epoch` 使旧事务失效。
+- 不修改 beta.15 的 progress writer、beta.14 的同章 soft mismatch、beta.12 source refresh，也不改变 exact-co 容差或 text-anchor 算法。Schema 仍为 136。
+
+## 5.9.0-beta.15 - Cloud Position Integrity & Exact-Sync Diagnostics
+
+- 新增 `remote_wire_anchor`，每次成功 GET 微信阅读位置都立即保存原始 `chapterUid + chapterOffset + protocol progress`；该值不依赖本地 canonical progress，也不被 pending local progress 阻挡。
+- ReadingTime/ReadReport 的 `reading_time_compat` 不再读取 `cloud_anchor()`：后台时长上报在每次写入前都由隔离 worker 重新 GET 当前服务器位置，并只回显该次 fresh remote wire anchor；GET 失败则本轮不 POST。pending、本地 exact、旧 verified CloudAnchor 均不能进入时长上报的 `ci/co/pr`。
+- ReadReport daemon control 新增 `remote_wire_*` 字段并将 service version 升至 29，升级后不会复用旧 beta.14 worker/control 语义。
+- SAFE 阅读时间手动重试同样只使用 remote wire anchor；若本地没有缓存，则 worker 先刷新服务器位置，不再因旧 CloudAnchor 继续写旧坐标。
+- `text_anchor_rescue()` 改为标准 CREngine 搜索调用优先、兼容调用 fallback；诊断明确区分 `call_failed / invalid_return / zero_hits / hits_outside_chapter / multiple_hits / unique_hit`，记录 query hash、长度、UTF-8 合法性与真实 pcall error，但不记录正文。
+- 不修改 beta.14 progress writer、rollback/soft-mismatch、source mapping 或 co 容差；严格 `remote_exact_unresolved` write fence 与 beta.12 source refresh / subprocess completion 保持不变。Schema 136。
+
+## 5.9.0-beta.14 - Progress Sync Stabilization
+
+- 以 beta.12 为代码基线，撤销 beta.13 的跳转前精确 preflight 与主动 idle exact-cache 设计；恢复已经在真机验证有效的“近似落点 → exact verify → text-anchor rescue → 再验证”主链。
+- 将远端定位最终失败拆成 hard/soft 两类：落入错误章节继续安全 rollback；已经进入目标章节但章节内 `wr_data_co` 未能精确确认时保留当前章节位置，不再自动跳回，同时继续阻止近似坐标写回云端。
+- OpenSync 的 late-remote 保护扩展到实际用户位置操作；云端结果返回前用户已经翻页/跳转时，本轮只保留 `remote_newer_pending`，不再突然抢占阅读位置。
+- 阅读结束首先独立保存 KOReader `local_display_progress` 与 XPointer；微信 exact `chapterUid + wr_data_co` 解析失败只进入 `local_coordinate_unresolved`，不再让主页本地进度一起失效。
+- 首页/书架引入 `progress_known`：未知进度保持 `nil` 并显示“—”，不再用 `nil → 0%`；RecentHero 优先保留本次 reader-close 的较新本地显示进度。
+- exact cache 改为纯被动：只在既有流程已经成功获得原生 `wr_data_co` 时顺手保存，并且仅在退出时 XPointer 完全一致才复用；失败位置仅保存 unresolved snapshot，不启动周期性精确定位。
+- 完整保留 beta.12 的 source force-refresh、KOReader subprocess completion、pending/verify recovery、严格 exact co 校验与 fail-closed 云端写入策略。Schema 保持 136。
+
+## 5.9.0-beta.12 - Exact Source Refresh & Writer Completion Fix
+
+- 修复精确位置 recovery 的“假网络刷新”：本地 exact/legacy source cache 已经无法定位 anchor 时，network recovery 会显式绕过旧缓存并重新获取当前章节 `coord_html`，成功后覆盖 exact cache；若新源仍无法定位则继续 fail closed，不上传近似位置。
+- 修复 reading-time writer 抢占的 zombie/未 reap 判定：在 `kill(pid, 0)` 之外使用 KOReader `FFIUtil.isSubProcessDone(pid, false)` 确认子进程已经完成，减少已退出 writer 被误判为存活而触发 `time_writer_preempt_timeout`。
+- 保留 beta.11 的统一手动 progress recovery、wake online-ready gate、pending/verify 安全语义、rollback/fence、translation 与 Release 流程；不采用 immediate time-writer detach。
+- Schema 保持 136。
+
+## 5.9.0-beta.11 - Unified Manual Progress Recovery & Wake Network Readiness
+
+- 以 beta.10 为基线，主页短按“同步”、同步状态“全部重新同步”和进度失败页“全部重新同步”统一进入 `_sync_progress_full_recovery()`；入口 `source` 只用于诊断，不再因为 UI 路径不同而改变 progress recovery。
+- 所有手动同步在进入共享 progress recovery 前统一执行登录与 Wi-Fi radio gate；保留 `pending_send / submitted_unverified`、verify-first、安全重传和冲突保护，不通过 UI 路径绕过现有安全条件。
+- 手动同步即使主页缓存暂时显示 0 个失败项，也会先执行同一 progress verification/recovery pass，再依次处理 SAFE 阅读时间与批注，减少“主页单击无动作、二级菜单可恢复”的路径差异。
+- Kindle/设备唤醒后的阅读进度 reconcile 增加 online readiness gate：`NetworkConnected` 不再等同于 API 已可用，优先等待 `online=true`，无显式 online 字段时仅在稳定 `connected` 状态并经过额外 grace 后继续。
+- `network_restored` 与 `resume_recheck` 共用 `reader-progress-online` waiter，并增加 `[MiuRead][ResumeSync] waiting_network / network_online / reconcile_started / network_wait_timeout` 诊断日志。
+- 暂不采用另一个 beta.9 分支的 time-writer detach/SIGKILL 立即接管方案；`miuread/sync.lua` 保持 beta.10/beta.8 字节不变，继续保留现有 `time_writer_preempt_timeout` 防并发 writer 保护。
+- 完整保留 beta.10 的 translation 纯 Lua 顶层、数字 bookId 支持、先测试后建 tag 的 Release workflow 与 CHANGELOG 标题兼容。Schema 仍为 136。
+
+## 5.9.0-beta.10 - Translation Dependency & Release Reliability
+
+- 保留 beta.9 的主页短按同步状态刷新、共享 recovery pipeline 与 `[MiuRead][SyncAction]` 诊断日志；不修改 progress submit/verify、worker、resolver、reading-time daemon 或 `miuread/sync.lua`。
+- 修复翻译模块依赖边界：撤销 `translation.lua` 顶层 `require("miuread.util")`，避免纯 Lua/LuaJIT 翻译回归测试在加载模块时被迫依赖 KOReader `libs/libkoreader-lfs`。
+- `M.inspect()` 使用模块内纯 Lua `trim()` 校验 `book_id`；继续接受数字等所有非空 bookId，不恢复旧的 `CB_` 限制。
+- `miuread.util` 继续只在确实需要 `U.copy()` 等功能的迁移路径中按需加载，恢复 beta.5 已验证的低耦合结构。
+- Beta Release 保持“版本校验 → 完整回归测试 → 创建 tag → 打包/发布”的顺序，并继续兼容 CHANGELOG 的 ASCII `-` 与长破折号 `—` 标题。
+- 新增 beta.10 verifier，锁定 translation 顶层无 KOReader util 依赖、数字 bookId 能力与 release 测试先于 tag 的约束。Schema 仍为 136。
+
+## 5.9.0-beta.9 - Home Sync Entry Consistency & Diagnostics
+
+- 主页快捷“同步”在进入共享 `_sync_home_pending()` recovery pipeline 前，先强制执行 `_home_sync_summary(true)`，与长按“同步 → 同步状态”路径使用相同的前置状态刷新。
+- 不修改 progress submit/verify、UNSENT/SUBMITTED_UNVERIFIED、安全重传、worker 判定、remote/local resolver、clock-skew 或 reading-time daemon 核心算法；`miuread/sync.lua` 保持 beta.8 字节不变。
+- 为手动同步补充 `[MiuRead][SyncAction]` 诊断日志，记录入口 `source`、progress 可执行动作快照以及最终 `success / pending / conflict / blocked / busy` 结果。
+- 长按“同步 → 同步状态 → 全部重新同步”明确标记为 `source=sync_status_all`；进度失败页继续使用 `source=progress_issues`，便于下一份 crash 直接比较不同入口。
+- 修复翻译 EPUB 检查路径遗漏 `miuread.util` 本地引用导致的 `translation.lua:546: attempt to index global U`；翻译生成回归测试可继续执行到后续步骤。
+- 加固 Beta Release workflow：CHANGELOG 标题同时接受 ASCII `-` 与长破折号 `—`，并将完整 Lua/回归测试移动到创建 release tag 之前，避免测试失败留下未发布的版本 tag。
+- Schema 仍为 136。
+
+## 5.9.0-beta.8 — Home Refresh & Translation Capability Expansion
+
+- 主页快捷“刷新”现在只有一个行为：完整刷新微信书架、本地书库、已生成书籍关联、最近阅读状态与主页内容，随后执行整页 full refresh；删除“刷新”的长按菜单，避免“当前栏目/整个主页”两套语义。
+- “同步”保持 beta.7 原样，不修改 progress resolver、recovery、writer 优先级、remote jump 或 clock-skew 逻辑。
+- 外文翻译不再把 `CB_` 当作能力开关：所有有效 bookId 的微信读书可重排文本书都可进入“外文翻译”；已有 `.wr-translation` 的章节仍可离线切换原文/双语/仅译文。
+- 生成新译文时取消 API 层的 `CB_` 硬拒绝，数字 bookId 也会尝试微信读书官方会员翻译链路，由官方服务实际决定是否可用；非会员、书籍不支持、网络失败均保持原文和原 EPUB 不变。
+- 保留 #120 的当前章+下一章有界生成、待安装 EPUB、安全校验、阅读位置/划线迁移和 80%–180% 译文字号；Schema 仍为 136。
+
+## 5.9.0-beta.7 — Progress Sync Reliability & Clear Status
+
+- 阅读结束时最终阅读进度现在高于阅读时长：如果低优先级 ReadReport writer 仍占用共享接口，beta.7 会终止该时间 writer 并丢弃未确认的尾段秒数，让最终 chapter/co 立即进入进度提交，不再出现 `final progress parked behind time writer`。
+- 多设备时间戳的 clock-skew grace 从 120 秒缩短到 30 秒；超过 30 秒的明显新旧关系可直接由时间戳决定，30 秒内仍保留 conflict 防误覆盖。
+- 主页快捷“同步”、主页控制面板“同步”和进度失败页“全部重新同步”统一进入同一 recovery pipeline；用户主动点击时优先处理 durable progress，不再先等待同步摘要缓存。
+- 开书同步增加明确终态反馈：冲突、云端检查失败、云端精确坐标缺失和较新云端结果返回过晚都会明确提示；正常 aligned 仍保持轻量。
+- 保留 beta.6 的 session-scoped fence、UNSENT/SUBMITTED_UNVERIFIED 区分、remote scalarization、`local_read_event_at`、raw-percent 隔离和 StoreRepair；Schema 仍为 136。
+
+# Changelog
+
+## 5.9.0-beta.6 — Sync Regression Recovery & Minimal Reconciliation
+
+- Replaces beta.5 durable progress write fences with session-scoped one-shot protection so one failed cloud jump cannot permanently block future local uploads.
+- Recovers beta.5 `fenced` progress records at startup as explicit UNSENT snapshots.
+- UNSENT recovery now fetches current cloud progress and runs the resolver before any submit; it is never mistaken for an already-submitted verification task.
+- Scalarizes remote progress before async IPC to prevent `Recursive encoding of value` from cyclic runtime source graphs.
+- Persists `local_read_event_at` independently from exact chapter/co mapping, so a `source_anchor_not_found` failure no longer erases evidence that the user actually read locally.
+- If native remote source mapping is unavailable, falls back to approximate navigation only as a seed and still requires exact chapter/co verification before accepting the cloud position.
+- Retains beta.5 raw-percent isolation, terminal-progress guard, removal of `user_interacted -> local wins`, best-effort reading time, and beta.4 position-state StoreRepair.
+- Schema remains 136.
+
+## 5.9.0-beta.5
+
+- 重构开书进度对账为非阻塞轻量流程：先立即恢复本机页面，后台只读取一次云端 position metadata；已有精确本地快照时不再先跑完整 source mapping，同一本书 60 秒内仅对“已精确对齐”的缓存结果做读取 debounce。
+- 修复 beta.4 的危险 latest-wins 分支：`user_interacted` / 晚到云端不再直接变成 `local wins`。开书冻结 `open_local_snapshot`，优先依据可信 verified anchor 判断哪一端发生变化；双方都变化或无可靠 anchor 时再比较真实阅读事件时间，120 秒 clock-skew grace 内无法安全裁决则进入 conflict。
+- 新增持久化 progress write fence：remote fetch 未完成、remote newer、conflict、remote exact unresolved 等状态一律禁止周期、结束阅读和后台 retry 把本机位置写回云端；只有明确 `LOCAL_NEWER`、重新 aligned，或用户显式手动选择本机上传时才解除。
+- 本地 freshness 与阅读时长功能解耦：第一页恢复只建立 page baseline，不算新的阅读事件；之后真实翻页/跳转才更新本地阅读事件时间，即使用户关闭阅读时间同步也仍可正确参与 latest-wins。
+- `server_raw_percent` 从 canonical position 彻底降级：CloudAnchor、ReadReport 和 finished 判断优先使用 `chapter_uid + co` 映射得到的 canonical progress；服务器异常 `raw_percent=100` 不再把中间章节污染成 100%/finished。
+- 收敛 exact-co 定位：优先复用已验证 `chapter_uid + co -> XPointer` 缓存；普通跳转未精确命中后使用微信正文短 text anchor 在对应本地章节恢复 XPointer，再做 exact verify；percent correction 仅保留一次 bounded fallback，避免 964 -> 144 -> 759 一类振荡。
+- 阅读时间改为 best-effort：正常尝试一次，运行期空闲后最多再尝试一次；仍失败直接 drop，不再跨重启保存 SAFE time debt，也不再让阅读时间失败污染主页总体同步状态。beta.5 首启会清理 beta.4 遗留的 reading-time retry/failure 状态。
+- Schema 继续保持 136；beta.4 的 position-state 标量化与启动 StoreRepair 完整保留。翻译、Extension Center、下载系统、#117/#118 等非同步功能不做行为改动。
+
+## 5.9.0-beta.4
+
+- 修复 5.9 自动续读的崩溃：云端位置对象中的 `sources` 诊断图可能形成自引用，进入 `position_state` 后在下一次 `U.merge()` 触发 LuaJIT stack overflow；现在所有持久化位置状态都压缩为纯标量坐标，并在 merge 前清理旧状态。
+- 增加启动自愈：beta.1–beta.3 已写入的循环/膨胀 position snapshot 会在启动时自动压缩，Schema 继续保持 136，不要求用户清空设置或重新登录。
+- 修复首次/无共同锚点时的 latest-wins 误判：刚读取到的 `remote_observed` 不再被当成 `verified_anchor`；只有经过精确确认的历史坐标才能作为共同锚点，避免把旧本机位置错误上传覆盖更新的云端位置。
+- 开书同步保护的默认本机 fallback 从 2.5 秒延长到 6 秒，更符合“先确认最新位置再开始翻页”的交互；超时文案改为“云端响应较慢，已先使用本机位置；后台继续确认”。
+- 保留 beta.3 的 #120 外文翻译、Extension Center UX、#117/#118 增强修复和 `chapter_uid + co` 精确验收，不改变翻译/扩展安装协议。
+
+## 5.9.0-beta.3
+
+- 完整移植 #120 外文翻译：微信读书上传外文书支持原文、双语、仅译文三态，接入官方译文生成、会员检查、当前章/下一章生成与 80%–180% 译文字号。
+- 翻译 EPUB 使用安全替换：关闭书籍后验证章节、图片与书籍身份再安装，迁移 KOReader 阅读位置与划线；失败保留原 EPUB 和阅读数据，并保留 5.9 Schema 136 的 latest-wins/精确位置模型。
+- 保留并回归 #117/#118 的增强实现：剪贴板 table 修复、1%/100% 分域、假 100% 终态保护、XML entity/CDATA/身份字段及 MiuRead manifest/XMP 标题防污染均不回退。
+- 重做扩展中心更新发现：12 小时后台静默检查、24 小时可信状态缓存，网络失败不清除已知“有更新”；扩展中心按“可更新/全部最新/需要检查”真实状态显示。
+- 觅阅推荐列表不再显示目录或本机版本号，仅显示“已安装/有更新/下载中”等状态；版本只在详情页实时读取 GitHub。下载管理第一页固定提供“下载扩展 / 更新扩展 / 插件下载任务”。
+- 多个扩展有更新时提供“全部更新”，逐项复用现有官方 Release 解析、完整性校验、事务安装和失败回滚；单项失败会停止批量流程，但不会清除尚未处理的更新状态。
+- 普通整本下载继续复用 240 秒 book-scoped reader context；只有译文生成读取 fresh reader page，避免 #120 移植导致下载性能回退。Schema 继续为 136。
+
+## 5.9.0-beta.2
+
+- 修正 5.9 latest-wins 的 freshness 语义：仅仅读取、恢复或打开本地页面不再把 `captured_at` 当成新的阅读事件，避免技术性快照压过真正更新的云端位置。
+- 增加云端旧响应防回退：若并发/晚到响应带有明确更旧的服务器更新时间，保留已经观察到的更新云端坐标，不让旧响应覆盖或触发错误跳转。
+- 书架 resolved state 与开书解析统一使用事件级 `updated_at`，不再以“刚刚扫描到本地文件”的时间参与多设备新旧判断。
+- 加固 Beta Release：CHANGELOG 版本标题必须使用 `##`，错误时直接给出修复提示；发布前自动运行 5.9 beta.2 freshness/position regression verifier。
+- 保留 beta.1 的开书同步遮罩、2.5 秒本机 fallback、晚到云端防突跳、8 秒撤回、cloudOrder 默认排序以及 `chapter_uid + co` 精确验收。
+
+## 5.9.0-beta.1
+
+- 新增无感 latest-wins 阅读位置解析，取消普通开书的本机/云端选择框。
+- 新增开书同步遮罩、2.5 秒本机 fallback、10 秒 late-remote 安全窗口与用户交互保护。
+- 新增 8 秒自动定位撤回。
+- Schema 136 新增 position_state 双写迁移。
+- 微信书架默认云端顺序；读完状态与当前位置分离解析。
+- 保持 chapter_uid + co 精确验收，不恢复 percent-equivalent。
+
+## 5.8.0-beta.26
+
+- 修复 #111：评论与书摘复制按 KOReader 剪贴板 API 的普通函数签名传递字符串，不再把 `Device.input` table 写入剪贴板。
+- 加固 #115：微信读书 0–100 `progress` 与本地 0–1 ratio 分域处理；`1` 不再把 1% 误判为 100%；非最后有效章节禁止提交 100% 终态。
+- 收口 #107：补齐 OPF 数字实体、CDATA 与 XML identity 解析，保护微信/API 与 MiuRead manifest 标题；主页手动刷新可增量恢复仍在磁盘但丢失 Store 关联的已生成 EPUB。
+- 收口 #114：保留 chapter UID rescue + exact `chapter_uid + co` 验证，percent 仍只负责导航；多设备冲突提示显示本机/云端章节及云端更新时间。
+- 加固 #116：重型下载运行期间连续两次低内存采样后自动保存断点并 hibernate，不因单次内存抖动反复启停。
+- 保留 beta.25 的同步失败闭环、SAFE 阅读时间重试与严格精确定位。
+
+## 5.8.0-beta.25
+
+- 以 beta.24 为基线收口主页同步状态：用户界面不再暴露 `pending / awaiting confirmation / 待同步 / 待确认` 等内部状态，主页只显示“已同步 / 同步中 N / 同步失败 N”。内部仍保留细分状态与错误原因用于安全恢复和诊断。
+- 修复“主页显示同步失败但点击无动作”的闭环缺口：同步详情中的阅读进度、SAFE 阅读时间、划线、想法和书签均可进入对应处理；新增“全部重新同步”，按“进度 → 安全阅读时间 → 批注”顺序执行并在结束后强制重算主页同步汇总。
+- 阅读进度手动恢复改为 verify-first：对已提交或结果不明确的精确位置先回读微信云端；云端 `chapter_uid + co` 已一致时直接清除失败状态，只有明确不一致且本地保存了可重放精确快照时才重新提交，避免因 UI 残留状态重复写进度。
+- 补齐阅读时间主页重试：只把 `pending_report_safe=true` 的“明确尚未发出”秒数计入可重试失败，并通过兼容阅读时间上报链路重传；请求一旦可能已到达微信读书，即立即移出可重放池，禁止再次点击导致重复计时。
+- 登录恢复后会自动静默重试可安全恢复的失败项；主页手动刷新也会触发同一安全恢复链，不再要求用户重新打开书籍才能让旧失败继续处理。
+- 收紧精确进度成功判定：只要本地与云端都提供 `chapter_uid + co`，最终验证以这组坐标为权威；移除 `mapped_percent_equivalent` / 0.30% 比例近似判成功路径。原生 `wr_data_co` 仅保留 16 code-unit、其他坐标 12 的技术边界容差。
+- 百分比继续保留为导航和缺失精确坐标时的最后 fallback，但不能覆盖真实 `chapter_uid + co` 不一致。beta.24 的跨章节 chapter-UID rescue 继续保留：它只负责把 KOReader 拉回正确章节，之后仍必须重新计算精确坐标并验证。
+- 保留 beta.24 及之前的 Store 去重写盘、主页/退出阅读性能优化、DNS resolver 恢复、HTTP Keep-Alive、整本下载 reader-context/psvts 复用、评论与本地元数据兼容修复；Schema 继续保持 135。
+- 新增 `tools/verify_beta25.py`，覆盖版本一致性、全库 Lua 语法、既有回归以及 beta.25 的同步闭环、SAFE 阅读时间重试和严格精确定位不变量。当前验证结果：319 checks，0 failures。
+
+## 5.8.0-beta.22
+
+- 正式纳入 jerry-shao 的 PR #73「复用微信读书连接，整本下载耗时下降约四分之一」：下载任务中的目录、阅读页上下文和章节正文分片可复用同一 WeRead TCP/TLS 连接，减少连续请求反复握手带来的等待；请求顺序、节奏与现有限流预算保持不变。
+- Keep-Alive 继续严格限定在下载链路，并且只有调用方显式传入 `keepalive=true` 才启用；登录、书架、阅读进度、阅读时长、批注与评论点赞等非下载请求继续使用原有一请求一连接行为。
+- 连接复用保持保守边界：仅当响应具有明确长度/分块边界、对端没有要求 `Connection: close`、且当前交换没有异常跳转时才回池；空闲 25 秒自动淘汰，单连接最多复用 64 次，取用前检测陈旧连接。
+- 复用连接在空闲期间被服务器关闭时，仅 GET / HEAD 可在确认尚未收到响应字节后透明重建一次；POST 不在连接池层自动重放，继续交给原有上层 retry，避免写请求结果不确定时重复提交。
+- 下载正常完成、用户取消或异常退出都会主动关闭连接池；限流冷却和网络恢复探测前也会清理空闲连接。流式图片/大文件继续走原有独立连接，不纳入本次复用。
+- 保留 `Config.HTTP_KEEPALIVE=false` 的完整回退开关，并新增 Keep-Alive 专项回归测试与静态验证，覆盖下载链路显式启用、非下载隔离、响应边界、陈旧连接、64 次上限、任务结束清理以及 POST 不透明重放。
+- PR 提供的 Kindle Oasis 2 A/B 数据中，同一本 36 章书籍由约 962 秒降至 729 秒，连接数由 272 降至 79；实际收益仍取决于设备、网络和书籍资源结构。
+- beta.21 在线评论点赞、beta.20 Issue #105 书架恢复与 100 本无分组提醒、beta.19 阅读时长热路径与 SAFE pending、精确阅读进度、后台下载/熄屏恢复等既有行为全部保持。
+
+## 5.8.0-beta.21
+
+- 合入 mao135308 的 PR #72「为划线评论添加在线点赞」：在阅读评论弹窗中可选显示 `♡ / ♥`，支持在线点赞与取消点赞；功能默认关闭，可在“划线与评论 → 在线评论点赞”单独开启。
+- 点赞保持为独立即时 Web 操作，不进入本地批注同步队列，不建立离线待上传任务，也不在请求结果不确定时盲目重放；首次状态未知时先读取微信读书官方状态，避免把已经点过的赞误操作成取消。
+- 继续以服务器 `succ` 和 `likesCount` 为准；同一评论请求完成前禁止重复提交，旧弹窗会话的异步返回不会更新新弹窗，登录/账号变化会隔离点赞状态，确认 Web 会话失效后按 `auth_revision` 熔断并提示重新扫码。
+- 修复 PR 合并时 `store.lua` 遗留的重复 `preferences` 默认表：只保留 beta.20 的完整设置结构，并在真正生效的 `thoughts` 默认值中加入 `online_likes=false`；Schema 继续保持 135，不引入无意义迁移或启动完整保存。
+- 点赞内存缓存由单独的 `is_liked` 扩展为同时保存 `is_liked + likesCount`，关闭后立即重新打开评论弹窗时不会出现爱心已经变成 `♥`、点赞数却暂时回到旧值的状态；两者也共同进入弹窗缓存签名。
+- 在线点赞关闭时，评论弹窗打开/关闭恢复 beta.20 原有 `partial` 刷新行为；只有用户主动开启在线点赞时才使用 PR 为交互爱心适配的 `ui` waveform，点赞成功仍优先局部刷新赞区域，避免新功能改变未开启用户的阅读体验。
+- 新增在线点赞专项自动回归，验证官方状态读取、点赞/取消点赞 wire 参数、无盲目网络重试、认证恢复边界以及默认关闭；总体验证继续覆盖 beta.20 的 Issue #105 书架恢复、100 本无分组提醒，以及 beta.19 的阅读时长热路径、SAFE pending、精确进度和后台任务稳定性。
+
+## 5.8.0-beta.20
+
+- 修复 Issue #105 的微信书架分组回归：`enabled=true` 但没有实际选择任何分组时不再把完整书架筛成 0 本；“没有选择分组”统一恢复为“全部微信书架”，兼容 5.6 及更早版本的行为。
+- Schema 升至 135。升级会自动修复 5.7/5.8 已经留下的空分组筛选状态；若缓存仍保存 `raw_books`，即使当时离线也会直接从原始书架重建有效书架，不要求重新扫码或重新联网下载书架。
+- 已选择的微信分组被删除或失效时，权威分组快照确认没有任何有效选择后自动回退到全部微信书架，并提示一次；若仍存在一个明确有效但本身为空的分组，则继续允许显示 0 本，不把合法空分组误判为故障。
+- 分组响应不完整或暂时缺失时继续保留上一次有效的分组书架，不用不完整结果扩大或清空当前书架；真正的微信空书架仍可正常接受为 0 本。
+- “指定分组”只有至少选中一个分组后才生效；取消最后一个分组或“清空选择”会立即恢复全部微信书架，不再保留“指定分组但故意显示空书架”的旧语义。
+- 新增大书架友好提醒：只有微信返回了完整、权威的分组信息，确认当前 0 个分组且书架达到 100 本时才建议用户在微信读书建立分组。提醒不限制、不隐藏、不跳过任何书籍。
+- 大书架提醒按微信账号独立记录；“知道了”只结束当前无分组阶段，用户以后建立过分组再删除时可重新提醒；“不再提醒”则对该账号永久关闭。弹窗只在觅阅主页空闲且没有其他模态界面时出现。
+- 增强书架诊断日志，直接记录 `raw / groups / selected / mode / effective / reason`，以后可以区分“服务器真实 0 本”“合法空分组”和“本地筛选异常”。
+- beta.19 的阅读时间 15/60 秒上报、取消 60/300 秒整份设置热路径写入、SAFE pending 小型恢复记录、`sources` 防膨胀、主页按需加载、精确进度、后台下载和熄屏/关书同步全部保持不变。
+
+## 5.8.0-beta.19
+
+- 修复正常阅读时的周期性卡顿根因：阅读时间仍保持首次约 15 秒、之后约每 60 秒上传，但普通成功/未确认/纯时长失败状态只更新当前运行状态，不再因为每次结果回传而重写整份 `miuread.lua`。同时修复 `read_report` 成功后认证健康时间戳原本也会隐式触发完整设置保存的问题。
+- 取消阅读时间链路固定每 300 秒重写整份设置文件。300 秒状态快照仍保留在当前运行状态中；关闭书籍、休眠、退出、最终上传等真正的生命周期边界继续完整保存，原有最终收尾不删减。
+- 新增独立的小型阅读时间恢复记录，只持久保存“明确尚未发送、可以安全补报”的秒数，并绑定账号、登录会话、书籍与章节映射身份。恢复记录原子写入失败时自动回退到 beta.18 的整份设置保存，优先保证不丢时长、不重复补报。
+- 保留 beta.18 的 `pending_report_safe`、不确定请求不重放、heartbeat、后台服务卡死恢复、writer barrier、熄屏/关书最终上传、15/60 秒时长周期和精确阅读进度算法；不采用用户修改版中的“1% 才刷新进度”或“同页无条件跳过刷新”。
+- 阻止云端进度 `sources` 在 session 中反复嵌套；Schema 升至 134，首次升级会清理已有重复来源结构，保留真实 Web/Agent 云端位置、冲突判断和精确进度数据。
+- `HomeView / FullShelfView / LocalBrowserView / HomeQuickPanel` 改为真正进入相应界面时再加载，阅读模式不再提前加载整套主页界面。
+- 新增完整设置保存耗时记录，日志会标明保存原因、耗时和文件大小，便于继续确认实机是否还存在大文件写入造成的停顿。
+
+## 5.8.0-beta.18
+
+- 新增“设备美化”推荐分类，首批收录 Appearance、墨痕壁纸、DashWallpaper、CoverProgress 与 Highlights Screensaver；DashWallpaper 同时加入觅阅首页精选。Appearance 只提供安装/更新入口，不复制其主题设置；CoverProgress 与 Highlights Screensaver 暂不接入觅阅统一锁屏来源。
+- DashWallpaper 推荐源固定为作者仓库 `RC-APC/DashWallpaper.koplugin`，当前没有 GitHub Release 时继续使用 beta.17 的“源码结构验证后安装”链路；只有确认唯一 `DashWallpaper.koplugin` 且包含 `main.lua + _meta.lua` 才允许安装，未来作者发布正式 Release 后自动优先跟随 Release。
+- “锁屏与封面”统一为“锁屏壁纸”，锁屏来源首批支持“书籍封面 / 墨痕壁纸 / DashWallpaper”。书籍封面继续保留画框、完整、铺满三种样式，并记住切换第三方壁纸前最后一次原生样式。
+- 墨痕或 DashWallpaper 未安装时，可直接从锁屏设置执行“安装并使用”；安装成功后保存本次意图并提示完整重启，重启后自动继续，不要求用户重新进入设置。安装、下载、空间检查或校验失败会清除待继续状态，原锁屏不改变。
+- DashWallpaper 首次启用必须先选择壁纸源并完成下载，确认生成文件是有效 PNG 后才切换 KOReader 屏保路径；下载或写入失败保持旧锁屏。切换到墨痕/书籍封面时恢复此前保存的 KOReader 原生屏保设置，三种来源互斥。
+- DashWallpaper 的每日自动更新、城市、壁纸源等仍由 DashWallpaper 自己管理；觅阅只负责选择来源、立即更新和锁屏路径，不复制第三方插件的自动更新状态机。墨痕设置同样继续由墨痕自身管理。
+- 启动时会校验当前锁屏来源：正在使用的墨痕或 DashWallpaper 被手工删除/关闭时自动回退到上一次书籍封面设置并提示一次；已有第三方屏保配置在能够明确识别时会归入统一来源。
+- Android 或不支持 KOReader 休眠的设备不会为了统一锁屏申请额外权限；觅阅仅提示当前设备不支持由觅阅切换锁屏，第三方扩展本身仍可正常安装和使用。
+- 主页中间快捷栏继续只保留“刷新 / 搜索 / 下载 / 同步 / 休眠 / 设置”；公众号仍在下拉快捷工具栏，不重新放回主页中间。
+- Schema 升至 133，仅用于锁屏来源、待继续安装、Dash 壁纸源和原生屏保快照迁移；ReadReport 保持 v28。beta.17 扩展下载安装/自动更新、beta.16 共享 Store、本地书库、阅读进度、后台下载与 OTA 核心均不改动。
+
+## 5.8.0-beta.17
+
+- 扩展中心不再把“觅阅推荐”目录中的固定版本当成最新版。推荐条目只保存可信、兼容和安装规则；打开详情、检查更新、重新安装时都会读取 GitHub 近期正式 Release，并选择最新一个真正包含可安装插件 ZIP 的版本。
+- 不再直接相信 GitHub `/releases/latest`：自动跳过 draft、prerelease、`stable-channel`/manifest 等没有可安装 ZIP 的 Release；如果最新可安装 Release 有多个同等候选包，不再猜测，由用户明确选择。
+- 墨痕壁纸切回作者上游 `Estela-Zelin84/inkstain.koplugin`，当前验证备用包更新为 v3.9.0；旧 `miumiupy98-art/inkstain.koplugin` 作为历史别名自动归并，既有 3.5.7 安装记录无需卸载即可继续检测新版。
+- 社区搜索不再以“是否进入觅阅一键安装目录”作为安装开关。未收录仓库只要官方 Release 能唯一确定安全 `.koplugin` 包，就允许自动安装；无可用 Release 时，仅在 GitHub Contents API 确认根目录或唯一 `.koplugin` 目录同时存在 `main.lua + _meta.lua` 后才允许源码安装。网络/API 失败不会被误判成“没有 Release”。
+- 社区 Release 会按当前设备架构优先选择匹配包，并继续由安装器检查解压路径、插件结构、平台和 ELF/CPU；无法确定安装目录、结构不完整或候选不唯一时保持拒绝/要求选择，不用插件专属特判。
+- GitHub Release 提供 SHA-256 时继续严格校验；历史 Release 没有 digest 时，在正式包大小/压缩包/插件结构检查之外尽量计算本机 SHA-256，并随安装记录保存，供后续恢复和重新安装识别。
+- 已安装 GitHub 扩展统一使用官方实际稳定版检查更新，不再只检查觅阅目录版本；推荐插件和通过觅阅安装的社区插件都可自动发现后续正式版，无需等待觅阅自身发布新版本。
+- 保留 beta.15 的下载线路与断点模型：GitHub 中文社区/官方/代理只负责传输同一个已经确定的官方资产，不参与决定插件版本或替换安装包；元数据使用短时缓存，避免反复打开扩展中心就重复请求 GitHub。
+- 主页中间快捷栏彻底移除“公众号”，继续保持“刷新 / 搜索 / 下载 / 同步 / 休眠 / 设置”六项；“公众号”移到主页下拉工具栏。未自定义过工具栏的用户默认以公众号替换截图位置，截图仍可在自定义中重新开启；已有自定义布局不强制改动，只增加公众号可选项。
+- Schema 保持 132，ReadReport 保持 v28；不修改 beta.16 的共享 Store、本地书库修复，也不改变阅读进度、公众号书架/文章链路、后台下载和 OTA 核心。
+
+## 5.8.0-beta.16
+
+- 修复 #102 主页与阅读页同时存活时可能互相用旧设置覆盖新设置的问题：ReaderUI 与 FileManager 在同一进程、同一设置文件和数据目录下复用同一份实时 Store，本地书库路径不会再被另一界面的旧快照清空。
+- 本地书库选择、目录扫描结果、延迟保存与 reload 现在对主页和阅读页即时一致；无需重启才能看到另一界面刚确认的书库路径或扫描结果。
+- 后台下载 worker 继续使用 `isolated=true` 的独立 Store，不与前台共享临时设置副本，保持 beta.15 的下载、断点与云端写入优先级设计不变。
+- 保留 `Store:new()` 原有的目录自修复保证：即使已经复用共享 Store，`books / mp / covers / temp / updates / prefetch` 等运行目录缺失时仍会重新建立。
+- 增加共享 Store 回归测试，覆盖路径保留、扫描即时可见、延迟保存、reload、独立 worker、写入失败恢复，以及“主页保存无关设置不能把已确认的新阅读进度回滚成旧 pending 状态”。
+- Schema 保持 132，ReadReport 保持 v28；不修改 beta.15 的扩展下载线路、官方 Release 包校验、阅读数据同步优先级，也不调整 beta.13 的精确进度换算与 beta.14 的公众号入口。
+
+## 5.8.0-beta.15
+
+- 插件安装固定官方 Release 包；GitHub 中文社区默认首选下载，失败只换线路，不再改装 tag/main 源码包。
+- 5 MiB 以上启用持久断点；20 秒建连、90 秒无数据才重连，取消低速误杀和总时长限制。
+- 下载后按官方 size/SHA 校验；缺少 shell 工具时使用流式 SHA-256，安装失败可回滚。
+- 阅读数据同步优先于后台下载。
+- 新下载的大包只对前三条高价值线路做 128 KiB 有界探测，每条最多约 5 秒，成功线路按实测速率排序；未探测的代理仍保留为后备。已有 512 KiB 以上断点优先于测速；跨线路续传只允许同一个官方 asset，复制种子时保留原 partial；新线路不支持 Range 时只重启该线路，不破坏原断点。最近成功线路缓存 6 小时。
+- 未固定安装包的已收录仓库可动态读取最新 GitHub Release 并筛选真正的插件 ZIP；两个同分官方 asset 不再猜测，由用户明确选择。只有 GitHub 已确认没有可识别 Release asset，而且 Contents API 又确认源码根目录或唯一 `.koplugin` 目录同时存在 `main.lua + _meta.lua` 时，才允许源码安装；API/网络失败绝不会被解释成“没有 Release”。
+- Pinyin IME v1.2.0 继续固定官方 `pinyinime.koplugin-v1.2.0.zip`（63,312,207 bytes / SHA-256 `14047ed2638c32637c1dbc831f676967a221548f435443815b1c223881f4bbcb`），并保留解压后大体积安全上限与 220 MiB 剩余空间预检；FanQie、Z-Library、墨痕壁纸等已固定 Release 包继续按同一校验链安装，不写插件专属下载逻辑。
+- 扩展任务继续持久化下载目录、官方 URL、版本、大小、SHA-256、已下载字节和阶段；返回主页、后台、网络短断、KOReader 重启都不会丢断点。用户“暂停/取消”保留 partial，“删除下载数据”才真正删除任务目录；真实休眠无法继续的设备保存断点，唤醒联网稳定后恢复。
+- 关键云端写入开始前，书籍下载使用 `cloud_sync_priority`、扩展下载使用 `paused_priority` 临时让路；覆盖阅读结束精确进度、手动进度和批注删除/同步等事务。最多等待约 3 秒确认后台传输停下，云端写入不会被下载无限阻塞，写入结束后只恢复本次由同步暂停的任务。
+- Schema 保持 132，ReadReport 保持 v28；不修改 beta.13 的 standalone/partial 精确 `chapter + co` 与整书进度换算，不重新设计 OTA，不改变公众号书架/文章返回方案，主页快捷工具栏继续只有“刷新 / 搜索 / 下载 / 同步 / 休眠 / 设置”六个推荐项。
+
+## 5.8.0-beta.14
+
+- 修复 #93 公众号入口回归：公众号重新接入“书架 → 来源 → 公众号”和公众号文章阅读返回链路；不再占用主页快捷工具栏，主页推荐快捷项恢复为 6 项。
+- 统一书架重新区分“公众号账号”和“本机公众号文章”：书架来源“公众号”展示微信读书返回的公众号账号，即使本机尚未缓存文章也不会再因为本地文件为 0 而误显示为“公众号 0 项”；本机来源“公众号”继续只展示已缓存、可离线打开的文章。没有公众号缓存时，选择该来源会主动获取一次；离线或获取失败不会清空已有缓存。
+- 公众号文章阅读界面的“更多”恢复公众号专属首层菜单，直接提供“返回文章列表 / 上一篇 / 下一篇 / 当前文章 / 全部阅读功能”；“返回文章列表”回到当前公众号目录，不再要求绕到 KOReader 设置或觅阅主页。
+- 修复 #97 中主页刷新误入本地书库目录选择：书架刷新只刷新书架，本机刷新只重扫已经配置的目录；尚未设置目录时仅提示去文件管理/设置选择，不再由“刷新”按钮打开目录选择器。主页同步按钮也不再预先显示可能不真实的“未完成内容已提交”，改为只显示实际同步结果。
+- ReadReport 后台服务升级到 v28，增加独立心跳与卡死自愈。后台进程“仍存在”不再等于“服务健康”：空闲心跳长期消失或一次上报超过安全窗口时会停止复用旧 worker、重建服务；重建不会重放已经进入微信接口但结果未知的阅读时间，继续保持“不确定请求绝不重复计时”的原则。
+- 修复 #97 日志中 `writer barrier timeout` 导致最终进度长期被阅读时间挡住的问题：结束阅读时精确 `chapter + co` 仍先本地持久化，但不再等待最终阅读时间上报完成后才开始进度事务。已经发出的阅读时间请求只获得很短的让行窗口，超时后进度保持为“确定未发送”的 pending，稍后安全续传，不再让休眠/返回主页等待几十秒。
+- 用户明确选择“使用本机位置并上传”后，记录该次精确位置指纹。同一个本机位置在云端仍返回旧值时不再每次解锁重复弹“本机还是云端”，而是根据 pending 状态自动选择“发送尚未发送的事务”或“只做云端确认”；一旦云端确认或用户改选云端，临时决定自动清除。
+- 修复 #97 中主页 Wi-Fi 长时间停留“恢复中”的状态分裂：KOReader 网络管理器已经确认连接、Kindle 已拿到真实 SSID 后，主页立即结束恢复态并显示同一网络名称；互联网不可达仍单独显示“无网络”，不会把已关联 Wi-Fi 错当成仍在恢复。
+- KPW5/KPW6 低内存保护继续沿用 beta.6/beta.12 的统一调度框架，并补齐用户交互抢占范围：主页有点击/翻页/切换时，非用户触发的统计、同步摘要、远程书架、资料、封面和封面渲染任务均可让路；下载和真正的同步事务不被普通主页点击误杀。
+- Schema 保持 132；不修改 beta.13 的单章节/部分章节整书进度算法、下载器、扩展市场、批注协议、OTA、KOReader Reader/CRE 核心与 Kindle/Kobo 下载电源逻辑。
+
+## 5.8.0-beta.13
+
+- 修复单章节/部分章节书无法安全换算整书进度的回归：本地只下载一章或一段章节时，先独立保存微信原始 `chapter + co` 精确坐标，再使用已验证的整书目录换算整书百分比；不会把局部 EPUB 的 50% 直接当成整本书 50%。
+- 兼容旧版章节下载记录：Schema 升至 132。旧记录若已经保存完整目录且 `core_catalog_hash` 校验一致，会自动恢复 `catalog_complete/catalog_chapter_count`；真正只有一章的整本书仍保持保守判断，无法证明完整时会重新获取微信目录确认，不放宽正常整书的安全规则。
+- 完整目录缺失或暂时不可信时，不再丢掉已经取得的精确章节坐标；手动上传、返回主页、关闭书籍和休眠收尾均可保存 `pending_progress_coordinate`，后续在主页自动补全整书目录、换算百分比并继续原同步任务，无需重新下载书籍。
+- 正常整书进度算法保持不变：`Sync:position`、`local_position`、整书 inverse mapping、云端位置匹配及上传后的确认算法均沿用 beta.12；新恢复路径只在 standalone/partial 或目录缺失时介入。
+- 修复 #94 中阅读时间 worker 阻塞精确进度的问题：进度写入增加软优先级 fence，新的阅读时间请求会暂停排队；已经发出的阅读时间请求不会被强杀，待其返回后进度自动接管，避免原 15 秒 `progress_writer_busy` 直接失败。
+- 进度状态拆分为“确定未发送 / 已提交待确认 / 已确认”：只有明确未进入微信写接口的请求才允许自动补传；已经发出但响应不确定的请求只做云端 readback 验证，不再因为微信确认慢而重复提交同一位置。
+- Pending 恢复改为最新位置优先：同一本书的新精确位置会覆盖旧待处理位置；主页、重启或再次进入书籍后可自动恢复目录、发送确定未发送的进度、或仅确认已提交的进度。微信暂时返回旧位置/0/0 时不会覆盖本地精确位置。
+- 章节版阅读时间重新启用：旧版 `partial_range` 的 `read_report_enabled=false` 限制被迁移解除。阅读时间仍只使用已确认的安全云端位置，不会把局部章节百分比写回整书进度；只有能证明请求尚未发送的秒数才允许后续补记，未知是否已发送的旧时间债务不会重放。
+- #87/#90 本版只做回归保护，不改 KOReader Reader 生命周期、CRE 排版、输入系统或 Kindle/Kobo 设备层；ReaderReady、CloseDocument、Suspend/Resume、KOReader Exit/Restart 等核心处理保持 beta.12 行为。
+
+## 5.8.0-beta.12
+
+- 针对 #91 的 KPW6 极端卡顿修复持久化状态膨胀：Schema 升至 131，升级时把历史 session/report context 压缩为有界结构；完整章节目录只保留在 `library.catalog` 一份，不再在每个 session 中重复保存。已有旧状态若缺少 library catalog，会先从完整旧 context 保守迁移再去重，不删除精确 pending 进度、登录状态和用户设置。
+- `Store:save_session` 增加持久化字段收口，后续同步不能再把整本章节映射重新写回 session；正常写盘前会再次压缩旧 session，避免多个 Store 快照互相合并时把旧大对象复活。遇到 `chunk has too many syntax levels` 时增加一次安全应急修复并重新原子写入，失败仍保留原设置文件。
+- 针对 #91 日志中约 95 MiB 可用内存时启动图书下载后 KOReader 被系统终止的问题，新增下载启动内存预检：先 GC，再在低于 96 MiB 时暂缓启动 heavy worker，保留已有断点并提示用户稍后重试；不再明知处于低内存保护区仍 fork 大型下载进程。
+- 针对 #92 Kobo 休眠唤醒后 `radio=true` 但长期 `connected=false` 的恢复缺口，休眠前记录用户原本的 Wi-Fi 开启意图；唤醒后不再只轮询状态，而是复用 KOReader `NetworkMgr.restoreWifiAsync()` + `scheduleConnectivityCheck()` 官方恢复路径。觅阅不直接启动/停止 `dhcpcd`、`wpa_supplicant` 等设备网络服务。
+- Kobo/Kindle 网络恢复增加有界状态机：恢复期间标记 `recovering`，观察窗口覆盖 KOReader 原生异步恢复所需的约 45 秒；成功后由 KOReader 的连接状态收口，超时后停止自动等待并在主页提示用户手动重新连接，不无限重试。
+- 针对 #86/#92 的“Wi-Fi 未恢复时主页仍启动网络后台任务”增加网络门禁：自动书架刷新、远程资料、网络封面和微信阅读统计在 `recovering/down` 阶段不启动；本地统计与缓存页面仍可工作，用户主动触发的联网操作不被静默吞掉。
+- 保留 beta.6/beta.7 已完成的主页页缓存、Reader 前后台让路、QuickPanel 缓存优先和后台 PARK/WAKE；本版不再另起一套性能框架，也不修改第三方 Z-Library/Pinyin 等插件自己的网络实现。
+- 扩展市场继续使用 beta.11 的 Extension Engine v4，本版不修改其下载源、SHA、Archiver、事务安装和断点规则；阅读进度算法、批注协议和 OTA 核心也不在本次 #86/#91/#92 修复范围。
+
+## 5.8.0-beta.11
+
+- 重做内置扩展市场下载安装内核：一键安装只接受觅阅目录中已经明确记录版本、官方安装包 URL、精确大小、SHA-256 与目标 `.koplugin` 目录的扩展；社区搜索继续保留，但未收录确定安装包的仓库不再猜 Release、源码 ZIP、分支或插件目录。
+- 下载源恢复为确定性故障转移：自动模式固定按 GitHub 官方地址 → 配置镜像 → 用户自定义镜像顺序逐一尝试，取消 route score、TTFB/速度历史、最近成功源优先和“最多三条路线”截断；手动指定不存在的镜像会直接失败，不会偷偷回退 GitHub。
+- 统一“下载成功”的定义：单个下载源只有在传输完成、文件大小与目录记录完全一致并且 SHA-256 校验通过后才算成功；截断文件、代理返回错误内容或同大小错误文件都会被拒绝并继续下一下载源，不再出现下载层先成功、后置校验再失败而提前终止换源。
+- 每个下载源保留 KOReader HTTP → curl 两级传输，但删除跨镜像断点拼接；16 MiB 以下失败后直接重下，16 MiB 及以上仅允许同一 URL 使用自己的 `source-*.part` 续传。已有 `package.zip` 也必须重新通过大小与 SHA 校验后才能复用。
+- ZIP/安装判断收口为单一链路：移除独立 `extension_verifier.lua` 与系统 `unzip -tqq` 判定，下载后的正确字节只交给 KOReader 自身 Archiver；解压到 staging 后继续检查路径穿越、符号链接、文件数量、解压体积、`main.lua`/`_meta.lua`、平台与 ELF/CPU 兼容性。
+- 安装/更新改为事务切换：新插件完整准备并验证后才移动旧插件，使用 `.miuread-new-*` / `.miuread-old-*` 与 `install-journal.json` 完成切换；新版本切换失败立即恢复旧插件，安装临界阶段异常退出时下次启动也会优先恢复可用版本。
+- 扩展任务状态机改为 `extension_job.lua` 单一事实来源，保留等待网络、后台下载、暂停、继续、取消、删除、重启恢复和 Kindle/Kobo 电源保护；用户明确取消/删除的优先级高于自动恢复，失败任务不会再因恢复逻辑复活成无法删除的僵尸任务。
+- 网络职责重新分层：扩展任务只判断网络是否 ready，整机离线/DNS 未恢复时进入等待网络，不会一次耗尽所有镜像；扩展下载器不直接修改 Kindle/Kobo Wi-Fi 服务。已经完整下载并校验的本地包在重启后可以离线继续安装。
+- 目录已固定番茄小说 v2.2.1、Z-Library v1.0.49、墨痕壁纸 v3.5.7、Pinyin IME v1.2.0 等确定安装包；没有可持续验证官方安装资产的 Anki、Zotero、HighlightSync 等仍可发现，但暂不提供一键安装，避免再次用猜包换取表面上的“支持”。
+- Schema 升至 130，扩展引擎标记为 v4；升级时保留已安装插件记录、下载源模式和自定义镜像，清除 v3 route health、速度/Range 历史及旧任务断点身份，避免旧跨源 partial 污染新引擎。图书下载、同步、阅读进度、批注和 OTA 核心不在本次重构范围。
+
+## 5.8.0-beta.10
+
+- 扩展中心升级为 Package Manager v3：推荐插件支持确定性 Package Catalog，安装包 URL、版本、大小、SHA-256 与目标目录可直接由目录声明；Pinyin IME、番茄小说、Z-Library 和墨痕壁纸已使用固定 Release 包，正常安装不再先扫描源码或连续猜候选。
+- GitHub 社区继续保持开放发现；当同一仓库存在多个可安装候选时改为由用户明确选择，不再在后台静默连续尝试 Release/Tag/Branch 源码包。
+- 插件正常下载恢复 5.8 beta.4 的可靠 fast path：优先使用 KOReader 自身流式 HTTP 下载；只有中断/异常后才进入 curl 断点恢复层。自动模式最多尝试 3 条有价值线路，手动选择 GitHub/镜像时严格使用所选线路。
+- 新增持久化 ExtensionTask：每个插件任务拥有独立 `miuread/extensions/tasks/<task-id>/` 工作目录、task/owner/progress/result 状态；同一时刻只允许一个插件传输 owner，启动时会收口旧会话遗留 transport，并保留可恢复下载数据。
+- 断点续传重新实现：Range 被拒绝、镜像不支持续传或 ZIP 尚未完整时均不会直接删除 canonical partial；需要从 0 重试时使用独立 scratch 文件，只有完整下载成功后才晋升为 package.zip。
+- 插件下载正式接入下载中心，增加“全部 / 书籍 / 插件”筛选；插件使用与图书一致的 ProgressWidget 显示真实字节百分比、已下载/总大小、平滑速度、ETA、下载源以及等待网络/校验/解压/安装阶段。
+- 取消插件下载默认保留断点；支持暂停、继续、取消并保留、删除下载数据。KOReader 重启后的 interrupted/downloaded 任务可以从下载中心重新进入完整 Package Pipeline，继续完成下载、校验和安装。
+- 插件传输接入 Kindle ScreenSaver Hold：真实插件下载会注册 `extension_download` 后台任务；无法保持后台时进入 `paused_power` 并保存断点。唤醒后不会立刻联网，而是在 Wi-Fi 恢复并稳定后再继续。
+- DNS/无网络错误改为 `WAIT_NETWORK`，不再把整机离线误判成单个 GitHub/镜像故障并连续轰炸多个代理；自动线路健康记录增加真实平均速度、TTFB 与 Range 支持，用实际历史传输表现排序，不做额外测速赛马。
+- 下载完成后增加 expected size、SHA-256、ZIP 文件头与中心目录校验，再进入现有安全安装链；继续保留路径穿越/符号链接/体积/架构检查、staging、旧插件备份、安装后完整性验证与失败回滚。
+- 安装/替换阶段增加独立 `extension_install` 短时 finish lease；KOReader 退出/重启会先 quiesce 插件 transport，避免只结束父 worker 而留下 curl 子进程。
+- Schema 升至 129。旧 v2 `miuread/temp` 下载残留不会被 v3 自动认领，避免污染新的任务状态；保留用户下载源选择与自定义镜像，但重置旧的成功/失败线路分数，改由 v3 重新学习真实速度。
+- 本版不改图书 DownloadTask、章节抓取/EPUB 生成、Reader 生命周期、同步/批注协议或 OTA 安装核心。
+
+## 5.8.0-beta.9
+
+- 下滑控制中心恢复紧凑单行布局：候选功能池继续完整保留，但实际最多显示 8 个已选择且当前设备支持的快捷项；3/5/7/8 项都会按可用宽度精确等分铺满，不再出现 6+1 的孤立第二行。
+- 控制中心自定义上限改为 8 项；旧版已经保存的 >8 项配置不会在升级时被静默删除，运行时只显示按用户顺序筛选后的前 8 项，并在自定义页提示需要收口的数量。设备不支持的项目动态隐藏且不占槽位。
+- 快捷按钮压缩垂直留白并放大 SVG；只有至少一个可见项目确实有短状态时整行才保留状态行。Wi-Fi、同步和方向状态改为“已连接 / 无网络 / 同步中 / 已锁定”等短文本，不再在快捷格中显示 SSID 或长说明。
+- QuickPanel 文案收口为“返回 / KO设置 / 文件 / 退出 / 重启”等短标签；修复 KOReader 设置请求不存在的 `koreader-settings.svg` 后退化成圆点的问题，并补齐 `koreader-settings → settings`、`reboot → restart`、`poweroff → power-off` SVG 映射。缺失图标统一记录日志并回退 `more.svg`，不再显示莫名其妙的 `•`。
+- 保留 QuickPanel 的缓存优先与异步状态策略：打开面板不新增网络检查、磁盘扫描或轮询定时器；下载快捷项不再为了显示 detail 在前台调用下载队列摘要。前光/色温控制、右上角“自定义”、电池与收起入口保持原功能。
+- 觅阅自身更新入口重新收拢到“设置 → 更新与关于”：更新通道下面直接显示当前通道对应的“检查正式/内测通道更新”；“工具 → 系统维护”移除重复检查更新入口，避免通道选择与执行更新分散在两个位置。第三方插件更新仍留在“工具 → 插件与扩展”。
+- Schema 保持 128；不修改下载器、同步协议、Reader 生命周期、后台 Scheduler、批注同步、统一书架、OTA 安装核心和设备电源逻辑。
+
+## 5.8.0-beta.8
+
+- 修复 Beta Release 被插件目录内开发文档阻断的问题：`PERFORMANCE_IMPLEMENTATION.md` 移至仓库根目录，不再进入 `miuread.koplugin` 发布包；发布校验同时会直接打印具体违规文件名，便于后续定位。
+- “觅阅推荐”新增「墨痕壁纸」（miumiupy98-art/inkstain.koplugin），同时进入“精选推荐”和“阅读增强”分类；支持按 KOReader 阅读统计或觅阅书架数据生成墨痕账单风格休眠壁纸。
+- 墨痕按标准扩展安装流程处理，不新增专属安装器；推荐卡片补充“阅读统计与休眠壁纸”说明，并保留当前仅 KPW4 完成真机测试的设备提示。
+- 修正 beta.6 / beta.7 在 CHANGELOG 中误用一级标题的问题，确保 Release beta workflow 能正确识别版本段落。
+
+## 5.8.0-beta.7
+
+- 累积 beta.6 的主页/调度器优化，并完成 #87/#90 Reader 生命周期与功耗收口。
+- Reader rebuild 增加 Resume grace，短暂 `document=nil` 不会过早被判定为真实关闭。
+- ReadReport 对登录 session/revision/vid 不一致增加 identity fuse；连续 stale 后停止 10 秒轮询，下一当前会话显式启动时重新绑定。
+- Reader finalizer 硬期限由 20 秒收紧到 12 秒；精确本地 pending 仍保留，云端失败延后重试。用户 Wake 取消旧 finalizer 的 beta.5 行为保持。
+- Reader 入场时 Home 只保留轻量壳并记录释放前后内存；评论内存缓存减半，跨章节/休眠主动释放。
+- Bluetooth shell runner 改为懒检测，插件启动和 QuickPanel memory-only 路径不再因 `command -v` 调用 `io.popen`。
+- 增加 `InputLifecycle` generation 日志和 Reader 文件 size/mtime 指纹；用于定位 Broken pipe 第一现场与 CRE stylesheet cache 失效。
+- BackgroundScheduler 活跃 worker 不再每 500ms 自轮询；release 事件负责唤醒下一任务。
+
+## 5.8.0-beta.6
+
+- 修复 5.6 统一主页回归：`shelf/recent` 终于进入可复用页面缓存，栏目切换不再每次重新 hydrate 当前 8 本书。
+- Home section 改为 UI 首帧 + 静止后一次 full 清理刷新，保留最终墨水屏质量；渲染层缓存收敛到 3 个并按逻辑视图淘汰旧 revision。
+- Reader 进入时把 Home 收缩为轻量返回壳，释放非活动 section/封面层。
+- 后台调度增加真正 PARK/WAKE；前台忙、内存压力和 annotation 竞争不再靠 4–8 秒轮询。
+- QuickPanel 不再同步扫描持久化 session；先用缓存显示，随后低优先级刷新。Wi-Fi 分离开关/连接/联网状态。
+- Schema 保持 128；旧 schema 连续迁移在内存中完成，最终只做一次已验证的原子写入。
+- 增加 HomeSwitchPerf/HomeShell/PARK 日志，便于 #86 真机 A/B。
+
+## 5.8.0-beta.5
+
+- 重构第三方扩展通用安装器 v2：安装、更新、重新安装统一走同一条流程，不再按 Pinyin IME、FilebrowserPlus 等插件名称编写专属安装路径；目录中的架构、二进制位置和 Release 文件名仅作为可选提示。
+- 扩展安装会先判断仓库源码是否本身包含可安装的 `main.lua` + `_meta.lua`。已确认源码不可直接安装的仓库只使用有效 Release 包，Release 下载失败时不再错误回退到不可安装源码，因此不会再把网络失败误报成“缺少 main.lua / _meta.lua”。
+- Release ZIP 改为通用候选排序：自动排除 checksum/debug/source 等明显非安装包，按仓库名、`.koplugin`、插件关键词和当前 CPU 架构选择候选；已有插件更新保持原来的 Release / branch 渠道，不会静默切到开发分支或另一发布渠道。
+- ZIP 插件识别改为安全递归发现：解压后寻找任意层级中同时包含 `main.lua` 与 `_meta.lua` 的目录；单候选自动安装，多候选能明确匹配仓库时自动选择，仍有歧义时由用户选择。
+- 架构检查通用化：Release 文件名可识别 armv7/armhf、arm64/aarch64、x86/x86_64、mips 等通用标记；解压后扫描 ELF 程序并与当前设备 CPU 再次核对。已知插件的 `binary_relpath` 只作为更强验证提示，不再决定专属安装流程。
+- 扩展文件下载与 GitHub API 分离：扩展下载源新增“自动 / GitHub 直连 / 多个镜像 / 自定义镜像”；自动模式记录最近成功与失败线路并动态排序，GitHub API 仍直接访问，不把账号请求交给第三方镜像。
+- 扩展下载取消固定总时长强杀：curl 使用连接超时 + 低速停滞检测，支持 `.part` 断点续传；无 curl 时可使用 `wget -c`，最后才回退 KOReader 自身下载。大体积插件只要持续有数据就不会因为原 150/180/240 秒上限被中止。
+- 每条下载线路分别记录结果；全部失败时展示 GitHub/各镜像的实际失败原因，不再只显示最后一个 `ghproxy.net curl failed`。下载完成先验证 ZIP 文件头和完整目录，代理返回 HTML、403/502 页面或截断 ZIP 会直接切换下一线路，不再进入错误的插件结构判断。
+- GitHub 仓库、Release 与搜索信息继续使用短时缓存，并允许网络失败时回退到上一次成功快照并明确标记“显示上次获取的信息”；Release-only 插件无法取得发布信息时明确报告元数据问题。
+- 扩展安装继续保留目录穿越、符号链接、文件数量、解压体积、剩余空间、重复插件、同名目录冲突检查；更新前备份旧插件，复制或安装后完整性验证失败时自动恢复旧版。扩展中心启动后会清理过期 ZIP/JSON/stage 残留，但保留近期 `.part` 供断点续传。
+- 修复书籍下载停止后长期停留“正在恢复”、无法进入删除的问题：持久化 active/prefetch 状态会与真实子进程重新校准；真实 worker 已消失时自动转为“下载已中断”，已完成内容和断点均保留，不再形成幽灵下载锁。
+- 下载状态新增明确的暂停/继续/停止/停止并删除断点入口；“正在恢复”只有短暂确认窗口，用户可以取消恢复并继续清理。删除书籍、本机文件和下载断点前都会先校准真实任务，真正仍在运行时可先停止再执行原删除确认。
+- 未完成下载断点与已经生成的 EPUB 分开处理：“删除下载断点”只清理未完成缓存，不会误删完整本机书；中断任务可继续下载或单独删除断点。Schema 升至 128，升级时会把缺少真实任务信息的旧 active 状态修正为可继续/可删除的中断状态。
+- 保留 5.8.0-beta.4 的微信分组、主页结构、控制中心与 Wi-Fi 改动；本版不重写章节获取/EPUB 生成、同步协议、阅读进度、批注同步、Kindle/Kobo 休眠唤醒和 OTA 主流程。
+
+## 5.8.0-beta.4
+
+- 修复 5.7/5.8 统一书架重构后微信分组范围可能失效的问题：微信服务器完整书架改为原始快照，用户允许进入觅阅的微信书架改为独立有效范围；统一书架只接收当前有效范围，旧的 `in_account_shelf` 标记不再能把已移出分组的本机微信书重新带回“书架”。
+- 微信书架缓存新增完整书籍快照、完整公众号快照、分组列表、`bookId → groups` 关系和有效范围指纹；旧缓存范围无法确认时按现有分组信息保守过滤，无法证明属于允许分组的书暂不进入主页。离线、网络失败或本次响应缺少完整分组信息时继续保留上一次有效范围，不覆盖、不扩大到完整微信书架。
+- 微信分组改为服务器成功刷新时统一校准、本地即时切换：主页可在“全部分组 / 当前允许的单个分组”之间切换，`全部分组` 永远只表示用户允许进入觅阅的分组合集；翻页、来源切换、书架/本机/最近切换和分组切换不再触发微信分页补齐或额外联网。
+- “微信分组”管理统一为一份配置：支持“全部微信书架 / 指定分组”、逐组勾选、全选、清空和主动刷新；设置页与主页“管理分组”进入同一页面。新分组在指定分组模式下默认不加入；删除分组会清掉失效选择；所有已选分组失效时保持空状态，不回退全部书架。
+- 微信分组优先使用服务器返回的稳定分组 ID 继承改名；没有稳定 ID 时只在旧分组消失、新分组唯一且成员高度重合时保守迁移，存在歧义时不自动猜测。一本书属于多个分组时保留完整关系，“全部分组”按 `bookId` 去重。
+- 首页继续固定“书架 / 本机 / 最近”三个一级视图；删除主页“书籍 / 文章”和“本机已有 / 尚未下载”筛选及其遗留隐藏状态。来源入口固定保留微信读书、公众号和本地书，番茄小说/Z-Library 仍按安装或已有内容动态出现；普通来源右侧仅保留排序，微信读书右侧显示当前分组。
+- 恢复主页快捷栏长按编辑：保留原有功能操作，并重新提供左移、右移、更换、隐藏；候选池恢复刷新、搜索、下载、同步、休眠、觅阅设置、插件与扩展、全部书籍、阅读历史、文件管理和截图，默认仍保持六项。
+- 恢复下滑控制中心完整候选池和最多 12 项的 6×2 布局：Wi-Fi、Bluetooth、方向、截图、全屏刷新、下载、同步、觅阅设置、KOReader 设置、KOReader 文件管理、返回/退出/重启 KOReader、休眠、重启设备和关机均可按设备能力配置；不支持 Bluetooth、休眠、重启或关机的设备不显示对应项目。面板新增直接“自定义”入口。
+- Wi-Fi 状态改为主页先使用本地快照、后台异步确认，首屏不再等待网络探测；状态明确区分已关闭、正在连接、已连接、已连接但无网络、正在确认网络和网络不可用。电量读取不再顺带触发 Wi-Fi 检测。
+- 主页切换时主动取消上一页封面/本地资料准备；统计、同步汇总、封面和网络确认继续在空闲阶段执行，不通过降低墨水屏刷新完整性换取速度。新增 HomeSectionSwitch、HomeSourceSwitch、HomeGroupSwitch、HomePageSwitch、WifiProbe、ShelfRefresh、GroupRefresh、HomeStats、SyncSummary、CoverPrepare 等定位日志。
+- Schema 升级到 127：原样继承旧 `shelf_filter`，新增稳定分组键和当前查看分组；强制清理已经删除 UI 的内容类型/本机状态旧筛选；保留用户原有快捷栏与控制中心排序/显隐，只补入新增候选，不粗暴重置。旧流式微信书架缓存标记为待完整刷新。
+- 本版不修改下载器核心、章节下载核心、阅读进度算法、阅读时间上传、同步核心、批注同步、Kindle/Kobo 休眠唤醒、Android 后台策略、OTA、本机删除服务和插件下载安装核心。
+
+## 5.8.0-beta.3
+
+- 保留主页书架原有“点击书籍弹操作菜单”的交互，不新增长按菜单，也不重做下载入口；纯净版与划线与想法版改为固定状态表达：未下载 / 已下载 / 下载中 / 继续下载，下载完成后不再显示“可更新”等额外版本状态。
+- “按章节下载”继续与两个整书版本并列；存在已下载单章或章节范围时，主页可直接显示“已下载 N 章”，同一范围的纯净版/划线版不会重复计数。
+- 取消主页独立“删除当前版本 / 删除全部本地版本”等删除弹层，微信读书书籍只在存在本机可阅读内容时显示统一“本机文件”入口；整书、单版本和章节删除都从该入口进入。
+- 新增统一“本机文件”页面：直接列出本机纯净版、划线与想法版、章节版/试读版及已下载单章；版本详情只保留打开、重新下载和删除当前版本，整书底部提供唯一“删除全部本机内容”总操作。
+- 新增 book_delete_service.lua：统一生成删除计划并清理 EPUB、original/pending 文件、KOReader sidecar、hash sidecar、History、ReadHistory/Collections 引用与书籍信息缓存、下载断点、预读取、待安装文件、封面、书籍缓存、session、recent_reads、下载队列与运行时主页缓存；删除完成后再次验证文件与索引残留，失败时自动执行第二轮清理并明确提示剩余项目。
+- 删除单版本不再只删 EPUB：同时清理该文档对应的 KOReader 阅读数据、失效 recent 路径和该版本未完成下载断点；若删除的是当前首选版本，会自动切换到仍存在的可阅读版本。
+- 删除单章同样走统一删除服务，并同时清理该章的 KOReader 阅读数据、隐藏预读取和对应未完成断点；普通“按章节下载”页面不再直接暴露删除动作，只有“本机文件 → 已下载章节”进入的本机管理页可以删除章节。
+- “删除全部本机内容”执行前只在确实存在未同步阅读进度或批注/想法时增加提示，可选择先同步、仍然删除或取消；正常书籍仍然只需一次删除确认。该操作不调用微信读书云端删书接口，不影响云端书架、云端进度、云端划线或想法。
+- 本地书新增统一“本机文件”入口；真正删除用户原始文件继续调用 KOReader 原生 FileManager 删除流程，成功后由觅阅清理 recent、网络/本地 metadata、目录快照、旧书架 membership 与孤立 sidecar/history。用户通过电脑或 KOReader 在外部删除文件后，本地书重新扫描也会自动 prune 失效引用。
+- 不在单本书页面增加“清理缓存”，未完成下载、封面和临时文件仍统一由“存储清理”负责；不引入“移出书架”作为删除语义。
+- 插件卸载同步简化：卸载成功后插件立即从已安装列表消失，统一在扩展中心顶部显示“待重启生效 · N 项”；重复安装时可选择删除全部副本或指定副本，不再强制用户跳到文件管理器手工处理。
+- 本版不修改下载器核心、同步核心、进度算法、批注同步实现、Kindle/Kobo 电源、Android 权限、OTA、书摘和扩展推荐体系。
+
+## 5.8.0-beta.2
+
+- 阅读界面的“选中文字”菜单回归 KOReader 原生 ReaderHighlight：移除觅阅自定义 2×3 选词菜单及“更多/扩展”二次封装，词典、翻译、Wikipedia、搜索、复制、高亮、笔记以及第三方插件注册动作继续由 KOReader 原生菜单统一呈现；觅阅只通过公开扩展接口增加一级“书摘”动作。
+- 保留 5.8.0-beta.1 的书摘流程：选中文字 → 书摘 → 选择样式 → 手机扫码保存；二维码关闭直接返回原阅读位置，“重新选择样式”才回到样式页，不改当前书籍、页码和阅读位置。
+- “觅阅推荐”升级为正式分类精选：精选推荐、中文阅读、阅读增强、中文输入、传书与文件、资料与同步、插件市场、实验性扩展。精选首批固定为 WeRead、Assistant、Pinyin IME、FilebrowserPlus、Legado、LocalSend。
+- 中文阅读首批推荐 WeRead（仅 finlater/weread.koplugin）、番茄小说、Legado、Z-Library；推荐页不使用“原版/上游/最初版本”等谱系描述，也不主动推荐其他 WeRead fork，但“搜索扩展”和“社区热门”仍保持开放。
+- 阅读增强加入 Assistant、Anki、OPDS Plus；中文输入加入 Pinyin IME 与拼音输入增强。Pinyin IME 单独放宽插件体积上限至 256 MiB，并要求安装前至少检测 220 MiB 可用空间；详情明确显示其约 170 MiB 解压体积和最低 KOReader 版本。
+- “传书与文件”加入 FilebrowserPlus 与 LocalSend。LocalSend 按当前 CPU 架构只选择 armv7 / arm64 / arm-legacy 对应 Release Asset，不再回退到错误架构或源码包；无法可靠识别架构时直接停止自动安装。
+- FilebrowserPlus 使用 patelneeraj/filebrowserplus.koplugin 已发布的 ARMv7 Release；即使仓库当前为 archived，也只在识别为 ARMv7 的设备开放自动安装，不回退源码包，并在解压后读取 filebrowser/filebrowser ELF 头再次校验实际二进制架构，防止装错。
+- “资料与同步”加入 Zotero、Readeck、HighlightSync；Zotero/HighlightSync 以及其他实验性项目显示 Beta/风险提示，HighlightSync 明确提醒同步前备份批注。
+- “插件市场”加入卡欧市场、App Store、Storefront。App Store 与 Storefront 作为普通第三方插件安装；卡欧市场在没有可持续验证的公开官方仓库/下载地址前只展示介绍与作者发布渠道提示，不猜测地址、不代替作者分发安装包。
+- 建立 extension_catalog.lua 插件目录：统一维护作者、分类、能力、推荐级别、平台、已验证设备、最低 KOReader、外部依赖、联网要求、体积、实验状态、界面冲突、安装策略和推荐理由；完整桌面/UI 替代项目 SimpleUI、ZenOS、KindleUI、Cozy Home、Bookshelf 保留搜索/社区发现，但不进入“觅阅推荐”。
+- 建立 extension_compat.lua 兼容层：检测 Kindle/Kobo/Android/其他平台、CPU 架构、KOReader 版本、觅阅桌面状态、最低版本、剩余空间和 UI 冲突；架构敏感扩展使用失败关闭策略，未知架构不猜测。
+- 建立 extension_installer.lua 安装策略层：普通 ZIP、多架构 Release Asset、包内架构二进制和外部手动分发分开处理；扩展中心继续复用同一套 ZIP 路径/符号链接/数量/体积检查、main.lua/_meta.lua 结构检查、重复安装保护、剩余空间预检、备份/回滚、待重启状态和 24 小时更新状态 TTL。
+- 插件详情新增类别、能力、作者、适用/已验证平台、最低 KOReader、外部依赖、联网要求、体积/建议空间、当前设备架构、实验状态、觅阅桌面兼容性、风险提示和推荐理由；已安装插件详情复用同一份目录元数据。
+- “觅阅推荐”只决定人工推荐内容，不成为 GitHub 搜索白名单；SimpleUI、ZenOS、其他 WeRead 版本和其他公开扩展仍可从“搜索扩展/社区热门”找到并按原安全流程安装。安装第三方插件后不自动修改主页、快捷栏、手势、选中文字菜单或运行模式。
+- 本版不修改下载、同步、阅读进度、批注同步、Kindle/Kobo 电源、Android 权限、本地书扫描/统一书架、OTA 核心和主页书架加载逻辑。
+
+## 5.8.0-beta.1
+
+- 重新划分主页入口：右上角“更多”改为“工具”，主页快捷栏保留“设置”；“设置”只负责长期偏好，“工具”负责功能、插件管理和维护操作，下滑控制中心只保留设备即时控制。阅读界面的“更多”保持不变。
+- 觅阅设置收为五个一级分类：阅读与书库、同步与下载、首页与界面、运行与兼容、更新与关于；原“设备与 KOReader”“插件与扩展”“系统与维护”等不再混在设置首页。
+- 新增主页“工具”中心：全部书籍、阅读历史、文件管理、插件与扩展、系统维护、KOReader；KOReader 子页保留设置、文件管理和返回 KOReader。插件模式没有觅阅主页时，插件与扩展、系统维护、觅阅设置继续作为独立入口。
+- 下滑控制中心去除设置、下载、同步、系统维护等重复入口，默认聚焦 Wi-Fi、Bluetooth、方向、截图、全屏刷新、返回 KOReader、重启和休眠；前光/色温继续使用原控制条。
+- 扩展中心取消“查找扩展 / 我的插件”二次入口，首页直接显示“觅阅推荐 / 搜索扩展 / 社区热门 / 检查全部更新”以及全部已安装插件；点击已安装插件直接进入打开、设置、版本、更新、重新安装和卸载。
+- 增加“觅阅推荐”：只作为本地维护的第三方 GitHub 插件推荐，不建立新的插件源；推荐页离线可打开，并按当前运行模式避开明显与觅阅桌面冲突的界面扩展。推荐、搜索、热门和已安装列表统一使用同一插件安装/版本状态。
+- 扩展更新状态增加有效期：未检查或旧状态不再显示“已是最新”；只有近期确认存在更新时才标“有更新”。已知仓库可识别手动安装的同名插件，减少推荐/搜索与本机安装状态不一致。
+- 扩展搜索、热门和推荐详情改为在当前觅阅菜单栈内继续进入，返回键按“插件详情 → 当前扩展列表 → 插件与扩展 → 工具”逐级返回；联网任务期间保留父菜单，不再把用户直接送回主页。
+- 书摘扫码流程改为“选择样式 → 二维码 → 返回书本”；二维码页面新增“返回书本 / 重新选择样式”两个明确动作，默认关闭或返回直接回原阅读位置，只有明确选择时才重新打开样式页。二维码生成或局域网服务启动失败时仍回样式页重试。
+- 书摘二维码页面内显示同一 Wi-Fi 提示，不再每次额外弹窗；关闭二维码会停止临时传输并清理预览文件，不根据手机访问自动关闭阅读器页面。
+- 保留 5.7.0-beta.13 的弹层刷新保护；本版不修改下载、同步、阅读进度、休眠唤醒、本地书核心扫描、统一书架数据模型和 OTA 核心逻辑。
+
+## 5.7.0-beta.13
+
+- 修复主页来源快捷弹窗在 Kindle 墨水屏上关闭或切换来源后偶发“弹框边框/箭头残留、框内被主页内容覆盖”的问题：ActionSheet 改为透明浮层语义，不再错误声明覆盖整个屏幕。
+- ActionSheet 关闭改为与居中菜单一致的两阶段恢复：弹层真正移出 UI 栈后先重绘被遮挡区域，再执行来源切换等动作，动作完成后再补一次旧弹层区域刷新，避免主页局部刷新与弹层关闭交错。
+- 居中 ReaderListDialog 同步修正透明边缘的覆盖标记，避免后台主页刷新时把透明浮层当成整屏不透明页面。
+- 主页内容/标题刷新增加浮层保护；来源弹窗、筛选菜单等觅阅模态界面显示期间，主页刷新会延后到弹层关闭后执行。时钟/电量的分钟级更新也不会在弹层上方直接触发主页重绘。
+- 本版仅修复主页浮层与刷新时序，不改扩展中心、下载、同步、阅读进度、休眠唤醒和 OTA 核心逻辑。
+
+## 5.7.0-beta.12
+
+- 扩展中心做减法：“插件与扩展”只保留“查找扩展 / 我的插件”两个入口；删除中文精选、分类浏览、独立 GitHub 社区、管理已安装扩展、扩展更新和并行“已安装插件”等重复入口。“查找扩展”只保留搜索、社区热门和关于。
+- 重做 GitHub 扩展搜索：关键词搜索按相关度而非 Star 排序，先查 `topic:koreader-plugin`，结果不足时再扩大到名称/简介并过滤明显非 KOReader 插件；社区热门继续按 Star 排序并排除归档仓库、觅阅自身与热门列表中的 Fork。支持分页“查看更多结果”。
+- 保留番茄小说、Z-Library、SimpleUI、Zen UI、App Store 等已知仓库的中文名/别名映射，但仅作为搜索辅助与兼容提示，不再包装成“中文精选”“觅阅精选”或独立插件源。
+- GitHub 搜索结果、仓库资料与最新 Release 增加真实短时缓存；重复进入优先使用缓存，GitHub 暂时不可用时可显示最近一次成功结果。网络失败区分仓库不存在、请求过于频繁、连接超时/失败等主要状态。进入“我的插件”本身不联网，只有搜索、详情刷新和“检查更新”等明确操作才访问 GitHub。
+- 扩展搜索、社区热门、仓库详情、批量检查更新和安装包下载改为后台执行，界面持续显示当前状态；联网/下载阶段可按返回键或点击取消，插件文件开始校验和替换后则不提供取消，避免在写入中途打断。旧 KOReader 若无法启动后台任务则保留可见进度的兼容回退。
+- “我的插件”统一磁盘安装状态、KOReader 用户插件分类、启用/禁用状态和扩展安装来源；觅阅自身不计入数量、不出现在列表。刚安装但尚未重启的扩展也能显示，卸载后在当前进程保留“重启后完成”状态。
+- 扩展安装来源记录升级为按实际插件路径绑定仓库、插件身份、版本、指纹与远端标记；旧记录仅在唯一同名插件且身份可确认时迁移。插件被手动替换、删除或身份变化后自动失效为外部安装，避免继续从旧仓库错误更新。
+- 检测同名插件多路径重复安装；存在两份同名 `.koplugin` 时显示实际位置，并停止自动更新和自动卸载，避免更新/删除错文件。扩展中心的可管理名单优先复用 KOReader 自己的“用户插件”分类。
+- 更新判断不再只依赖标准 SemVer：标准版本正常比较；非标准标签或没有 Release 的仓库使用安装时保存的 Release/分支远端标记辅助判断；仍无法可靠判断时明确显示“无法自动判断”，不再把比较失败当成“已是最新”。独立“扩展更新”入口取消，由“我的插件 → 检查更新”统一处理。
+- Release 含多个 ZIP 时按插件相关性依次验证候选包；无可用资产时继续尝试 Release 源码和默认分支源码，不再因为第一个 ZIP 不是插件就直接失败。安装/更新前增加剩余空间预检，解压后在替换旧插件前再次按实际体积检查。
+- 保留并加固现有扩展安装安全链：ZIP 路径/符号链接/数量/体积检查、`main.lua`/`_meta.lua` 结构检查、同名目录冲突保护、更新前备份与写入失败恢复；旧目录移除失败也走恢复路径。扩展安装中断留下的 ZIP、JSON 与临时解压目录纳入现有“存储清理 → 临时文件”。
+- 安装、更新、卸载统一记录“重启后生效”状态；“我的插件”顶部仅在有待生效更改时显示重启入口。插件详情区分磁盘已安装版本与尚在运行的旧版本。第三方仓库明确标注为 GitHub 第三方扩展，已知 UI 扩展提示可能与觅阅桌面冲突，其他插件显示兼容性未知。
+- 第三方插件菜单适配不再按文字重新排序；能安全适配时继续使用觅阅统一列表，无法读取时回退到 KOReader 原生插件入口，不让菜单适配成为功能死路。
+- 统一书架去除重复来源入口：`书架 N ▾ / 本机 N ▾` 独占来源切换，“筛选”只保留内容类型、本机状态和排序；删除筛选页中的“来源”和“本机内容管理”。清除筛选只清真正的过滤条件，不改变当前来源与排序；有实际过滤条件时主页按钮显示“筛选 N”，没有过滤时不显示“清除筛选”。
+- 来源菜单改为一次遍历统计数量；微信读书、公众号、本地书作为基础来源，番茄小说/Z-Library 仅在插件已安装或已有对应内容时出现。全局把“本地导入”统一为“本地书”，并修正 Z-Library 0 项状态文案。“全部书籍”同步使用动态来源列表，没有实际过滤条件时隐藏“清除筛选”，清除筛选仍保留当前排序。
+- 设置中心删除“首页与界面 → 主页 → 统一书架”整层重复入口；本地书库设置只保留“阅读与书库 → 本地书库”，并同步修正旧路径提示。“阅读界面”单项子菜单改为直接的“觅阅阅读工具栏”开关；插件模式没有“首页与界面”时，工具栏开关直接显示在设置首页，避免失去入口。本地书库移除不可操作的“扫描范围”行，文件夹选择标题直接说明包含子文件夹。
+- 本版不改变主页搜索默认行为，不重构 `main.lua` 大文件，也不修改 Kindle/Kobo 休眠唤醒、后台下载、同步、阅读进度/批注、关闭书籍、本地扫描核心、统一书架数据合并和 OTA 主流程。
+
+## 5.7.0-beta.11
+
+- 保留 beta.10 的统一书架与居中弹窗视觉，新增通用 Plugin Menu Adapter：第三方插件通过 `addToMainMenu()` 提供的普通菜单/子菜单统一映射到觅阅 ReaderListDialog；真正的二维码、输入框、文件选择、搜索结果、书籍详情等功能 Widget 仍执行插件原 callback，不重写插件业务 UI。
+- 插件菜单适配补齐动态菜单语义：支持 `text/text_func`、`enabled/enabled_func`、`checked/checked_func`、`radio`、`sub_item_table/sub_item_table_func`、`mandatory/mandatory_func`、`post_text/post_text_func`、`right_value/right_value_func`、`separator`、`hold_callback`、`keep_menu_open` 等常见字段；动态字段在打开、返回和保持菜单打开后的重建中重新计算。
+- “已安装插件”优先使用插件标准 KOReader 菜单定义并由统一弹窗承载；仅当插件没有标准菜单、只提供 `openSettings()` 等专用入口时，才直接执行插件自己的完整设置 Widget。删除主页第三方菜单的 `force_native` 覆盖路径，修复番茄未登录菜单出现巨大空白框、只显示部分项目的问题。
+- 书架/本机来源切换改为纯本地筛选：微信读书、番茄小说、公众号、Z-Library、本地导入和全部来源固定可见，即使当前为 0 项也不会把“公众号”等入口隐藏；切换来源不会触发重新联网。
+- 书架标题增加轻量来源快捷入口：点击左侧 `书架 N ▾` / `本机 N ▾` 即可用 2×3 快捷弹窗切换来源；右侧“筛选”继续负责内容类型、本机状态和排序等高级条件，避免来源长期铺成第二排 Tab。
+- 首页左侧分区标题改为与“筛选”同字号、常规字重，不再使用粗黑的“我的书架 N”；标题按当前来源动态显示为“书架 / 微信书架 / 番茄书架 / 公众号 / Z-Library / 本地书”，本机视图对应“本机 / 微信下载 / 番茄下载 / 公众号 / Z-Library / 本地书”，最近视图固定为“最近阅读 N”。
+- 重构墨水屏刷新边界：`书架 / 本机 / 最近` 的 Tab、动态标题、筛选、8 个书位和页码作为同一 section 区域使用强刷新；ReaderListDialog 与 ActionSheet 的打开、子菜单重建和关闭恢复也对完整弹窗区域使用强刷新，优先保证文字和边框完整，修复“最近阅读”缺字、残框和局部刷新不完整。
+- ReaderListDialog 继续在同一个弹窗内维护子菜单栈，不叠加 Dialog；插件 `keep_menu_open` 操作完成后在原弹窗内重新计算动态文字、选中态和右侧状态。分隔项使用更明确的分隔线，长按菜单项继续转交插件原 `hold_callback`。
+- 空快捷菜单不再显示空白 ActionSheet：普通操作若解析后为 0 项则提示“当前没有可用操作”；自动消失的状态提示仍允许无操作项显示。
+- 长按搜索中的旧“搜索微信书架”更正为“搜索我的书架”，统一指向本地统一书架搜索；需要全库联网搜索时仍使用“搜索微信读书”。
+- 本版不增加新的内容来源、不重写番茄/Z-Library API、不改变 `书架 / 本机 / 最近` 数据模型，也不修改下载核心、微信同步核心和 Kindle/Kobo 后台电源逻辑；数据 Schema 保持 126。
+
+## 5.7.0-beta.10
+
+- 统一觅阅菜单型弹窗：设置/管理列表改为居中浮窗，限制宽高并保留四周主页背景；一级使用“标题 + 关闭”，二级在同一窗口内用“返回 + 标题 + 关闭”切换，不再出现顶部半页菜单。快捷操作继续使用两列 ActionSheet，第三方插件内部 KOReader 原生界面不重画。
+- 主页下方内容区由“微信书架 / 已下载 / 公众号”调整为“书架 / 本机 / 最近”，继续保持 4×2、每页 8 项与现有封面分页机制；经典主页顶部不重新设计。
+- 新增统一轻量内容索引：区分来源（微信读书 / 番茄小说 / Z-Library / 本地导入 / 公众号）、内容类型（书籍 / 文章）、书架关系与本机可用状态。同一内容可同时出现在书架、本机、最近视图而不复制业务记录。
+- “书架”和“本机”增加本地筛选：来源、内容类型、排序；书架额外支持“本机已有 / 尚未下载”。筛选只作用于已有轻量索引，不因切换筛选重新联网。
+- 公众号不再占用主页独立栏目；已保存的公众号文章以 `article / wechat_mp` 映射进统一内容。用户本地文件统一进入“本机”，是否加入“我的书架”独立管理；移出书架不会删除本机文件。
+- 微信读书继续复用现有远端书架缓存、当前页 hydrate、下载/session 与封面准备逻辑；仅微信远端行进入微信专属准备链，第三方 book id 不会误送入微信下载/同步/session 查询。
+- 账号型来源的书架状态在筛选入口统一可见：微信读书区分正常、缓存书架、正在恢复、需要重新登录和未登录；番茄区分账号缓存书架与未登录。需要登录时直接进入对应原生/账号入口，不把旧缓存伪装成最新在线数据。
+- 番茄小说不重写 API：复用插件自己的 `shelf_cache.lua` 和章节 `cache_index.lua`。只有存在有效 `sessionid` 时旧缓存才视为当前番茄账号书架；退出登录后旧远端书架不复活，已经完整缓存的番茄书仍可保留在“本机”，并可独立加入/移出觅阅书架。
+- Z-Library 不创建虚假的远端书架；仅在插件明确配置了下载目录时，以目录变更缓存低成本索引该目录及分类子目录，并把其中 KOReader 可读文件映射进“本机”；若同一文件也已进入普通本地索引则按路径合并。不会把 KOReader 默认 Home 目录整体误判为 Z-Library。
+- “最近”以 KOReader 实际阅读历史为主：普通本机文件按精确路径回填最近阅读时间；番茄按其确定的每书缓存目录把章节 HTML 阅读历史映射回对应番茄书籍，不要求第三方插件增加专用接口。
+- 本机内容继续保留文件夹浏览、重新扫描和本地书库设置入口；主页不恢复独立“本地书”栏目，也不重新实现 KOReader 文件管理。
+- 数据 Schema 升至 126：为现有主页配置初始化统一书架布局、筛选和本地书架成员状态；不移动、不删除、不重新下载任何已有 EPUB/PDF/本地文件，旧微信书架、下载记录和本地扫描数据继续作为底层数据源。
+- 本版不实现插件书源 SDK、多来源统一搜索、Z-Library 云书架、跨来源云进度同步，也不修改 Kindle/Kobo 后台电源、下载核心与微信同步核心。
+
+## 5.7.0-beta.9
+
+- “插件与扩展”进一步收口为“觅阅扩展中心 / 已安装插件”两个入口；删除 beta.8 单独的“插件设置”，不再为 InkStain 等插件维护平行设置名单。
+- 新增 KOReader 用户插件原生入口聚合：直接复用 KOReader `PluginLoader` 对“用户插件”的分类和当前插件实例，不维护觅阅自己的内置/第三方插件名单。
+- 已启用插件优先调用插件自身 `openSettings()`；没有独立设置入口时，直接复用插件通过 `addToMainMenu()` 注册给 KOReader 的原始菜单表和回调。插件内部菜单不复制、不重画、不做逐插件 UI 美化。
+- InkStain 继续走其原生设置能力，但现在属于通用插件入口路径；锁屏联动所需的 InkStain 兼容桥保持不变。
+- 已禁用插件显示“未启用”；仅阅读时加载的插件在文件管理/主页显示“阅读时可用”，避免误报为损坏。
+- 扩展中心内部“已安装”改名为“管理已安装扩展”，继续只负责来源、更新、重新安装和卸载；日常打开/设置插件由“已安装插件”承担。
+- 不创建新的插件 SDK，不要求番茄、Z-Library、SimpleUI 等插件为觅阅增加专用接口；也不修改主页、下载、同步、后台电源和阅读核心。数据 Schema 仍为 125。
+
+## 5.7.0-beta.8
+
+- 重构觅阅设置中心，一级入口收敛为“阅读与书库 / 同步与下载 / 首页与界面 / 插件与扩展 / 设备与 KOReader / 系统与维护 / 关于觅阅”，不再维护多套平行设置树。
+- 全局入口瘦身：设置只保留行为配置；下载任务、同步状态、评论收藏、本地书浏览等动作/内容入口不再混入对应设置页。
+- 主页保持 beta.7 经典视觉不变；主页“更新”更名为“刷新”。快捷栏恢复“单击执行主动作、长按显示少量同类高级操作”，快捷项编辑统一放到“首页与界面 → 快捷工具”。
+- 刷新长按仅保留“刷新当前栏目 / 刷新整个主页”；搜索仅保留“微信读书 / 我的书架 / 批注”；下载与同步长按分别只保留任务/设置、状态/设置。
+- 下载设置与存储管理分离；本地书库设置移除“刷新/打开书库/KOReader 文件管理”等动作型入口，保留书库位置与首页显示行为。
+- 评论设置移除“我的评论收藏”等内容入口；阅读界面不再重复提供评论显示设置，避免同一设置在多个位置维护。
+- 建立“插件与扩展”统一容器：扩展中心负责发现/安装/更新/卸载，已安装插件单列展示；已接入的 InkStain 原生设置收口到“插件设置”，锁屏样式页不再重复出现墨痕设置入口。
+- “设备与 KOReader”按设备能力动态生成：不支持 Bluetooth 或前光的设备不显示对应入口；KOReader 只保留设置、文件管理与返回等高频入口。
+- “系统与维护”收口诊断、数据修复、性能与兼容性、运行模式和更新；原工具与维护不再作为并行菜单存在。
+- 不修改经典主页布局、下载核心、同步核心、EPUB 生成、评论解析、本地扫描、Kindle/Kobo 后台电源、扩展安装与 OTA 主流程；数据 Schema 仍为 125。
+
+## 5.7.0-beta.7
+
+- 回退 5.7.0-beta.5 / beta.6 的主页结构实验，恢复 beta.4 的经典主页：第一栏、最近阅读、微信阅读统计、本地阅读统计以及原有比例全部回归。
+- 主页快捷栏恢复原来的“更新 / 搜索 / 下载 / 同步 / 休眠 / 觅阅设置”，不再使用 beta.5 / beta.6 的扩展一级入口和最近阅读卡内状态带。
+- 下滑快捷面板也恢复 beta.4 的原有默认布局；扩展中心功能本身保留，仍从觅阅设置进入。
+- 保留 beta.3 / beta.4 已完成的历史兼容瘦身，不恢复已经删除的旧迁移和无效代码。
+- 保留 beta.6 的幽灵同步修复：缺少当前本地书籍记录的历史 pending / 阅读时长不再计入待同步；升级时继续清理孤立或已验证的旧同步状态。
+- 保留 beta.6 的设置文件恢复加固：损坏设置会从最新有效备份恢复，避免过旧 `.old` 文件优先覆盖新备份。
+- 不修改下载、EPUB 生成、阅读器打开关闭、批注同步、Kindle/Kobo 后台电源、扩展安装和 OTA 主流程。
+
+## 5.7.0-beta.6
+
+- 主页顶部定型：竖屏最近阅读改为单一全宽主卡，取消 beta.5 右侧独立状态/双统计拼卡；书架区域不额外下移。
+- 最近阅读封面按正常书封比例放大，并精简主页元数据为书名、作者、来源、最近阅读和进度。
+- 阅读统计改为主卡内单一可配置槽位：支持微信读书/本地阅读的今日、周、月统计或不显示，不再固定微信/本地并列。
+- 时间、日期、Wi-Fi、电量、同步等迁入最近阅读卡底部信息带，保持点击操作；下载任务可动态出现，蓝牙仅在支持设备显示。
+- 主页快捷栏推荐布局改为“刷新 / 搜索 / 下载 / 休眠 / 扩展 / 设置”；同步仍可在主页快捷工具设置中手动启用，休眠长按提供休眠、重启 KOReader、退出 KOReader。
+- 修复旧设置备份恢复后历史临时同步状态复活导致的“幽灵待同步”：恢复时优先最新有效备份，Schema 124 清理失效 pending/worker 状态；缺少当前本地书籍上下文的进度/时长不再计入主页同步状态。
+- 新主页配置入口继续放在“设置 → 首页与书架”：主页阅读统计、主页状态信息、主页快捷工具；本版不提前重构整个设置中心。
+- 不修改微信读书下载/EPUB 生成、阅读器打开关闭、批注同步、Kindle/Kobo 后台电源、扩展安装与 OTA 主流程。
+
+## 5.7.0-beta.5
+
+- 主页取消固定顶部状态栏，直接进入阅读内容；原时间卡片升级为可配置的“时间与状态卡片”。
+- 时间卡片可显示 Wi-Fi、电量、同步、蓝牙和下载状态，各状态继续支持点击进入对应控制或详情。
+- 主页底栏默认收束为“刷新 / 搜索 / 下载 / 同步 / 扩展 / 设置”，扩展中心正式成为一级入口。
+- 休眠从主页底栏移入下滑设备控制；下滑栏默认只保留设备与 KOReader 操作。
+- 主页快捷项恢复单击执行主动作、长按显示少量同类高级操作，不再把编辑快捷项混进日常操作。
+- 设置内部分类暂不重构，本版只完成主页骨架第一阶段。
+
+## 5.7.0-beta.4
+
+- 第二轮纯瘦身，不修改主页布局和一级菜单。
+- 旧评论 JSON 兼容缩成一次性自动导入：只补 SQLite 中尚不存在的章节，成功后删除旧 JSON；移除迁移历史表、签名比对和旧数据库重建机制。
+- 退役 beta.16-26 的正式章节预下载标记：已有 EPUB 原样保留并转为普通已下载章节；后续只维护当前隐藏预读取缓存。
+- 删除 4.6.5 以前残留的主页布局、性能默认值和网络资料默认值启动迁移；当前设置仅做合法性归一化。
+- 删除批注同步的 beta.11“诊断模式”兼容开关；坐标诊断仍可由当前诊断入口显式执行，不影响正常云端批注同步。
+- 收缩旧 read-report 客户端：只保留当前阅读时间/进度上报实际调用的请求、进度读取和阅读上下文接口，删除已被新 API 取代的登录、公众号、评论等旧客户端方法。
+- 数据 Schema 升至 122；继续支持 4.6.5 及以后版本升级。
+
+## 5.7.0-beta.2
+
+- 修复觅阅桌面主页快捷栏中“觅阅设置”的真实入口缺少“扩展”：主页快捷项点击后使用的是独立管理气泡，现已把“扩展 / 觅阅扩展中心”接入该气泡；扩展中心仍不占用主页六个快捷位。
+- 修复 Kindle 上扩展包容易下载失败：GitHub Release、tag/branch ZIP 与镜像地址均先尝试现有 Lua HTTPS，失败后自动使用与觅阅 OTA 一致的 curl 回退，不再因 Lua TLS/连接失败直接终止。
+- GitHub 仓库信息、Release 信息与社区搜索增加 curl JSON 回退；Lua API 请求失败时仍可继续读取公开 GitHub 元数据，并记录实际使用的网络通路。
+- 插件 ZIP 解压优先改用 KOReader 自带 `ffi/archiver`，逐项检查路径并逐文件写入临时目录；无 Archiver 的旧环境才回退系统 unzip。继续保留文件数量、总体积、目录穿越、符号链接、main.lua/_meta.lua 与同名目录冲突检查。
+- 扩展安装日志补充 metadata、download、archive、extract、plugin_detect、backup、write、rollback 等阶段；更新旧插件仍先备份，写入或安装后校验失败时恢复旧版本。
+- 不修改微信读书下载、同步、阅读、评论、本地书、锁屏与休眠逻辑。
+
+## 5.7.0-beta.1
+
+- 新增“觅阅设置 → 扩展 → 觅阅扩展中心”，暂不占用觅阅桌面入口。
+- 新增中文精选、分类浏览、GitHub 社区热门与关键词搜索；第一版直接使用 GitHub `koreader-plugin` 社区生态，不依赖第三方网页抓取。
+- 新增已安装插件识别，可扫描 KOReader 默认插件目录与 `extra_plugin_paths`；觅阅自身始终受保护，不允许从扩展中心覆盖或卸载。
+- 支持标准 `.koplugin` 的安装、重新安装、更新与卸载；优先使用 GitHub Release ZIP，无可用 Release 资产时回退到对应 tag / 默认分支源码 ZIP。
+- 插件包先进入临时目录，安装前检查 ZIP 路径、文件数量、解压体积、符号链接、`main.lua` 与 `_meta.lua`，异常包不会写入正式插件目录。
+- 更新已有扩展前先备份旧插件；新文件复制或完整性检查失败时自动恢复原版本，下载失败会清理临时文件。
+- GitHub Release 下载复用觅阅现有镜像回退配置；插件自己的账号、设置和数据仍由插件自身管理，安装/更新/卸载后提示完整重启 KOReader。
+- 本版本不修改微信读书下载、同步、阅读时长、批注、本地书库、主页、Kindle/Kobo 休眠与锁屏逻辑，数据 Schema 保持 120。
+
+## 5.4.5-beta.3
+
+- 修复 Issue #78：首页书架 Tab 删除容易与书籍阅读进度混淆的底部横线；当前 Tab 改为粗体 + 浅灰圆角底，未选中 Tab 恢复普通字重，同时保留原有完整触摸区域，减少 KPW、Oasis、Scribe、Kobo 等不同屏幕比例下的视觉错位。
+- 针对 Issue #75 整理现有同步诊断结果，不重写进度换算、上传或云端验证：同步状态现在明确区分“登录待验证 / 等待网络 / 待确认 / 等待重试 / 需要处理 / 等待重建”，不再把所有问题笼统显示为“异常”或“失败”。
+- 同步状态页增加面向用户的“原因 / 建议”：登录问题引导检查账号，网络问题说明会自动继续，章节位置异常才提供“检查并修复”，云端未确认明确提示无需重复上传。
+- 首页同步总状态与待确认进度列表统一使用同一组状态文案；等待网络不再显示成普通“待同步”，已提交但未确认不再显示成失败。
+- 保留 5.4.5-beta.2 对 Issue #71 的 KOReader 原生 Exit / Restart 下载安全收口，不修改下载退出核心；Issue #79 外文书翻译本版本不处理。
+
+## 5.4.5-beta.2
+
+- 修复 Issue #71 对应的 KOReader 原生退出缺口：External Exit / Restart 现在会先把正在运行的下载子进程收口到一个有上限的退出边界，优先保存断点并安全休眠；若 worker 卡在网络或重任务阶段无法及时让出，则停止该子进程并保留章节断点，不再让 Kindle launcher 接管时仍残留大 Lua heap。
+- 保留觅阅自身“退出 KOReader”的原有可取消安全等待；原生 KOReader Exit 已进入广播 teardown，改用独立的短时同步 quiesce，不依赖异步回调去阻止整个退出流程。
+- 针对 Issue #76 为持续多章节下载增加主动请求节流：8 章以上任务从 0.60 秒基础间隔开始，连续超过 40 / 120 章后分别收紧到 0.80 / 1.00 秒；短章节任务、预取、普通阅读与同步保持原有节奏。
+- 微信读书明确返回 429 / 499 / 服务端频率限制标记后，当前下载不再自动重复探测同一接口；立即保存现有断点并停止继续请求，后续由共享 cooldown 与用户继续下载接管。
+- 下载退出、限流和长任务 pacing 增加独立诊断日志，便于区分“安全休眠”“退出强制停止”“服务端限流”与普通网络故障。
+
+## 5.4.5-beta.1
+
+- 针对 Issue #81 重做完整版书籍的精确进度定位：每次同步先只读取下载时已经保存的原始章节坐标源，不再把重新联网取章节作为默认路径。
+- 修复 source cache 过度绑定 `bookVersion`：当前版本缓存未命中时，会在同一 `bookId + chapterUid` 的历史版本缓存中寻找候选，并用当前 Reader 文本锚点与上下文做唯一性验证；只有验证通过才使用，避免旧正文被盲目套用。
+- 旧版已下载书无需重新下载：5.3/5.4 已留下的 `progress-source-position` 版本缓存可以按当前章节直接恢复精确位置；命中兼容缓存后全程本地完成，不再依赖网络碰运气。
+- 精确定位改为“两阶段 worker”：本地 cache-only 解析先执行，只有当前书仍处于打开状态且本地可信 source 确实不可用时，才启动原有 40 秒上限的网络恢复；返回主页/休眠等 detached 收尾不再新开章节网络请求。
+- 本地精确定位获得短时前台优先级：交互式同步期间暂停自己持有的普通下载任务，并短暂阻止主页 metadata/cover 等可选后台工作抢占；完成本地解析后立即释放，不把下载暂停延长到网络恢复阶段。
+- 保持 beta.10 的 Kindle 20 秒 reader-finalizer 总截止不变：熄屏时本地 source 缺失会保留待确认状态，而不是为了补章节 source 继续阻止深睡。
+- 下载器记录每章 source cache 是否成功落盘，并把 `progress_source_complete / chapter_count / cached_count / book_version` 写入 EPUB 内嵌身份和本地 variant 记录，后续可直接判断完整书是否具备离线精确定位基础。
+- 不再把底层错误全部压成 `source_position_failed`：日志与手动同步可区分 `source_cache_missing`、`source_cache_anchor_mismatch`、`source_worker_timeout`、`source_network_fetch_failed` 等实际阶段，方便没有 crash.log 的反馈直接定位。
+- 同时覆盖 Issue #74 中“多点几次才能成功上传进度”的同类路径；本版本不改前光、评论虚实线和阅读时长协议，避免把无关问题混入进度修复。
+
+## 5.4.0-beta.10
+
+- 针对 Issue #65 收紧低内存设备的后台调度：自动书架刷新、本地扫描、元数据和封面渲染在 RuntimePressure 或 low/critical memory 下延后，不再与 Reader 首屏和用户操作抢资源。
+- Kindle/KOReader 约 512 MiB 设备的内存保护阈值提前，并结合总内存比例动态计算；一次 `reader_open > 6s` 即进入临时性能保护，不再等待第二次严重卡顿。
+- ReaderReady 的微信读书同步和预取清理改为等待 Reader 真正空闲后再启动，优先保证 EPUB 首屏、翻页和菜单响应。
+- 针对 Issue #66 收紧 Kindle `SCREEN_SAVER_HOLD` 生命周期：reader finalizer 使用单一 generation owner，真实 Wake 会立即使旧 owner 失效，并只清理 `reader_finalizer`，不影响仍在运行的下载任务。
+- Kindle reader finalizer 增加 20 秒全局硬截止；达到截止后保留本地 checkpoint/待同步状态，释放休眠保活，并在当前 KOReader 进程内熔断后续 finalizer 伪锁屏，避免反复休眠/唤醒叠加 writer barrier。
+- writer barrier 等待支持 generation 失效；Wake、退出或重启后旧轮询不会继续回调并控制新的生命周期。
+- KOReader 退出/重启前统一 quiesce 阅读时间同步和 reader finalizer，取消等待/异步控制权并释放独立休眠 lease；下载保活保持独立。
+- 保留 beta.9 对 Issue #63 书籍身份恢复与 Issue #69 登录凭据轮换的修复，不修改 Kobo legacy 后台电源实现。
+
+## 5.4.0-beta.9
+
+- 修复 Issue #63：从 KOReader 文件浏览器、历史记录或其他非觅阅入口打开觅阅生成的 EPUB 时，快速记录匹配失败后会读取 EPUB 内嵌的 MiuRead book id，恢复微信读书身份与版本类型，不再把纯净版误记为本地书。
+- 书籍身份恢复采用严格规则：只有 EPUB 自身携带 MiuRead book id 才能恢复为微信读书；普通同名 EPUB 不会因为标题相同而被误识别。
+- 恢复成功后立即保存书籍记录，后续打开继续走快速识别，不会每次重复解析 EPUB。
+- 修复 Issue #69 的登录状态漂移：阅读时间后台服务收到微信读书返回的新 Cookie / ticket 后，在登录会话、账号与凭据版本均一致时安全保存；旧后台结果不能覆盖重新扫码后的新登录。
+- 新凭据保存后会重新交给正在运行的阅读时间服务，并保持当前书籍、阅读会话与原有上传计时，不因凭据轮换重新开始计时。
+- 手动进度/兼容上传链路同时补齐 ticket / wrpa 单独变化的保存条件，避免只有 Cookie 变化时才更新登录状态。
+- 保留 beta.8 已有的批注同步鉴权保护：确认登录失效时直接停止本次上传，本地批注继续保留待同步状态，不把登录问题误记为章节元数据失败。
+
+## 5.4.0-beta.8
+
+- “阅读评论”改为评论与微信读书划线的唯一总开关：开启同时显示划线并允许查看评论，关闭同时隐藏划线和评论，但不删除任何数据。
+- 删除所有独立“显示划线 / 显示微信读书划线”设置入口；schema 120 一次性清理 beta.6/beta.7 遗留的 `show_marks` 状态，后续不再作为独立偏好使用。
+- 评论中心直接显示“阅读评论”状态，并继续保留原有 ReaderTypographyDialog 的实时字体、字号、跟随正文与预览交互。
+- 新增统一 DialogTransition：关闭旧窗口后先重绘旧区域，再延迟打开父/下一级窗口，并用 generation 丢弃过期导航回调，重点修复 E-Ink 大框切小框后的旧边框残留和连续操作叠框。
+- ReaderSettingsDialog、ReaderTypographyDialog 与 ReaderListDialog 统一接入新的关闭/重绘流程；评论字体菜单返回与评论中心返回均使用同一套过渡。
+- Release 构建阶段从 Google Fonts 固定 commit 自动加入黑白 Noto Emoji variable font 与 OFL-1.1 许可证；评论优先使用觅阅自带 Emoji 字体，不再依赖设备是否预装 Emoji。
+- 评论 Emoji 正常情况下直接显示真实字形；只有 Release 字体缺失且系统/用户字体也不可用时，才保留 `[笑哭]`、`[爱心]` 等文字作为故障降级。
+- 评论显示预览加入真实 Emoji 样例，方便在设备上直接确认字体、字号与 Emoji fallback 是否同时生效。
+- Wi-Fi、下载、精确进度、阅读时间上传、锁屏、本地书扫描、评论收藏数据库与 PR #67/#68 状态保持不变。
+
+## 5.4.0-beta.7
+
+- 撤回 beta.5/beta.6 的评论显示单页实时控件重构；评论中心只保留收藏、划线和“评论显示设置”入口。
+- 评论字体、字号、阅读评论开关、跟随正文字体和实时预览恢复使用原有 ReaderTypographyDialog。
+- 修复评论字号加减后数值不刷新、预览不变化，以及阅读评论开关界面状态与实际状态不同步的问题。
+- ReaderSettingsDialog 回归 beta.4 的稳定菜单交互，不再承担评论字号和实时预览等动态控件。
+- 评论字号继续支持 12–48 范围，并在边界自动禁用对应加减操作。
+- “恢复默认”只恢复评论字体、字号和跟随正文字体，不修改划线显示状态。
+- 移除重复的“应用到全部评论”按钮；评论显示偏好本身即为全局设置。
+- 补强 ReaderTypographyDialog 关闭后的 E-Ink 区域重绘，返回评论中心时主动清理旧页面残影。
+- 保留 beta.6 的 Wi-Fi 状态修复、显示/隐藏划线、评论收藏、Emoji、最近阅读、本地书、同步、下载和锁屏逻辑。
+
+## 5.4.0-beta.6
+
+- 修复评论中心设置点击后界面不更新的问题：阅读评论、评论字体、评论字号、跟随正文字体与恢复默认统一由当前页面处理并立即重绘。
+- 重做评论字号一行，− / 数值 / + 统一靠右，扩大实际触摸区域，并在 12 / 48 边界自动禁用对应按钮。
+- 修复评论字体读取时的全局变量泄漏，减少菜单状态与实际偏好不同步的风险。
+- 重做 Wi-Fi 显示状态：区分已关闭、正在连接、正在恢复、网络不可用和已连接；休眠恢复后不再直接沿用休眠前的“已连接”。
+- 新增跨进程网络健康状态：真实 HTTP 成功会确认网络可用，底层 socket 无状态失败会临时标记网络不可用；401/429/服务端错误不会误判为 Wi-Fi 断线。
+- Kindle 恢复网络增加稀疏状态复核，最长覆盖约 52 秒，避免 Wi-Fi 模块已开启但尚未完成关联时显示“已连接”。
+- 合入并调整 PR #64 的“显示/隐藏划线”：只改变觅阅微信读书划线外观，不删除批注或评论数据；隐藏想法虚线时保留原有几何占位，减少正文重排。
+- 同一条想法跨多个文本片段时只给第一个片段写入内部 anchor，避免 EPUB 页面出现重复 id。
+- ReaderLink 想法链接保护增加 hook ownership 检查，退出阅读时不覆盖其他插件后续安装的链接包装。
+- 普通本地书不再显示微信读书划线开关；插件设置中的名称改为“显示微信读书划线”。
+- 成功的 catalog 登录恢复改记 INFO；阅读时间 worker 的 stale 登录状态日志补充 revision / vid 等真实不一致原因，减少误导性 WARN。
+- 保持 PR #67 的撤回结果，不重新引入 CSS 背景分部图修复；下载核心、精确进度、阅读时间协议、锁屏和本地书扫描逻辑不变。
+
+# Changelog
+
+## 5.4.0-beta.5 - 2026-08-28
+
+- 阅读界面的评论中心改为单页设置：评论字号直接使用 − / + 调整，不再进入三级菜单。
+- 评论中心直接显示当前评论字体与字号的实时预览，并保留单独的“恢复默认”操作。
+- 移除评论中心里的“显示预览与恢复默认”子页面入口，避免评论设置重复和菜单往返叠影。
+- 修复 Kindle/E-Ink 上评论设置页面返回后旧菜单残留的问题。
+- 修复“阅读时间同步成功”等状态提示到时关闭后仍残留在屏幕上的问题；关闭后明确重绘原提示区域。
+- 评论收藏、评论分页、Emoji、最近阅读、本地书、同步、下载与锁屏逻辑保持不变。
+
+## 5.4.0-beta.4 - 2026-08-28
+
+- 阅读界面的“评论”升级为评论中心：新增本章、本书、全部评论收藏入口与实时数量，同时保留阅读评论开关、字体、字号、跟随正文字体和显示预览。
+- 评论收藏支持按本章 / 本书筛选、全文搜索（评论、原文、作者、书名、章节）以及“最近收藏 / 评论时间 / 点赞最多”三种排序。
+- 阅读界面收藏列表改用适合电子墨水屏的列表页；点击查看统一评论详情，长按可直接复制评论、复制原文+评论或取消收藏。
+- 全部收藏继续支持按书籍查看；收藏数量每次打开评论中心实时读取，不新增第二套收藏数据库。
+- Emoji 显示增加独立文本回退：设备存在兼容 Emoji 字体时继续正常渲染；没有字体时将常见表情转换为可读的黑白文本标记，并避免重复刷缺字体日志。
+- 保持 5.4.0-beta.3 的多评论同页分页、Readme 过滤、最近阅读和开书保护不变；不修改同步、下载、锁屏与进度链路。
+
+## 5.4.0-beta.3 - 2026-08-28
+
+- 恢复 5.3.0 原有评论分页：同一页可继续排列多条短评论，长评论仍按原逻辑跨页，不再强制“一条评论一页”。
+- 删除评论弹窗底部操作栏，改为长按具体评论后显示“复制评论 / 复制原文+评论 / 收藏或取消收藏”；多评论同页时按长按位置精确命中对应评论。
+- 保留 5.4.0-beta.1 的本地评论收藏数据库和“我的评论收藏”入口，不修改收藏数据结构。
+- 本地书库排除 Kindle/KOReader 明确资源目录，补充 `/mnt/us/fonts`，避免 `Readme.txt` 等资源说明文件进入本地书、最近阅读和主页 Hero；用户书籍目录中的 TXT 仍由 KOReader 正常识别。
+- 清理已污染的资源文件最近阅读状态与本地元数据缓存，并在主页点击、最近阅读记录和本地 Reader 打开链路增加资源文件兜底拦截。
+- 保持阅读时间、精确进度、批注同步、下载、锁屏及其他主页行为不变。
+
+## 5.4.0-beta.1 - 2026-08-28
+
+- 评论弹窗增加“复制评论 / 复制原文+评论 / 收藏”三个点击操作，不引入长按手势；每一页只对应一条逻辑评论，避免收藏目标含糊。
+- 新增本地评论收藏数据库，保存书籍、章节、原文、评论正文、作者、点赞、评论 ID 与收藏时间等完整快照；离线或原评论删除后仍可查看。
+- 新增“我的评论收藏”入口，支持全部收藏与按书籍查看；收藏内容继续使用与在线评论相同的弹窗，可直接复制或取消收藏。
+- 评论 Emoji 字体查找改为只使用觅阅、KOReader、用户字体和系统字体，移除对 weread.koplugin 字体目录的依赖，并扩大 Kindle、Kobo、Android 常见字体路径兼容。
+- 保持现有阅读时间、精确进度、批注同步、本地书库、锁屏与后台下载链路不变。
+
+## 5.3.0 - 2026-08-27
+
+- 修复本地书籍扫描与显示问题，重新接入 KOReader 的文件识别逻辑。本地书库现在分为“文件夹”和“全部书籍”两个入口，可递归发现设备存储中的本地书，并保留原有文件夹分类。修复 Kindle 根目录 Books 等自建文件夹无法显示、子目录书籍遗漏、系统日志误识别为书籍等问题，同时避免扫描过程中书籍数量闪烁或逐步减少。
+- 修复结束阅读同步时序与本地书库扫描稳定性
+- 修复结束阅读同步过慢、错误待同步状态与锁屏同步反馈
+- 收敛阅读同步流程，修复时间回执判定、退出等待和锁屏中断问题
+- 修复阅读时间周期调度与退出阻塞，并精简阅读工具栏和同步菜单
+- 修复 beta.8 打开书后确定性闪退
+- 修复阅读时间实际记账、退出重复写入和进度同步反馈
+- 恢复 5.1 阅读时间上报链路，保留 15 秒首次同步与新版计时机制
+- 重构阅读进度事务与云端确认机制，隔离阅读时间和进度写入
+- 优化锁屏与返回主页速度，重排阅读同步菜单并强化后台任务隔离
+- 重构本地书库为全部书籍与文件夹双视图
+- 本地书库增加书架级文件夹与全部书籍双视图
+- 重构最近阅读为单一权威状态，禁止旧后台任务覆盖最新阅读
+- 完善本地书库根目录、主页文件夹浏览与进度待确认管理
+
+## 5.3.0-beta.6 - 2026-08-27
+
+- 本地书库改为首次使用必须由用户明确设置“书籍和分类所在文件夹”；不再默认扫描整个 `/mnt/us`、`/mnt/onboard` 等设备用户存储根目录，避免 fonts、mkk 等无关目录进入书架。
+- “觅阅设置 → 首页与书架 → 本地书库”新增书库位置选择；未设置时主页直接显示引导，并可点击进入文件夹选择器。双视图的“文件夹 / 全部书籍”开关继续保留。
+- 主页文件夹改为原地层级浏览：点击文件夹只更新本地书库书架区域，不再跳到独立放大页面；支持逐级返回，并记住切换到“全部书籍”前所在的文件夹。
+- 顶部同步状态改为可点击；存在未确认进度时直接进入对应待确认列表，否则进入同步状态页。
+- 强化阅读进度事务收尾：云端 chapter/co 验证成功后以一次会话写入原子清除 pending、worker 与错误状态并更新 verified sequence，避免“已经同步完成但顶部仍显示进度待确认”。
+- 待确认进度改为“重新确认”优先：普通点击只重新读取云端位置，不再自动重传；只有确认到明确位置不一致或已知提交失败时，详情页才提供显式“重新提交进度”。
+- 同步文案区分“已提交/正在确认”和“已从云端确认”；Header 在事务状态变化后立即局部刷新，不再依赖下一轮 sync summary。
+- 保持 5.3.0-beta.5 的最近阅读单一权威状态，以及阅读时间、精确进度协议、批注、锁屏 finalizer、锁屏下载和 Reader 快速返回主页逻辑不变。
+
+## 5.3.0-beta.5 - 2026-08-27
+
+- 重构“最近阅读”为单一权威状态：最后一次真正进入 Reader 的书唯一决定左上角最近阅读身份，本地书与微信书按真实打开顺序完全平权。
+- 为最近阅读增加持久化递增 `recent_seq`；Reader Ready 才产生新序号，同一 Reader 会话中的重复回调或微信书 canonical bookId 补全只做信息补充，不再制造第二次阅读事件。
+- 返回主页、主页重建和空闲刷新统一按权威 `recent_read_state` 查找当前书；书架、本地历史、云端缓存不再重新竞选“最近阅读”，避免旧本地书或旧微信书反向覆盖刚读过的书。
+- 将最近阅读“身份”与“展示信息”分离：本地元数据、网络元数据、封面、进度和书架刷新仍可补充当前 Hero，但只能更新当前 `recent_key/recent_seq` 对应的书，不能改变 Hero 身份。
+- 增加 stale / foreign Hero 保护：较旧序号的异步结果，或同一序号但身份不同的更新会直接忽略并记录诊断日志。
+- 首次升级时从已有 `recent_reads` 历史迁移一次权威状态；迁移完成后历史列表仅用于“阅读历史”，不再参与最近阅读身份选择。
+- 保持阅读时间、阅读进度、批注、本地书库双视图、锁屏 finalizer、锁屏下载及 Reader 返回主页生命周期不变。
+
+## 5.3.0-beta.4 - 2026-08-26
+
+- 本地书库首页增加二级视图：在“本地书库”书架下可直接切换“文件夹 / 全部书籍”，不再必须先进入独立本地书库页面后才能选择查看方式。
+- “文件夹”视图直接在主页书架显示真实根目录文件夹与根目录直属书籍；“全部书籍”继续扁平显示统一索引中的全部 KOReader 可读书籍，两种视图共用同一份扫描 snapshot，切换不会重新扫描。
+- 新增“觅阅设置 → 首页与书架 → 本地书库”中的“显示文件夹 / 显示全部书籍”开关；两个入口至少保留一个，避免把本地书库配置成无可用视图。
+- 当“文件夹”和“全部书籍”同时开启时，主页显示二级切换栏并记住当前选择；只保留一个时自动隐藏“文件夹 / 全部书籍”名称，直接展示唯一保留的内容。
+- 本地书库顶层数量始终显示全部本地书数量，不随“文件夹 / 全部书籍”视图切换而变化；二级视图分别显示根目录文件夹数与全部书籍数。
+- 文件夹卡片与普通书籍统一按一个书架格分页，修正旧分页逻辑仍把文件夹当两格计算造成的空位。
+- 点击本地书库右侧完整书架入口时，按主页当前视图打开独立本地书库页面；文件夹模式默认进入文件夹页，全部书籍模式默认进入全部书籍页。
+- 不修改本地书索引规则、阅读时间、阅读进度、批注、锁屏 finalizer、锁屏下载与 Reader 返回主页生命周期。
+
+## 5.3.0-beta.3 - 2026-08-26
+
+- 重构本地书库为统一索引视图：默认进入“全部书籍”，自动汇总设备用户存储下所有 KOReader 可打开的本地书；“文件夹”视图保留真实目录结构。
+- Kindle 本地书库根改为用户存储边界，/mnt/us/Books、/mnt/us/documents 及其它用户目录中的书可同时进入本地书库，不再被 KOReader home_dir 限制在单一目录。
+- 本地书库扫描继续后台生成完整 snapshot，旧结果在新扫描完成前保持不变；翻页只分页已有结果，不触发重新扫描，避免书籍逐本闪烁或缩水。
+- 文件夹视图只显示包含可读书籍的目录分支，过滤无书的系统、索引和临时目录；进入具体文件夹后以混合网格显示子文件夹与当前目录书籍。
+- 文件夹点击增加文件系统类型强校验：真实目录永远直接进入下一层，不再进入“阅读 / 查看详情 / 更新书籍信息”等书籍操作弹窗。
+- 本地书籍操作增加目录保护；目录不会被当作本地书打开、刷新元数据或进入删除文件逻辑。
+- 保留觅阅生成 EPUB 的身份排除逻辑，移动或改名后的觅阅书仍在索引完成后统一过滤，不在页面翻页时逐本剔除。
+- 不修改阅读时间、阅读进度、批注同步、锁屏 finalizer、锁屏下载和 Reader 返回主页生命周期。
+
+## 5.3.0-beta.2 - 2026-08-26
+
+- 重做结束阅读前台交接：返回觅阅主页时只在 Reader 仍存活时冻结不可变位置锚点与本地状态，随后立即进入 CloseDocument；完整 source mapping、final reading time、final progress 和云端确认全部移到后台，避免 2～12 秒的 local close gate 阻塞。
+- 锁屏改为 visual-first：先允许屏保视觉完成，再用已冻结的位置锚点在后台解析精确 chapter/co；`reader_finalizer` 只保活关键提交阶段，不再让 source mapping 或云端 readback 阻塞用户看到锁屏。
+- 修正休眠后台保活释放过早：`reader_finalizer` 现在至少保持到 final reading time 完成且 final progress 已提交；云端 readback / settling / verification 可在真正休眠后继续等待下次唤醒，不再为了确认结果长期阻止深睡。
+- 强化 Kindle 锁屏下载隔离：`download` 与 `reader_finalizer` 继续作为独立后台任务所有者；阅读收尾完成只释放自己的 task，不清空共享 KindleHold，下载未完成时仍保持 screenSaver 后台运行。
+- detached 精确位置解析改为先冻结 Reader anchor、后等待后台 worker：即使 source worker 暂时繁忙，也不会因为快速关书丢失当前 Reader 的精确定位输入；后台 worker 可在关闭后重试。
+- 阅读同步菜单重新分层：主页面显示“当前书籍｜书名 · 已识别”、阅读时间、阅读进度和批注真实状态；入口统一为“自动同步设置 / 手动同步 / 诊断与修复”，删除多余说明副标题。
+- 自动同步设置明确显示“首次约15秒，之后每60秒”；诊断页改为“诊断与修复”，高级工具增加“检查后台任务状态”，可查看下载、阅读收尾、电源状态、后台保活与 SuspendLease。
+- 本版本冻结 5.3.0-beta.1 已跑通的阅读时间协议、Cloud Anchor、Progress Transaction、云端 settling 与 writer fence，不调整微信读书同步协议语义。
+
+## 5.3.0-beta.1 - 2026-08-26
+
+- 重做阅读进度事务生命周期：每次精确进度提交携带 sequence + epoch；产生更新位置或执行“重置进度同步”后，旧回读、旧重试和跨 Reader 会话迟到结果自动失效，不能再覆盖新的进度状态。
+- 云端确认改为 settling 模式：提交后分阶段回读微信云端位置，并结合远端 `updated` 时间判断旧缓存；不再因前几秒 chapter/co 暂时不一致就立即判失败，持续不一致时最多自动重传一次。
+- 放宽同章节等价位置判断：原生 `wr_data_co` 差值不超过 128，或映射后的全书位置相差不超过 0.30 个百分点时视为同一位置；真正冲突改为显示一位小数，避免整数四舍五入放大小偏差。
+- “重置进度同步”改为真正的事务重置：递增 progress epoch、作废旧异步任务、清除旧验证状态并重新读取云端基线；不再停止或重新启动阅读时间 Service，因此不会重置 15/60 秒阅读时间时钟。
+- 阅读时间继续保持首次约 15 秒、后续 60 秒及结束阅读 final tail 的完整 Web Reader 兼容链路，但时间任务强制使用 cloud anchor 原样回传微信位置，不再调用本机位置估算逻辑生成 chapter/co。
+- 阅读时间与阅读进度增加跨进程 writer fence：所有共享 `/web/book/read` 的写入按顺序执行；进度写入期间暂停新的时间写请求但不停计时，进度 HTTP 写入完成后再释放时间通道。
+- 结束阅读后台写入顺序固定为 final reading time → final progress；等待只发生在后台，最终精确位置落盘后仍立即释放 Reader 关闭前台，不重新引入网络阻塞。
+- 云端位置跳转增加闭环精度校正：首次按云端映射位置跳转后重新解析精确 chapter/co，同章仍有偏差时最多进行两次校正；无法精确收敛时才保留“跳到附近”的安全提示。
+- 阅读时间后台服务升级到 v27，确保更新后不复用旧 worker。
+
+## 5.2.0-beta.11 - 2026-08-26
+
+- 阅读时间协议回归 5.1 实际验证成功的完整 Web Reader 上报路径：新增显式 `reading_time_compat` 模式，时间任务重新执行 `refresh_context()` 并发送完整 Reader report，不再依赖真正的轻量 `time_only` 请求。
+- 保留首次约 15 秒、后续 60 秒的新版单一时间轴；进度检查、登录刷新、工具栏操作不会重置计时，HTTP 请求耗时继续计入下一段阅读。
+- 删除 beta.10 临时加入的云端位置 anchor / `include_position_for_time` 方案；阅读时间由完整 Web Reader context 自行提供微信侧阅读状态，不使用 KOReader 当前页推进云端进度。
+- 15 秒首次、60 秒周期与结束阅读 final tail 统一使用同一个 `reading_time_compat` 协议；只有微信明确返回 `succ=1/true` 才认定成功并触发本阅读会话唯一一次首次成功提醒。
+- HTTP 2xx 但没有明确 `succ` 的响应继续记为“待确认”，不重放该时间段；连续未确认只允许刷新当前 Reader context 后发送新的时间段，禁止累计补传历史阅读时间。
+- 阅读时间后台服务升级到 v26，确保 OTA 后不复用 beta.10 的旧常驻 worker。精确进度、结束阅读后台上传、批注同步和现有 ReaderClose 流程本版本不回滚。
+
+## 5.2.0-beta.10 - 2026-08-26
+
+- 修复阅读时间“日志成功但云端不记账”：自动时间上报恢复完整 Web Reader 请求结构；每次上报先读取微信读书网页端当前云端位置，并将同一 `chapter/co/progress` 原样作为时间锚点回传，只增加 `rt`，不把本机当前阅读页每 60 秒强行同步到云端。
+- 撤销 beta.7 起的 `HTTP 2xx = 阅读时间成功` 宽松判定；只有微信读书明确返回 `succ=1/true` 才标记成功，未明确确认统一记录为“待确认”，并保留 HTTP、succ、synckey、错误字段和顶层字段名到诊断日志。
+- 阅读时间后台服务升级到 v25，OTA 后强制换用新的完整时间上报逻辑，不复用 beta.9 已常驻内存的旧 worker。
+- 优化返回主页前的本地进度落盘：最终进度 sequence 与 pending snapshot 合并为一次 session 持久化，减少退出关键路径上的重复同步写入；返回主页不再立即绘制“正在保存/已保存”提示层。
+- 所有普通进度界面隐藏 `source`、`web_cookie`、`wr_data_co`、`source_position` 等内部术语；底层信息仅保留在同步诊断日志，位置差异统一显示“本机位置/云端位置”。
+- 修复手动上传进度缺少反馈：请求被接受后提示“正在确认云端位置”，最终 chapter/co 回读一致后固定提示“阅读进度已上传，云端已确认当前位置”，不受自动同步成功提醒开关影响。
+
+## 5.2.0-beta.9 - 2026-08-26
+
+- 修复 beta.8 打开书后数秒确定性闪退：Reader 空闲 codec 预热错误引用未定义的全局 `Codec`，现改为在受保护回调内按需加载模块，任何预热异常只记录日志、不再影响 Reader。
+- 保留 beta.8 的阅读时间单一时钟、15 秒首次上报、后续 60 秒周期、结束阅读后台收尾和精确进度保护逻辑，本版本不再调整同步协议与计时语义。
+- 对 beta.8 新增的 Reader 延时预热路径补充运行时防护；预热失败或本机不支持原生 codec 时直接跳过，Lua 解码回退保持可用。
+
+## 5.2.0-beta.8 - 2026-08-26
+
+- 重做阅读时间调度：同一次阅读片段只有 ReadReport 服务维护 15 秒首次上报与后续 60 秒周期；进度检查、登录凭据刷新只更新工作上下文，不再重置时间时钟。
+- 结束阅读的最后一段时长改由后台服务根据自身 `last_report_at` 计算，主进程不再单独估算 final elapsed；普通翻页/工具栏 busy 不再推迟纯 time-only 周期上报，HTTP 请求等待时间计入下一段阅读而不再被漏记。
+- 修复休眠后唤醒的时间同步恢复：唤醒创建新的阅读时间片段以排除睡眠时长；若唤醒发生在 Finalize 期间，Finalize 结束后自动恢复 60 秒周期，且同一阅读会话不重复弹首次成功提醒。
+- 缩短返回主页与休眠等待：前台只等待本地批注快照和最终精确进度位置安全落盘，阅读时间尾段、进度上传/云端验证和有变化的批注改为后台继续，不再等待 writer barrier 或网络请求完成。
+- 保留精确进度安全边界：最终 `chapter/co` 仍在 Reader 文档存活时解析并保存；云端提交接受和 chapter/co 回读验证不再阻塞关书。
+- Reader 空闲后预加载本机原生 codec 动态库，仅消除首次退出时的 `ffi.load` 成本，不持续计算进度、不联网、不写磁盘。
+- 精简阅读工具栏与“全部阅读功能”：快捷区移除重复“主页”，阅读分类移除重复返回入口，评论数据下沉到“当前书籍”，设备中的“手势与按键”并入“KOReader 与高级设置”。
+- 阅读界面的“同步”入口改为状态优先：第一层只显示阅读时间、阅读进度和批注状态；自动同步设置、手动同步与诊断分别进入二级页面。
+
+## 5.2.0-beta.7 - 2026-08-26
+
+- 收敛阅读同步设置：主页与阅读界面统一只保留阅读时间、阅读进度、结束阅读同步批注、打开时检查云端进度和首次时间同步成功提醒；手动操作与高级诊断下沉，移除重复的成功/异常提醒入口。
+- 阅读时间首次上报提前到约 15 秒，后续仍保持 60 秒周期；后台服务版本升级，避免 OTA 后继续复用旧时间服务。
+- 修正纯阅读时间 `/web/book/read` 成功判定：HTTP 2xx 且没有明确错误的 time-only 响应可作为成功回执，同时仅记录安全的 HTTP 状态、响应字段名和错误字段用于诊断，不记录账号凭据。
+- 结束阅读继续并行处理时间、进度和有变化的批注，并在同步提示中分别显示三项状态；没有批注变化时直接显示“无变化”。
+- 优化结束阅读进度：优先复用现有章节上下文完成精确位置解析，只有首次解析失败才补完整目录；进度请求被接受后允许关闭，云端回读改为延迟两次只读确认，不再因短暂传播延迟立即重复上传。
+- 修复锁屏同步被唤醒打断后会话仍被标记为已 Finalize 的问题；唤醒后恢复为活动阅读会话，下一次返回主页或休眠仍会正常执行最终同步。
+- 去除结束阅读阶段重复的本地批注快照：同步收尾已经保存后，紧随其后的 CloseDocument 不再再次扫描同一批注状态。
+
+## 5.2.0-beta.6 - 2026-08-26
+
+- 修复主页错误显示“进度待同步 N”：没有精确待上传快照、也没有当前活跃同步任务的历史 `deferred` / `verification_required` / `waiting_network` 状态不再计入待同步数量。
+- 收紧结束阅读 Finalize：最终章节与精确 `wr_data_co` 仍在 Reader 关闭前冻结并落盘，但微信读书明确接受进度提交后即可继续关书或休眠；云端 chapter/co 二次回读验证改为后台完成，不再阻塞退出。
+- 修复阅读时间收尾判定：不再把 writer 退出等同于最后一段阅读时间上传成功，明确区分已接收、未确认和失败状态。
+- 优化返回主页与锁屏反馈：同步状态覆盖实际收尾阶段，休眠不再静默等待；异常等待上限缩短，避免锁屏长时间无反馈。
+- 在阅读界面的“阅读同步”设置中补上“首次阅读时间同步成功提醒”和“同步异常提醒”；首次成功提醒默认开启，后续周期上报继续静默。
+- 修复微信书架快速索引返回空 book ids 时反复把 `home_shelf` 标记为失败的问题：非认证故障时保留现有缓存，不以空结果覆盖书架。
+
+## 5.2.0-beta.5 - 2026-08-26
+
+- 调整结束阅读同步时序：返回主页等操作先在文档仍存活时冻结最终精确章节位置，再进行阅读时间、阅读进度和批注收尾，避免关闭 Reader 后再定位导致 `source_position_failed`。
+- 结束阅读时增加统一的同步收尾流程，并恢复“正在同步/同步完成”反馈；阅读会话首次阅读时间同步成功时增加可关闭的底部提醒。
+- 扩展主页同步状态统计，使结束阅读早期的同步状态可以被展示；同时增加阅读结束同步诊断日志。
+- 休眠路径同样改为优先保存最终位置后再进入后续同步，减少 detached final position 失败。
+- 延续 beta.4 的递归本地书库扫描，排除普通图片文件，并增强路径临时不可读时的旧缓存保留与扫描统计日志。
+
+## 5.2.0-beta.4 - 2026-08-26
+
+- 重做本地书发现：Kindle 以 `/mnt/us`、Kobo 以 `/mnt/onboard` 作为用户存储边界，不再把 `/mnt/us/documents` 当作唯一入口；根目录自建 `Books`、`books` 或其它任意文件夹中的书都可以被发现。
+- 本地书格式识别与文件/目录基础过滤直接复用 KOReader `DocumentRegistry` 与 `FileChooser` 规则，觅阅不再维护自己的格式白名单。
+- 恢复完整递归发现：每个本地目录视图保留“文件夹”分类，同时“全部书籍”汇总该目录及所有子目录中的 KOReader 支持书籍；主页本地书只预览完整书籍列表，不再把文件夹和书混排。
+- 本地书扫描先生成完整快照再一次性替换，翻页只操作现有结果；缓存升级为 v4，避免 beta.3 的非递归缓存被误当成完整书库。
+- 扫描子目录临时不可读时保留该失败子树上一次已确认的书籍，避免一次读取异常导致书籍数量突然减少。
+- Kindle 扫描用户存储时排除 KOReader/系统维护目录，并过滤 `KPPMainApp...crash...txt` 等明显运行诊断文件；普通 TXT 电子书仍由 KOReader 正常识别。
+- 保留觅阅生成 EPUB 去重、KOReader Collections、KOReader 文件管理与现有本地书 UI；不修改阅读、同步、下载和休眠逻辑。
+
+## 5.2.0 - 2026-08-26
+
+- 修复本地书架显示不完整问题，恢复真正的本地书库浏览。
+- 修正本地书库与最近阅读混用问题，恢复真正的本地书架入口。
+- 同步正式版本至 5.2.0
+- 修复本地书库闪烁缩水，并改善合集特殊章节下的阅读时长与精确进度恢复。
+
+## 5.2.0-beta.3 - 2026-08-25
+
+- 修复本地书库后台识别觅阅 EPUB 时“一本一本消失并反复闪屏”的问题：身份确认改为当前目录整批完成后一次刷新，翻页不再触发逐页剔除。
+- 本地 EPUB 身份缓存同时校验文件修改时间与大小；文件未变化时不重复深度确认，移动/改名后的觅阅 EPUB 仍可排除。
+- 修复 Issue #54 的阅读时长中断根因：兼容层不再丢失 `time_only` 标记，纯时长上报不会误走章节上下文重建；后台服务版本升级以避免复用旧进程。
+- 精确进度主算法保持不变；仅在当前章节正文锚点明确 `not_found/ambiguous` 时，有限尝试前后各两章，并且只有唯一候选正文匹配成功才接受恢复结果。
+- 保留 `source_position_failed` 的安全失败行为，同时记录真实底层定位错误，便于继续确认尚未覆盖的特殊书籍。
+- 本地书库根目录不再重复显示“本地书库”标题；进入具体子文件夹后再显示当前目录名。
+- 文件夹改为与普通书籍相同的单格封面尺寸，放大文件夹图标并删除重复的“文件夹”说明文字；首页与独立本地目录浏览器统一为 4 列紧凑网格。
+
+## 5.2.0-beta.2 - 2026-08-25
+
+- 修正 5.2 beta.1 的主页本地书逻辑：主页“本地书库”不再读取 KOReader 最近阅读，而是读取 KOReader/设备入口目录中的真实文件与子文件夹。
+- “最近阅读”继续仅用于主页最近阅读卡片与阅读历史，不再冒充书架来源；“首页书架来源”中的名称统一为“本地书库”。
+- 本地书库首帧优先使用当前目录缓存，随后只后台重读这一层目录；不会递归扫描子目录，也没有 16 本限制。
+- 本地书库即使首帧为空也不会被“自动隐藏空来源”隐藏，避免用户无法进入真实本地目录。
+- 主页本地书库支持文件夹卡片；点击文件夹进入觅阅本地目录浏览，未阅读过的 KOReader 支持格式也可直接显示与打开。
+- 保留觅阅下载书去重：已确认的觅阅 EPUB 继续排除，当前可见页对移动/改名 EPUB 做后台身份确认。
+- “刷新本地书库”只重读入口目录；“刷新最近阅读”单独重载 KOReader History，两者不再共用同一逻辑。
+
+## 5.2.0-beta.1 - 2026-08-25
+
+- 恢复觅阅本地书库：未在 KOReader 打开过的本地书也可以按文件夹浏览。
+- 本地书库只读取当前文件夹，不恢复全盘扫描、多目录扫描或后台自动扫描。
+- 文件格式继续完全跟随 KOReader DocumentRegistry，不维护觅阅自己的格式白名单。
+- 首页“本地书籍”明确改为“最近阅读”，与完整本地书库分开。
+- 本地目录读取使用独立后台任务；不可用时采用小批量分段读取，避免大目录阻塞界面。
+- 保留觅阅下载书去重与 KOReader Collections / 文件管理入口。
+
+## 5.0.0-beta.9 - 2026-08-25
+
+- 修复 Issue #55：后台阅读时间服务 fork 后立即关闭从 KOReader 继承的 socket，避免 HTTP Inspector 8080 等监听端口被子进程长期占用。
+- 阅读结束 finalizer 与章节下载的休眠状态分离；仅由阅读时间收尾产生的 `SCREEN_SAVER_HOLD` 不再传给 DownloadTask。
+- DownloadTask 增加任务资格双重检查：没有真实共享下载任务时，不进入锁屏下载、不申请网络保活，也不调用 KOReader 的 Wi-Fi 恢复接口。
+- 所有现有 `runInSubProcess()` worker 统一执行 socket 清理，避免同类 fd 继承问题扩散到下载、异步任务和缓存清理。
+- 保留真实 Kindle/Kobo 熄屏下载与阅读时间 finalizer；不修改进度、本地书、前光等其它功能，`SCHEMA` 保持 119。
+
+## 5.0.0-beta.8 - 2026-08-25
+
+- 修复“前光与色温”入口：补回 beta.7 中缺失的前光面板连接，阅读设置中的入口可以正常打开。
+- 色温调节改为与 KOReader 原生前光面板相同的转换与写入方式，并在每次调整后重新读取 KOReader 实际保留的色温值。
+- 保留旧版/定制 KOReader 的兼容路径；亮度、前光开关逻辑不重写。
+- 不修改下载、同步、进度、阅读统计、休眠唤醒、本地书和锁屏逻辑；`SCHEMA` 保持 119。
+
+## 5.0.0-beta.7 - 2026-08-25
+
+- “墨痕设置”不再把 InkStain 菜单复制到觅阅界面；改为调用 InkStain 3.5.7 的原生设置入口，由 InkStain 自己负责完整菜单和后续操作。
+- 进入墨痕设置前关闭觅阅临时菜单，避免两套界面叠加；关闭 InkStain 设置后自然返回觅阅主页。
+- 墨痕设置中的软件更新、文件选择、二级菜单等操作不再经过觅阅转发，解决“检查更新”点击后提示入口无法打开的问题。
+- 对旧版 InkStain 保留明确提示：3.5.6 及更早版本仍可用于锁屏开关与刷新，但从觅阅直接进入完整设置需要 InkStain 3.5.7+。
+- 不修改下载、同步、进度、阅读统计、Kindle/Kobo 休眠唤醒和其它锁屏样式；`SCHEMA` 保持 119。
+
+## 5.0.0-beta.6 - 2026-08-25
+
+- 觅阅“墨痕壁纸”改为真实控制 InkStain：选择墨痕时会实际开启并生成壁纸；切换画框、完整或铺满时先关闭 InkStain、恢复其接管前屏保，再应用觅阅锁屏样式。
+- 锁屏样式显示改为读取 InkStain 的真实开启状态；即使用户直接在墨痕插件内开启或关闭，觅阅不再只依赖自己的 `receipt` 配置判断。
+- 新增 InkStain 3.5.5 兼容桥：支持查询安装/加载/开启/接管状态、静默开启、静默关闭、立即刷新；插件未加载时仍会持久关闭其自动接管并尝试恢复之前的 KOReader 屏保设置。
+- “锁屏封面样式”新增“立即刷新墨痕”和“墨痕设置”；完整设置直接使用 InkStain 自己生成的菜单，不复制字体、统计、布局、背景等选项。
+- 记录最后一个非墨痕锁屏样式；墨痕关闭或暂时未加载时回到用户原来的画框/完整/铺满选择，不再让失效的 `receipt` 状态阻断觅阅锁屏。
+- Screensaver 接管判断改为优先服从 InkStain 的真实开启状态，避免觅阅显示已关闭而 InkStain 在下一次休眠再次接管。
+- InkStain 仍是独立插件：未安装或未加载时不会影响觅阅其它锁屏、阅读、下载、同步和休眠唤醒功能；`SCHEMA` 保持 119。
+
+## 5.0.0-beta.5 - 2026-08-25
+
+- 清理已经失去入口的旧本地书库代码：移除觅阅自建文件夹浏览器、目录缓存与旧目录管理/扫描设置；本地书继续完全交由 KOReader FileManager 与 Collections 管理。
+- 主页本地阅读继续只读取 KOReader 最近阅读，并保留觅阅生成 EPUB 的精确排除与移动/改名后的身份识别；不恢复递归扫描。
+- 删除一批已确认没有任何调用的旧主页、阅读面板、下载提示与兼容空壳函数，同时清除多个模块内从未使用的辅助函数。
+- 合并内容完全相同的 `tools.svg` / `repair.svg` 图标资源，界面图形不变。
+- 移除仅服务旧文件夹浏览器的独立后台任务，减少主页初始化时不必要的对象和状态。
+- 保留旧配置字段与升级迁移数据，避免老用户升级或回退时出现配置损坏；不删除用户本地书、Collections、下载记录或阅读数据。
+- 不修改微信读书下载、阅读统计、精确进度、自动上传、Kindle/Kobo 休眠唤醒、锁屏与阅读排版；`SCHEMA` 保持 119。
+
+## 5.0.0-beta.4 - 2026-08-24
+
+- 本地书管理正式交还 KOReader：觅阅不再使用 `local_root`、`local_roots` 或 `local_entry_root` 限制可见目录；旧字段保留在配置中仅用于回退旧版本。
+- 主页“本地阅读”只展示 KOReader 最近阅读；“浏览本地书”直接进入 KOReader FileManager，“我的分类”直接进入 KOReader Collections。用户真实文件夹、KOReader Home Folder 与 Collections 不迁移、不改名、不删除。
+- 取消觅阅侧“入口目录”设置以及普通本地书“从觅阅书架隐藏/删除文件”的主界面入口，避免再次形成一套独立于 KOReader 的本地书状态。
+- 继续排除觅阅自己下载/生成的微信读书 EPUB：优先使用已有下载记录匹配；文件被移动或改名后，可通过 EPUB 内嵌的觅阅身份识别，并按文件修改时间缓存结果，避免每次主页刷新重复读取。
+- 用户自定义微信读书下载目录继续保留；不会粗暴屏蔽整个下载目录，因此同一目录中的用户自有 EPUB/PDF 仍可作为普通本地书。
+- “刷新本地书”改为“刷新本地阅读”，只重新读取 KOReader 阅读历史，不再扫描文件夹。
+- 不修改微信读书下载、同步、精确进度、阅读时间、Kindle/Kobo 休眠唤醒、锁屏和阅读排版；`SCHEMA` 保持 119。
+
+## 5.0.0-beta.3 - 2026-08-24
+
+- 修复微信读书 `-2011/-2012/-2041` 被过早解释为“账号登录失效”的问题：单个 Web 会话错误只进入自动恢复状态，不再按连续失败次数要求重新扫码。
+- Web 书架与 Web 进度在认证错误后自动续期 Cookie 并重试原请求；轻量书架若仍失败且属于认证错误，会自动退回 API key 的 `/shelf/sync`，普通后台刷新仍保留原有轻量策略。
+- Agent API 认证失败时先尝试重新取得 Skills API key，再在必要时执行完整 Web 续期；只要任一通道恢复成功，账号继续保持已登录。
+- 后台书架子进程现在可以安全更新认证凭据并回传主进程，避免子进程发现 Cookie 过期后只能失败、无法保存续期结果。
+- “重新检查状态”会完整执行 API key 刷新、Web 续期和 Agent 重试；只有这些恢复步骤都失败后，才把账号标记为确实需要重新扫码。
+- 同一微信读书账号重新扫码时只刷新认证上下文，不再清除待上传阅读时间和待确认进度；切换到不同账号时仍执行完整隔离清理。
+- 下载与阅读同步不再把局部认证错误直接文案化为“登录已失效”；未确认失效时统一提示自动恢复/账号状态检查，避免误导用户反复扫码。
+- 不修改主页布局、封面策略、精确进度算法、下载架构、Kindle/Kobo 休眠唤醒和阅读排版；`SCHEMA` 保持 119。
+
+## 5.0.0-beta.2 - 2026-08-23
+
+- Delete miuread.koplugin/main.lua
+- Add files via upload
+
+## 5.0.0-beta.1 - 2026-08-23
+
+- Delete miuread.koplugin/main.lua
+- Add files via upload
+- fix: 兼容旧版 KOReader 并完整锁定屏幕方向
+
+## 4.9.0-beta.30 - 2026-08-23
+
+- 将觅阅阅读工具栏拆成桌面模式与插件模式两个独立开关：桌面模式继续使用 `reader_ui.enabled`，插件模式使用现有 `reader_ui.plugin_mode_enabled`。插件模式缺省/旧配置一律按关闭处理，不再被桌面模式的开关状态带入。
+- 插件模式的“插件设置”新增“阅读界面”入口，可单独开启或关闭觅阅阅读工具栏；默认关闭时，顶部点击、下滑、菜单键等阅读菜单入口保持 KOReader 原生行为。用户主动开启后才允许觅阅工具栏接管对应入口。
+- 修复 ReaderMenu bridge 生命周期：保存一次 KOReader 原生菜单 handler，ReaderUI 或插件实例重建时不再把旧觅阅 wrapper 当成新的 original，避免形成 MiuRead → MiuRead → KOReader 的残留调用链。关闭当前模式工具栏时会恢复 KOReader 原生 handler。
+- 为顶部专用触摸区和 ReaderMenu bridge 增加 ReaderUI generation/owner 校验；关闭开关、Reader 结束或旧回调失效后，残留 callback 只能返回给 KOReader，不能再次拉起觅阅工具栏。
+- `show_reader_quick_panel()` 与实际显示函数增加最终权限门，即使来自旧手势、Gesture Manager action 或延迟回调，也必须通过当前运行模式对应的工具栏开关才能创建界面。ReaderReady、旋转提交和休眠唤醒统一重新同步当前模式的 hook 状态。
+- 不修改 beta.29 前光/色温控制器，也不修改登录认证、下载任务、Kindle/Kobo 休眠唤醒、阅读时间、精确进度和主页布局；未新增持久化字段，`SCHEMA` 保持 119。
+- docs: 补充 beta.30 修复记录
+
+补充 4.9.0-beta.30 已修复 KOReader 顶部状态栏触摸异常。
+
+Fixes #43
+
+## 4.9.0-beta.29 - 2026-08-22
+
+- 统一主页快捷面板、阅读工具栏和“前光与色温”弹窗的前光控制链路：觅阅只负责界面与用户输入，亮度/色温的实际状态统一从 KOReader PowerD 回读，不再把 UI 缓存当作真实设备状态。
+- 亮度范围直接跟随 KOReader 暴露的 `fl_min / fl_max`；色温范围直接跟随 `fl_warmth_min / fl_warmth_max`。不写死 0–24，也不按 Kindle/Kobo 型号维护白名单，设备是 0–48、0–100 或其他原生范围时自动跟随。
+- 色温界面只显示设备原生档位；KOReader 内部历史兼容的 0–100 色温值继续由 KOReader 自己通过 `toNativeWarmth / fromNativeWarmth` 转换，觅阅不再维护第二套 0–100 业务尺度。
+- 前光和色温的 `+ / -` 改为每次严格调整一个设备原生档位，不再把较大范围设备压缩成约 25 个觅阅步进。滑动或点击设置后立即从 KOReader 回读实际值，再刷新显示。
+- 接入 KOReader `FrontlightStateChanged` 状态广播并做轻量防抖，主页快捷面板和阅读工具栏在 KOReader 前光状态变化后重新读取真实值；休眠唤醒后同样只重新同步 KOReader 当前状态，不恢复觅阅私有旧值。
+- 新增低噪声前光诊断日志，记录用户提交/步进时的来源、请求值、设置前后实际值和设备原生范围；拖动过程不逐点刷日志。
+- 不修改 beta.28 登录认证、下载任务、Kindle/Kobo 休眠与唤醒、阅读时间、精确进度坐标、主页布局和阅读排版逻辑；数据结构未变化，`SCHEMA` 保持 119。
+
+## 4.9.0-beta.28 - 2026-08-22
+
+- 修复登录凭据并发覆盖：每次持久化认证信息增加单调递增的 `auth_revision`，旧网络请求、旧下载任务和旧阅读同步任务只有在启动时的凭据版本仍是当前版本时才允许回写。
+- 普通 HTTP 响应不再用请求开始时保存的整份 Cookie 覆盖当前登录；只把该响应真正返回的 Set-Cookie / x-wr-ticket / x-wrpa 合并到最新凭据，并在期间发生续期或重新登录时丢弃旧响应的认证更新。
+- `/web/login/renewal` 改为事务式续期：HTTP 层先暂存响应 Cookie，只有服务端明确接受续期后才一次性保存；续期失败、网络失败或返回不同账号时保持原登录凭据不变。
+- 长期 ReadReport 服务增加认证版本绑定。自动续期即使 `login_session_id` 不变，只要凭据版本变化也会向原后台进程下发新的 job，避免继续复用续期前的 Cookie；后台进程不再反向覆盖主进程的持久登录凭据。
+- 二维码登录改为“先可靠保存新登录，再切换运行状态”：保存失败不再提前清理旧登录；同一微信读书账号重新扫码只重建登录绑定的临时同步上下文，保留书架缓存和本地数据；真正换账号仍清理账号书架缓存。
+- 保留现有 60 秒阅读时间上报、关闭书籍最终精确进度、Kindle/Kobo 熄屏下载和休眠/唤醒实现，不修改进度坐标、下载格式、主页 UI 或下一章预读取。
+
+## 4.9.0-beta.27 - 2026-08-22
+
+- 修复“自动准备下一章”可能长期不触发：阅读空闲判断改用单调墙钟，不再用 CPU 时间判断实际经过时长；新增 Prefetch 调度、跳过、开始、完成、前台提升和休眠暂停日志。
+- 单章节连续阅读统一复用精确进度链路已经确认的整书章节目录，明确区分 NEXT / LAST / UNKNOWN；只有完整目录确认当前确为最后一章时才显示“全书已读完”，目录未知时由觅阅接管章节末尾并尝试确认下一章。
+- 自动准备的下一章改为觅阅私有隐藏 EPUB 缓存：不会提前写入正式下载目录、不会登记为普通单章文件，也不会因此在本地书架形成第二本可见书；真正进入下一章时才通过 EPUB 完整性校验安全转正。
+- 用户读到章节末尾而后台预读取仍在进行时，直接提升同一个任务为前台需求并显示现有下载进度，完成后转正并自动切换，不取消后重新下载；没有预读取任务时仍沿用正常下一章下载作为兜底。
+- 被动自动预读取不再获得熄屏保活资格：Suspend 时按真实休眠边界暂停，唤醒后由现有下载任务恢复；已经被用户在章节末尾提升为前台需求的任务仍按普通主动下载规则处理。
+- 新增 24 小时隐藏预读取缓存清理和存储管理兼容；beta.16-beta.26 已经生成的旧式正式预下载章节不迁移、不删除，继续作为现有章节文件使用。
+- 不修改精确进度坐标算法、阅读时间上传、普通整书/单章下载格式、Kindle/Kobo 主动下载熄屏续传、主页布局和 beta.25 脚注索引实现。
+
+## 4.9.0-beta.26 - 2026-08-22
+
+- 首页新增“主页阅读统计”设置：微信读书统计和本地阅读统计可独立显示/隐藏；隐藏后返回主页不再刷新对应统计，核心阅读记录、进度同步、批注和下载逻辑不受影响。
+- 只保留一个阅读统计模块时自动占满右侧统计区域，并利用扩展宽度补充本周阅读天数等已有信息；两个模块都隐藏时，时间卡自动扩展补满右侧。
+- 修正最近阅读卡与右侧时间/统计区域上下边框不齐：右侧可见区域改用与最近阅读相同的外层留边，高度基准保持一致。
+- 同步设置恢复“同步成功提醒”开关；默认继续沿用当前关闭状态，仅恢复用户可选入口，不修改同步上传与云端确认逻辑。
+- 保留 beta.25 已合并的脚注锚点索引优化，不继续改动脚注、下载、休眠/唤醒、ReaderClose 或精确进度算法。
+
+## 4.9.0-beta.25 - 2026-08-22
+
+- 优化脚注锚点索引性能，消除逐锚点全文档扫描
+
+## 4.9.0-beta.24 - 2026-08-22
+
+- 修正首页真正使用的“更新”入口：新增“更新当前书籍”，并删除未被主页调用的旧更新弹窗；“刷新本地书”说明改为只描述本地书检查，不再混入“更新最近阅读”。
+- “更新当前书籍”不再同步探测 Internet：微信书资料与封面直接交给后台任务判断网络结果；本地书的完整元数据提取优先放到后台工作进程，避免手动更新时卡住主页。
+- 最近阅读封面改为以当前主页书架实际封面尺寸为基准，空间允许时至少保持同等视觉尺寸；不再只按最近阅读卡自身高度估算。
+- 最近阅读书名使用严格的双行高度，字号再小一档；书名继续独占进度上方整行，超出两行才省略。
+- 右侧书籍资料取消为“历史”预留整行空白，仅第一行避开右上角入口；作者、来源、分类、出版、版本/格式和最近阅读时间只显示真实存在的数据，不再显示“作者未知”“时间暂无”等占位文字。
+- 首页微信读书/本地阅读的圆形打卡进一步放大，星期、摘要和辅助数据增加字重；正常信息继续使用黑色。
+- 阅读统计详情页继续保持周/月/年/总结构，但统一加粗正常小字、日期、月份/年份、排行时长和偏好信息，并放大周打卡圆圈，提高 Kindle 墨水屏上的实际可读性。
+- 删除已经不再用于主页显示的旧“✓ / —”文字打卡拼接代码，避免后续维护再次改到失效路径。
+- 完整保留 beta.23 的开书/关书卡顿优化、锁屏后台冻结、下载、同步与精确进度逻辑。
+
+## 4.9.0-beta.23 - 2026-08-22
+
+- 修复开书卡顿：ReaderReady 与自动云端进度检查不再同步调用网络在线探测，网络请求改由原有异步链路自行判断失败；保留打开书籍时读取微信云端进度。自动书架、公众号静默刷新、章节预下载/末页续读、进度恢复与自动更新同样不再在用户路径同步探测 Internet。
+- 修复结束阅读卡顿：返回觅阅主页与休眠收尾不再同步执行 Internet 在线探测；关闭前只保留本地状态保存与阅读时间控制记录。
+- 批注结束阅读检查新增快速只读路径：不再为了统计待同步批注而执行数据库建表、升级、索引与 schema 写入；SQLite 繁忙时立即让后台稍后处理，不阻塞关书。
+- 修复锁屏后台空窗：从屏保开始建立时就冻结微信书架、阅读统计、封面和同步摘要等普通主页任务，不再等到稍后的 Suspend 回调；熄屏下载与阅读结束关键同步仍沿用原有保活机制。
+- 用户在主页操作时，自动微信书架刷新与阅读统计、同步摘要一样立即让路，避免 5～7 秒书架任务继续与前台争抢资源；手动刷新不受影响。
+- 降低阅读时长收尾开销：writer barrier 轮询不再每 0.2 秒强制重复写回相同会话状态，只在真正出现新状态时处理和持久化；上传协议与最终阅读时间逻辑不变。
+- 不修改精确进度坐标算法、下载器、Kindle/Kobo 熄屏下载底层、屏保样式和 beta.22 的主页/阅读统计界面。
+
+## 4.9.0-beta.22 - 2026-08-22
+
+- 最近阅读再次收紧排版：书名移到阅读进度上方，使用整卡宽度最多显示两行；封面进一步放大，右侧改为作者、来源、分类、出版社/格式/版本、最近阅读时间等真实书籍信息，有什么显示什么。
+- “历史 ›”固定在最近阅读右上角，不再与长书名争抢空间；移除卡片内已无实际入口价值的刷新按钮逻辑。
+- 首页微信读书/本地阅读七日打卡由小方框改为高对比圆点：有阅读记录显示实心圆，无记录显示空心圆；微信读书只要网页端当天存在阅读记录即视为已读。
+- 首页与阅读统计页统一提高文字对比度：正常可读信息全部使用黑色，通过字号、字重和间距区分层级；灰色仅保留给禁用状态、进度底轨等真正弱化元素。
+- 阅读统计页同步加深周/月/年/总标签、摘要说明、趋势坐标、阅读日历、排行时长与偏好信息；月历阅读强度档位提高对比度。
+- 微信读书摘要不再为了三列对称显示重复的“数据来源”，网页端没有可用第三项指标时直接使用两列。
+- 首页“更新”菜单把“更新当前书籍”提升为明确入口：微信书重新获取资料与封面，本地书先重新读取本地元数据再尝试网络补全；“刷新本地书”的说明不再混用“更新最近阅读”。
+- 保持 beta.21 的主页结构与 beta.20 的性能策略，不改下载、同步、锁屏、精确进度和后台任务逻辑。
+
+## 4.9.0-beta.21 - 2026-08-22
+
+- 主页最近阅读重新排版：移除“最近阅读”标题，显著放大封面，书名/作者/来源/最近阅读时间集中到封面右侧，阅读进度改为卡片底部整行进度条。
+- 主页右侧改为“时间 + 微信读书/本地阅读左右双栏”；两张统计卡使用独立圆角打卡方框，微信读书突出本周/今日/日均，本地阅读突出本周/今日/页数。
+- 微信读书主页与详情统计继续直接使用官方网页端 `/readdata/detail` 数据，不自行重算官方周期统计；仅做缓存、归一化与界面展示。
+- 微信读书/本地阅读详情页重做为统计面板：周页展示摘要、七日趋势、打卡与读书排行；月页展示摘要、阅读日历与排行；年/总页展示周期趋势与排行。
+- 历史周期切换改为周期标题左右箭头；点击历史周期标题可回到本期，不再使用三枚大按钮占据页面。
+- 保留 beta.20 的主页性能策略：首屏不读取本地统计、不等待微信接口；统计后台更新只替换对应统计卡，不重建最近阅读、书架或封面。
+
+## 4.9.0-beta.20 - 2026-08-22
+
+- 打开书籍时只执行一次主页冻结/后台停止，去除重复清理与重复 park。
+- 主页页码、栏目等非关键状态不再在点书时强制整份设置写盘；回到主页空闲后再保存。
+- 主页首屏不再同步读取 KOReader statistics.sqlite3；本地统计与微信读书统计统一等待主页空闲并串行后台刷新。
+- 自动微信书架快速索引失败时保留旧缓存，不再立即退回完整书架请求；手动刷新仍允许完整回退。
+- 增加 ReaderOpenPerf 交接耗时记录，用于继续定位 KOReader 文档打开阶段。
+
+## 4.9.0-beta.19 - 2026-08-22
+
+- 优化主页布局与阅读统计，新增周打卡、月历趋势及更完整的微信读书/本地阅读数据展示。
+
+## 4.9.0-beta.18 - 2026-08-22
+
+- 主页顶部状态栏改为按设备能力显示：不支持蓝牙时不再显示蓝牙或保留空位；左右增加安全留白，“更多”不再紧贴右边框。
+- 最近阅读卡重新整理信息层级：书名、作者、来源、最近阅读时间与精确到 0.1% 的进度更集中，并新增细进度条与明确的“继续阅读”入口。
+- 主页微信读书与本地阅读卡新增本周七日打卡；微信读书按服务端有效阅读日规则（满 1 分钟）标记，本地阅读按 KOReader 本机记录标记。
+- 阅读统计详情页扩展为“周 / 月 / 年 / 总”：增加周期摘要、七日打卡、月度阅读日历、月/年趋势、读书排行，以及微信读书可用时的阅读统计与偏好信息；周/月/年支持切换上一周期、本期和下一周期。
+- 微信读书统计继续使用官方 `/readdata/detail`；主页只刷新周/月缓存，进入详情页后才异步获取年/总数据，并分别缓存 6/12 小时，不增加主页常驻网络请求。
+- 本地统计继续只读 KOReader `statistics.sqlite3`；详情页按需汇总当前周/月/年/全部、阅读天数、页数和图书排行，不改变 KOReader 原生计时规则。
+
+## 4.9.0-beta.17 - 2026-08-22
+
+- 单章节阅读支持在章节末页继续翻页进入下一章；已预下载时直接切换，未准备时按用户任务下载后打开。
+- 下一章目录信息在阅读稳定后只计算一次并缓存，正常翻页不遍历章节目录，精确进度计算期间预下载继续让路。
+- 同一本书跨章节时不经过主页，也不等待远程精确进度上传完成；旧章节先保存本地位置与阅读时间。
+- 阅读工具栏第一栏重新等分，加入蓝牙状态与时间；第二栏改为“☰ 目录 / 当前章节与本章进度 / 全书进度”。
+- 新增“章节末尾连续阅读”开关，可与“自动准备下一章”分别控制。
+
+## 4.9.0-beta.16 - 2026-08-22
+
+- 单章节连续阅读：阅读微信读书单章节 EPUB 约 30 秒后，设备空闲时自动准备下一章；只预取紧邻下一章，不为预下载主动唤醒设备。
+- 下载优先级：自动预下载始终低于用户主动下载、同步和清理任务；用户开始下载时会让自动预下载退出并优先执行用户任务。
+- 版本一致：纯净版自动准备下一章仍使用纯净版，划线与想法版保持对应版本；已经存在的下一章不会重复下载。
+- 下一章入口：单章节阅读的控制中心新增“下一章”，可直接打开已准备章节；正在准备时点击会在完成后自动打开，未准备时按正常下载流程下载并打开。
+- 预下载管理：自动准备但尚未实际打开的章节单独标记为“预下载”；下载管理可查看数量、清理单本或全部预下载章节，实际打开后自动转为普通本地章节并保留。
+- 删除保护：删除整本书会继续一次性删除全部单章文件，包括自动预下载；单章正在阅读时禁止直接删除，避免 KOReader 持有文件期间被移除。
+- 设置与兼容：下载设置新增“自动准备下一章”开关，默认开启；普通本地 EPUB/PDF、整本下载和章节范围版不参与自动预下载，Schema 升至 116。
+
+## 4.9.0-beta.15 - 2026-08-22
+
+- 首页上半区：最近阅读收窄为左半区，右侧新增独立时间卡、微信读书阅读统计卡和本地阅读统计卡；两个统计卡均可点击进入对应详情页。
+- 首页顶部状态栏：移除重复的时间显示，新增蓝牙状态；Wi-Fi、蓝牙、同步、电量、更多使用稳定分区，减少文字长度变化造成的间距跳动。
+- 最近阅读：半宽卡片保留封面、书名、作者、进度和上次阅读时间，右上角新增“历史 ›”入口，继续阅读仍直接打开当前书。
+- 微信读书统计：接入官方 `/readdata/detail` 阅读统计，主页显示今日/本周，详情页增加本月和本周每日记录；优先显示本地缓存，缓存过期后异步更新，失败不阻塞主页。
+- 本地阅读统计：继续只读 KOReader `statistics.sqlite3`，扩展今日、本周、本月、今日阅读页数和本周每日时长；在 KOReader 中阅读的微信读书书籍自然计入本地统计。
+- 兼容与性能：微信读书统计按账号隔离缓存，断网或接口失败时保留旧数据；统计更新只刷新对应卡片，不重新加载书架和封面。
+
+## 4.9.0-beta.14 - 2026-08-22
+
+- 阅读进度显示：完整书、单章版和连续章节版统一使用整书映射；单章/章节版不再把“当前 EPUB 页数百分比”显示成整书进度，整书进度与本章/章节版位置分开显示并保留两位小数。
+- 单章与不连续章节：继续使用完整目录定位章节，只要当前章节已下载即可换算整书位置；不要求把前后章节下载齐，也不要求本地章节连续。
+- 连续章节版同步：章节版从“整体禁用同步”改为“仅开放阅读进度同步”；取得可靠章节坐标后可上传精确进度，阅读时间仍保持关闭。
+- 云端位置跳转：单章与章节版优先使用解析后的章内比例/正文位置，微信原生 `chapterOffset` 不再错误地按 `wordCount` 直接相除；云端章节不在当前章节版范围时拒绝跳转。
+- 精确坐标缓存：下载章节时同步保留用于 `chapterUid + chapterOffset` 换算的原始坐标正文；优先写入书籍缓存目录，重启或离线后仍可复用，同时兼容 beta.13 的旧临时缓存。
+- 兼容范围：不修改 beta.13 的本地书架构，不改批注同步和下载主流程；整本书原有精确同步路径保持不变。
+
+## 4.9.0-beta.13 - 2026-08-22
+
+- 本地书架构：取消觅阅自建的递归本地书库扫描，改为按当前文件夹读取；不再受 1000 本、5 层目录和多扫描根目录逻辑限制。
+- 格式支持：本地文件是否可阅读直接跟随 KOReader DocumentRegistry，不再由觅阅维护独立扩展名白名单；普通用户目录也不再因名称为 System、Plugins 等被整目录跳过。
+- 来源区分：继续使用觅阅下载记录识别微信读书生成文件，避免与普通本地书重复；文件被移动后在打开时再做 EPUB 身份复核，不在目录浏览阶段批量打开文件。
+- 首页本地书：首页改用 KOReader 最近阅读记录，并提供“浏览本地书”入口；不再为了首页建立全盘本地书索引。
+- 封面与资料：只处理当前可见页，翻页后继续处理新一页；区分“确认无封面”和“本次提取失败”，临时失败会延迟重试，不再永久停留为空白封面。
+- 设置与升级：扫描模式、自动扫描、多扫描目录等旧入口退出菜单，仅保留“入口目录”；Schema 升至 115，旧 local_root 自动迁移为入口目录，旧扫描字段和旧索引数据暂时保留以支持 beta 回退。
+- 兼容范围：不修改 beta.12 的阅读返回/目录修复，也不修改 beta.11 的 Wi-Fi、下载、同步和锁屏逻辑。
+
+## 4.9.0-beta.12 - 2026-08-22
+
+- 插件模式阅读返回：统一阅读界面的主页/书架动作。觅阅桌面仍关闭当前阅读并返回觅阅主页；插件模式改为打开觅阅书架，不再关闭 ReaderUI 或退出 KOReader。
+- 阅读入口一致性：阅读工具栏、快捷面板、控制中心及相关阅读子界面的 Home 回调统一经过运行模式判断，避免其他入口再次触发插件模式退出。
+- 目录入口：阅读工具栏原先显示当前章节名称的可点击区域改为明确显示“目录”；控制中心目录项移除“当前章节”说明，点击逻辑与 KOReader 目录功能保持不变。
+- 兼容范围：不修改 beta.11 的 Kindle Wi-Fi、下载、同步、锁屏和本地书逻辑；本地书架构重构留到后续 beta。
+
+## 4.9.0-beta.11 - 2026-08-21
+
+- Kindle Wi-Fi：桌面与阅读界面的快捷开关改用 Kindle 原生“恢复已保存网络”路径，避免 KPW5 在无线刚开启时立即扫描、因扫描早于系统自动连接而误报失败。
+- Wi-Fi 状态：新增实际连接状态判断，SSID 与“已连接”不再只依赖 DNS 在线检测；连接完成后立即刷新，另在 0.8/3/6 秒复核，避免系统已联网但界面仍长期显示“未连接”。
+- 用户开关：Kobo、Android 等设备继续使用 KOReader 原生开关，但明确标记为用户主动操作；主动关闭 Wi-Fi 会正确记录关闭状态，避免后续被自动恢复。
+- 网络列表：长按/“选择网络”仍保留 KOReader 原生网络列表，不改变手动换网方式。
+
+## 4.9.0-beta.10 - 2026-08-21
+
+- 书架下载状态：完整可阅读版本与下载断点分开判断，不再因为存在 `.miuread-partial-*` 缓存就给整本书显示“继续下载 / 修复下载”。
+- 版本级恢复：纯净版、划线与想法版分别识别正在下载、失败/中断和可恢复断点；菜单按实际状态显示“下载 / 更新 / 继续下载 / 继续更新 / 下载中”。
+- 章节任务隔离：按章节下载的进行中或失败状态不再污染整本纯净版、划线版的状态；章节下载进行中只在“按章节下载”入口显示进度。
+- 缓存语义：完整的注释下载缓存继续保留用于复用，但不再标记为“未完成缓存”；只有 BookIntegrity 确认仍有未完成内容时才显示可恢复断点。
+
+## 4.9.0-beta.9 - 2026-08-20
+
+- 文字选择：将常用操作整理为 2×3 一级菜单（高亮、添加笔记、书摘卡片、复制、词典、更多），低频工具进入“更多”；切换层级前先关闭当前浮层，避免弹窗叠加。
+- 书摘卡片：打开即显示实时预览；宽屏采用左侧预览、右侧样式，空间不足自动切换上下布局；样式、配色和静影背景修改后直接刷新预览，不再需要“查看预览”。
+- 书摘输出：底部统一为“手机扫码保存 / 保存到阅读器 / 关闭”；扫码使用独立二维码界面，返回后恢复当前书摘设置，继续使用 beta.7 的局域网传输与 Kindle 临时端口逻辑。
+- 阅读锁屏：休眠边沿先完成本地保存和阅读时间 barrier，再延后启动精确进度定位/网络上传，让锁屏画面优先出现；reader_finalizer 与下载继续使用独立后台持有，进度同步结束不会释放正在进行的熄屏下载。
+
+## 4.9.0-beta.8 - 2026-08-20
+
+- 阅读进度：首页可使用已保存的精确章节坐标直接确认或重传结束阅读进度；修复云端已经确认后旧 pending 仍在主页显示、以及旧 Home Store 可能重新写回进度状态的问题。
+- 主页交互：主页快捷项改为单击打开完整功能菜单并取消长按；下滑工具栏原有点击与长按交互保持不变。
+- 书架交互：最近阅读仍单击直接阅读；普通书籍改为单击打开书籍菜单，纯净版、划线与想法版、按章节下载改为同级入口。
+- 快捷菜单：新增“搜索微信书架”并限定为已加入微信读书书架的书；移除主页快捷菜单中的全屏刷新、书籍完整性检查和同步诊断等重复入口。
+
+## 4.9.0-beta.7 - 2026-08-20
+
+- 修复 Kindle 手机扫码获取书摘时随机临时端口被系统防火墙拦截的问题，传输结束后自动关闭端口，并补充连接/请求/完成/超时日志。
+- 修复阅读界面锁屏时当前书缓存封面未被重新找到的问题；Reader 会按当前 bookId 回查 cover_index，且封面不可用时不再保留正文最后一帧。
+
+## 4.9.0-beta.6 - 2026-08-20
+
+- 新增完整书摘卡片交互与局域网扫码传图
+- 加入 Native 章节解码加速，并保留 Lua 兼容路径
+
+## 4.9.0-beta.5 - 2026-08-20
+
+- 同步正式版本至 4.6.8
+- 微信书架改为按需流式加载
+
+## 4.6.8 - 2026-08-20
+
+- Unify beta and stable release channels in a single repository
+- 修复熄屏后台下载在 EPUB 最终生成阶段可能卡死，并完善 Kindle 唤醒保护。
+- feat: 新增书摘卡片图片合成基座 (miuread/book_excerpt_card)
+- 修正“书单”相关表述，统一改为“分组”
+- 重构后台锁屏下载的唤醒与异常恢复逻辑
+- 重构 Kindle 熄屏后台任务与唤醒逻辑
+- 重构 Kindle 熄屏后台任务与唤醒架构
+- 修复后台任务异常结束后的 Kindle 休眠链路
+- 重构 Kindle 熄屏后台任务为 ScreenSaver Hold
+
+## 4.9.0-beta.4 - 2026-08-20
+
+- 重构 Kindle 熄屏后台任务为 ScreenSaver Hold
+
+## 4.9.0-beta.3 - 2026-08-19
+
+- 修复后台任务异常结束后的 Kindle 休眠链路
+
+## 4.9.0-beta.2 - 2026-08-19
+
+- 重构 Kindle 熄屏后台任务与唤醒逻辑
+- 重构 Kindle 熄屏后台任务与唤醒架构
+
+## 4.9.0-beta.1 - 2026-08-19
+
+- 新增正式/内测双更新通道，并吸收部分内测功能
+- feat: 新增书摘卡片图片合成基座 (miuread/book_excerpt_card)
+
+## 4.8.0-beta.4 - 2026-08-19
+
+- 重构后台锁屏下载的唤醒与异常恢复逻辑
+
+## 4.8.0-beta.3 - 2026-08-19
+
+- 修正指定分组功能中的界面文案歧义，将原先“书单”相关表述统一改为“分组”；不改变分组筛选、书架、下载、同步、阅读或电源管理逻辑。
+
+## 4.8.0-beta.2 - 2026-08-19
+
+- 修正指定分组功能中的界面文案歧义，相关名称统一使用“分组”，与功能实际含义保持一致。
+- 仅调整显示文字与说明，不修改分组筛选、书架、下载、同步、阅读或电源管理逻辑。
+
+## 4.8.0-beta.1 - 2026-08-19
+
+- 修复大书在最后生成 EPUB 时被误判为下载卡死：低内存流式生成现在持续汇报校验、写入和索引进度，健康的长时间打包会不断刷新任务状态，不再只因为总耗时超过阈值而被终止。
+- 下载进程一旦因无进展被请求终止，第一次恢复尝试就立即启动独立的 fail-open 保护；若子进程没有按时退出，觅阅会停止让该下载占用伪锁屏并交回正常电源状态，断点继续保留。
+- 保留现有 Kindle/Kobo 熄屏下载、低内存 EPUB 生成和用户唤醒优先逻辑；本版不修改阅读进度、阅读时间、批注同步、书架及 EPUB 内容结构。
+- 最终生成阶段细分为“生成 EPUB / 验证 EPUB / 安装 EPUB”，生成与逐章节验证都会持续刷新状态，便于区分真正卡死与大书正常慢处理，并为后续性能优化提供明确诊断。
+
+## 4.7.0-beta.20 - 2026-08-18
+
+- 内测主线正式迁入 `miuread-koreader` 的 `beta` 分支，后续 Beta Release 与 `beta-channel` 均由统一仓库发布；移除旧 `device-feed-r7k2` 更新地址回退。
+- 更新设置新增“正式通道 / 内测通道”选择，选择会保存在本地；自动检查与手动检查都跟随用户当前选择的通道。
+- 支持正式版切入内测；内测切回正式时若正式版版本号较低，只停止接收内测更新，不自动降级，待正式版版本追上后正常升级。
+- 安装校验改为核对“目标通道与下载包通道”是否一致，继续保留版本、完整包、大小和 SHA-256 校验。
+
+## 4.7.0-beta.19 - 2026-08-18
+
+- 内测发布迁移到统一仓库：本版本仍由旧 `device-feed-r7k2` 分发，但安装后后续内测更新主入口改为 `miuread-koreader` 的 `beta-channel`。
+- 保留旧 beta 通道作为迁移期临时回退，避免新仓库首个内测版本尚未发布或 GitHub 短时不可用时立即失去更新入口；beta.20 起移除旧仓库回退。
+- 不改下载、同步、休眠、锁屏、阅读和书架行为，完整保留 beta.18 功能，仅承担现有内测用户迁移。
+
+## 4.7.0-beta.18 - 2026-08-18
+
+- 补齐熄屏下载健康检测：`underlines/thoughts/footnotes/annotation_apply/transform/package` 等重任务全部纳入阶段化卡死恢复；worker 每次进度写入独立 heartbeat，大书慢处理不会只因耗时被误判。
+- 下载自动恢复后再次卡死时增加 fail-open：停止继续维持下载/伪锁屏 lease，交回 Kindle/Kobo 正常休眠；用户主动唤醒仍优先恢复可见界面。
+- 返回觅阅主页的目标在休眠/唤醒过程中持续保留，Resume 后发现未完成返回会继续恢复主页，降低 Reader 已关闭但 Home 未接上的白屏风险。
+- 主页电量改为复用每分钟时钟读取 KOReader 真实电量，只在数值变化时局部刷新；新增 Sleep/Wake 电量、休眠模式、下载阶段和 lease 诊断日志。
+
+## 4.7.0-beta.17 - 2026-08-18
+
+- 修复目录请求被误判为下载卡死：`chapterInfos` 首次传输失败后立即进入明确的网络等待状态，网络恢复后在同一任务中重新获取目录；真正无响应的 worker 仍保留一次断点自动恢复。
+- 修复阅读界面打开瞬间残留点击可能触发 KOReader 角落手势并生成意外书签：新增短暂过渡保护，并让正文想法/批注优先于 Gesture Manager。
+- 阅读菜单新增顶部中央轻点入口，与原有下滑入口共用同一菜单；左右上角仍保留 KOReader 自定义手势。
+- 阅读进度界面区分“同步中 / 待同步 / 待确认 / 失败”，不再把正常等待云端确认统一描述成“待处理”；批注定位失败仍保持严格校验。
+
+## 4.7.0-beta.16 - 2026-08-18
+
+- 修复 Kindle 伪锁屏偶发无法退出的问题：`HALL_WAKEUP` 与未被觅阅内部事件消费的 `BUTTON_WAKEUP/BUTTON_SUSPEND` 改为用户最高优先级，不再因旧的内部唤醒状态而继续锁屏。
+- Kindle 主动写入 `powerButton` 的事件改为一次性票据匹配，并给用户退出增加输入立即恢复、旧延迟回调代际隔离与 1.25 秒可见界面回退，防止解锁流程中途失效后再次把输入锁住。
+- 伪锁屏增加后台 owner 释放保险：下载结束、取消、休眠或异常退出后即使最后一个 UI 回调丢失，也会再次触发安全收尾；Kobo 仅复用这一保险，不引入 Kindle 的 Power/Hall 逻辑。
+- Android 与未知设备继续不启用伪锁屏或专用电源控制；下载、断点续传、阅读进度、阅读时间、批注同步及 beta.15 的下载完成后真实休眠交接保持不变。
+
+## 4.7.0-beta.15 - 2026-08-18
+
+- 修复 Kindle 锁屏后台下载完成后可能无法正常唤醒：不再把进入屏保事件直接当作真实休眠完成，改为等待 Kindle 的真实休眠确认后才释放伪锁屏保护。
+- Kindle 下载完成后的自动休眠增加用户操作优先与失败回退：电源键/翻盖可取消自动交接，确认超时则恢复可操作界面，不再停留在半休眠状态。
+- Kobo 下载完成后不再先释放伪锁屏再延迟休眠，改为保持保护直到进入原生休眠；唤醒返回后再清理状态，避免下载结束瞬间与电源键/翻盖竞争。
+- Android 与未知设备继续安全降级，不启用 Kindle/Kobo 特殊电源控制；下载、断点续传、阅读进度/时间/批注同步逻辑保持不变。
+
+## 4.7.0-beta.14 - 2026-08-18
+
+- 修复 Kobo 熄屏下载顺序：在 Kobo 原生休眠流程关闭 Wi-Fi 之前先建立伪锁屏与后台保持状态，成功后继续显示正常睡眠封面但不进入内核休眠；建立失败则完整交回 KOReader 原生休眠，不再执行半套回退流程。
+- Kobo 伪锁屏期间拦截重复 Suspend，避免自动休眠、合盖或重复设备事件再次进入关闭 Wi-Fi 的路径；用户按电源键或打开翻盖仍可正常退出锁屏，后台任务结束后继续恢复真正休眠。
+- Kindle 熄屏下载、电源键、翻盖、AutoSuspend 与内部唤醒判定保持 beta.13 行为不变；设备判断改为严格互斥，只有明确 Kindle/Kobo 才允许特殊休眠能力。
+- Android 与未知设备改为安全降级：不申请后台防休眠、不尝试熄屏维持 Wi-Fi或阅读收尾等待，下载进入真实休眠时保存断点并暂停，开屏后按现有断点恢复；底层 lease 再增加平台拒绝作为第二重保护。
+
+## 4.7.0-beta.13 - 2026-08-17
+
+- 修复 Kindle 熄屏下载时可能自行退出屏保：伪锁屏不再把任意第二次 Suspend 直接判定为用户按电源键；内部/来源不明的 Suspend 默认继续保持锁屏，只有确认的用户唤醒路径才恢复界面。
+- Kindle 伪锁屏期间临时暂停 KOReader AutoSuspend，并在退出或真正休眠时恢复原设置，避免后台 private wake 重新启动自动休眠计时后再次制造内部 Suspend；觅阅主动写入 `powerButton` 的事件增加自发标记，防止把自己生成的 power 事件当成用户操作。
+- 增加 Kindle 原始 powerd 来源记录，区分 `BUTTON_*` 与 `HALL_*`；`HALL_WAKEUP` 明确作为翻盖打开的合法唤醒，避免修复自动退屏保后出现翻盖开不了屏。Kobo 保留现有 cover/伪锁屏逻辑，仅沿用原有合盖保持、开盖恢复行为。
+- 内部伪锁屏 Suspend/Resume 在同步入口直接拦截：不重复结束/开启阅读 session，不重复计算阅读时间，不重抓最终进度，也不重复扫描批注；觅阅“休眠”快捷键提前标记为 `USER_SLEEP`，最终时间、精确进度与批注仍只收尾一次，后台下载和同步继续并行。
+
+## 4.7.0-beta.12 - 2026-08-17
+
+- 结束阅读时最终精确进度不再等待阅读时间 writer barrier：固定同一份精确位置后立即以 `rt=0` 提交并回读确认，`rt≠0` 阅读时间独立收尾，两条通路可同时进行。
+- 返回觅阅主页取消 18/70 秒串行等待；最终进度立即后台上传，主页区分“进度同步中 / 进度待确认 / 进度待同步”，云端确认后立即清除对应待处理状态。
+- 熄屏且同时下载时不再为 `reader_finalizer` 暂停/恢复下载；下载与阅读收尾同时持有各自防休眠状态并并行工作，同时自动清理 beta.9-11 遗留的 `reader_finalizer` 下载暂停标记。
+- 阅读收尾的核心等待只包含最终进度与阅读时间，批注改为独立后台任务；熄屏收尾上限调整为 18 秒，超时仍保留精确 pending，不影响下载继续或后续补传。
+
+## 4.7.0-beta.11 - 2026-08-17
+
+- 改用“伪锁屏后台下载”：有下载任务时仍显示 KOReader/觅阅正常锁屏封面，但下载完成前不进入真正的系统深度休眠；下载结束、取消或安全休眠后再把设备交回原生 Suspend。
+- Kindle 进入原生 screensaver 后立即让 Amazon powerd 回到 ACTIVE，同时保留已经显示的睡眠封面并屏蔽普通输入；下载期间继续使用 `ensureConnection` 和低频 T1 保活，避免 beta.9/10 在系统 screensaver 约一分钟后被断开 Wi-Fi。
+- Kindle 再按一次电源键会退出伪锁屏并恢复正常界面；后台任务结束时则自动提交一次真实休眠，不再持续唤醒或循环切换 powerd。
+- Kobo 在电源事件进入 KOReader 时提前截住真实 Suspend：仍使用原生睡眠封面和阅读收尾，但跳过“锁屏前关闭 Wi-Fi”以及内核 suspend 计时，下载全程保持 ACTIVE 网络；下载完成后按 KOReader 原生安全顺序关闭 Wi-Fi并真正休眠。
+- 阅读中同时下载继续保持“阅读时间/最终进度先收尾 → 下载继续”的优先级；伪锁屏由独立 lease 持有，修复 beta.10 提前 acquire 后又瞬间 release 的零 lease 空档。
+
+## 4.7.0-beta.10 - 2026-08-17
+
+- 完整化原生锁屏下载方案：仍使用 Kindle/Kobo/KOReader 正常锁屏流程，不引入“假壁纸”状态机；下载任务只在真实 Suspend 回调到来后持有后台 lease，主页正常使用时不会被下载阻止熄屏。
+- Kindle 锁屏下载记录当前 SSID，并通过 KOReader `NetworkMgr:authenticateNetwork()` 调用设备原生 `ensureConnection`；进入锁屏立即声明连接需求，连接正常时每 30 秒低频续一次，掉线时 5 秒级重新声明，不再只依赖 HTTP 失败后的 `restoreWifiAsync`。
+- Kobo 不模拟 Kindle 的 `ensureConnection`：进入锁屏时尽早持有 KOReader standby lease，健康 Wi-Fi 不做额外操作；只有确认连接真正丢失时才调用 Kobo/KOReader 自身的恢复路径。
+- 下载专用 lease 提前到 Suspend 处理开头获取；阅读中熄屏且同时下载时仍保持“阅读收尾优先 → 下载接管”，交接过程中不出现零 lease 空档。
+- 保留 beta.9 的断点、长时间离线休眠、低电量保护和唤醒 UI 优先逻辑；断线自动重连继续作为兜底，而不是主要保持方式。
+
+## 4.7.0-beta.9 - 2026-08-17
+
+- 重做锁屏后台任务接管：主页下载不再持有待机锁或重置 Kindle 待机计时，主页可正常熄屏；进入锁屏后才由统一 lease 保持后台运行。
+- 阅读界面熄屏且存在下载时，先暂停下载完成阅读时间/最终精确进度收尾，再无缝把 lease 交给下载任务；同步失败可转 pending，不会长期堵住下载。
+- 健康锁屏下载保持 Wi-Fi 直到任务完成；首次完整章节网络失败即进入恢复等待，Wi-Fi 掉线持续无界面重连，不再 90 秒主动放弃。
+- 连续无网络约 10 分钟或低电量时保存章节断点并释放后台锁；下载完成立即允许深度休眠，用户唤醒仍优先释放后台 lease 恢复界面。
+
+## 4.7.0-beta.8 - 2026-08-17
+
+- 收敛阅读同步路径：移除“阅读过程中自动上传进度”选项，阅读中每 60 秒继续只上传阅读时间，不再周期性计算精确位置；旧 continuous 设置升级后自动迁移为“结束阅读时上传”。
+- 修复结束阅读时阅读时间与最终进度可能交叉写入的问题：新增阅读上报 writer barrier，必须等在途时间请求和 final flush 完全退出 `/web/book/read` 后，最终精确进度才允许提交；返回觅阅主页仍立即完成，云端收尾在后台串行执行。
+- 修复手动/最终进度“已提交但云端未确认”后只回读不重投的问题：保留同一份精确 `wr_data_co` 快照，回读两次仍不匹配时自动原样重投一次，再做云端确认，不重新计算位置。
+- 为进度快照增加 sequence 代际：较新的进度一旦接管，旧 pending、旧回调和旧主页待处理项自动失效，避免已经同步成功后又被旧位置重新判定为失败。
+- 主页待处理进度现在会先确认云端；若云端确实没有收到，则直接重传保存的精确位置，而不是只反复读取云端。
+- 保留 beta.6 的原生 `wr_data_co` 精确定位、上传后云端回读确认和阅读时间 time-only 机制；不恢复模糊进度，不让周期计时重新承担位置计算。
+
+## 4.7.0-beta.7 - 2026-08-17
+
+- 熄屏下载新增 Wi-Fi 链路守护：仅在下载已进入网络等待且无线链路确实掉线时，后台尝试无界面恢复连接，不反复重置正常 Wi-Fi。
+- 网络等待 90 秒后释放下载待机锁，120 秒仍未恢复则安全休眠下载 worker 并保留章节断点，避免长时间锁屏卡在 DOWNLOAD_LOCKED。
+- 用户按电源键唤醒时优先释放下载 wake lock，先恢复界面与输入，再决定是否继续后台下载；下载任务不能再阻挡唤醒流程。
+- 网络休眠任务在前台检测到联网后自动从断点继续，并增加等待时长、恢复次数和下载活性日志，方便定位断网/假死。
+
+## 4.7.0-beta.6 - 2026-08-17
+
+- 修复设置文件写入格式错误：恢复 KOReader 标准 `return { ... }` 保存格式，桌面模式、账号、进度与更新状态可正常持久化。
+- 桌面/插件模式切换新增保存后校验；保存失败时不再假装成功或直接重启 KOReader。
+- 扫码登录只有在新账号状态真正写入后才算完成；写入失败可直接“重试保存”，无需反复扫码。
+- 后台下载启动前强制确认设置已保存并核对登录状态副本，避免前台已登录、后台仍读取旧 Cookie 后误报 -2012。
+
+## 4.7.0-beta.5 - 2026-08-17
+
+- 返回觅阅主页改为“本地先保存、云端后台完成”：不再等待阅读时间、进度上传或云端确认后才关闭 Reader。
+- 结束阅读先冻结原书与会话快照；即使主页已恢复或立即打开下一本书，原书仍可继续完成进度上传与云端确认。
+- 弱网/断网时保留本机位置并显示“等待网络/进度待确认”，不再用网络超时阻塞主页交互；休眠、重启、退出等需要真正结束进程的路径仍保留原有有界收尾。
+- 保留 beta.4 排版防崩、本地书退出保护，以及 beta.2 翻页减负和 beta.3 下载完整性修复。
+
+## 4.7.0-beta.4 - 2026-08-17
+
+- 字号、字重、行距连续调整改为合并应用，停止操作后只执行最终排版，避免连续重排导致 Kindle 卡死或 native crash。
+- 排版重建纳入 Reader 内部重建保护；短暂 CloseDocument 不再误判为退出阅读，降低白屏、突然退书后又重进的问题。
+- 排版撞上低内存或下载打包/转换时先让下载安全暂停或休眠，排版结束后再恢复，避免两项重任务同时抢内存。
+- 本地书返回主页继续完全绕过微信同步，并补齐关闭前后诊断点；不改 beta.2 翻页减负与 beta.3 下载完整性修复。
+
+## 4.7.0-beta.3 - 2026-08-17
+
+- 修复网页字体被误判为正文图片：`.woff/.woff2/.ttf/.otf/.eot` 不再计入章节缺失，失效字体 CDN 不再阻止 EPUB 生成。
+- 保留低内存流式 TAR 解包，并允许尾部截断时保留已经完整解出的图片；最终仍按正文真实引用判断是否缺图。
+- 流式下载新增 `Content-Length` 完整性检查，明确识别并重试被截断的 TAR 响应。
+- 下载日志区分字体跳过、TAR 部分恢复和真正正文图片缺失，真正缺图仍会阻止生成 EPUB。
+
+## 4.7.0-beta.2 - 2026-08-17
+
+- 结束阅读后即使返回主页或切书，也继续确认原书进度，不再误报“书籍已切换”。
+- 首页区分“上传失败/进度待确认”，可查看具体书籍并只读云端重新确认。
+- 修复 2024 Kindle 唤醒停在原生主页，阅读页会自动恢复当前画面。
+- 翻页时阅读时间后台上传主动让路，降低偶发卡顿。
+- 进度请求发出后保存待确认位置；网络中断时保留“等待网络”状态，不重复上传未确认的旧进度，避免覆盖其他设备的新进度。
+- 保留 beta.1 的本地书格式判断、AZW3 拦截和 KOReader 原生打开流程，不改动该部分。
+
+## 4.7.0-beta.1 - 2026-08-17
+
+- 修正本地文件打开前判断：只使用 KOReader `hasProvider()` 判断格式支持，不再把 `getProvider()` 的 TXT fallback 误当成真实格式支持；AZW3/未知格式会在进入 Reader 过渡状态前直接拦截。
+- 删除固定 2.2 秒“打开失败”计时器；大 EPUB、慢速 PDF、密码文档等不再因等待超过固定时间被觅阅强制退回，格式支持后由 KOReader 原生打开/报错流程负责，觅阅仅在 `ReaderReady` 后确认成功。
+- 加固设置启动链：`miuread.lua` 不再每次插件构造都无条件重写；原子保存失败时保留/恢复上一份有效设置并返回错误，不再抛出异常导致整个插件加载失败。
+- 保留 beta.8 已正确的本地/微信阅读分流、本地书退出不整本扫描、ReaderReady 后更新最近阅读与锁屏等行为，不扩大本轮改动范围。
+
+## 4.6.0-beta.8 - 2026-08-17
+
+- 重构普通本地书阅读会话：Reader 确认打开后固定为本地模式，翻页、休眠、恢复与返回主页不再进入微信读书进度、阅读时间、批注同步或身份识别流程。
+- 本地书打开前先使用 KOReader 自身格式能力检查；AZW3 等当前无法读取的格式仍保留在本地书架，但不会提前冻结主页、修改当前阅读状态或切换锁屏封面。
+- 锁屏封面与最近阅读改为仅在 Reader Ready 后更新；新增打开失败恢复保护，KOReader 未真正进入阅读界面时自动撤销过渡状态并恢复觅阅主页。
+- 删除退出阅读时对未知本地文件的整文件身份扫描兜底；普通本地书点击“首页”直接关闭 KOReader Reader，不再因大 EPUB/PDF 身份识别阻塞退出。
+- 阅读界面按会话类型精简：本地书隐藏微信评论、同步、下载生成与修复入口，快捷栏将“评论”替换为“目录”，批注页仅保留 KOReader 本地批注；微信读书书籍保持原有同步功能。
+- 设置文件保存改为完整序列化校验后原子替换，避免 `miuread.lua` 在退出阅读或状态切换期间出现半写入文件；异常时继续保留上一份有效设置。
+
+## 4.6.0-beta.7 - 2026-08-17
+
+- 修复 Kobo 等设备 OTA 后重启可能卡死：启动阶段不再同步探测 Bluetooth，BlueZ 能力检测延后到界面可响应后，并放入独立后台任务。
+- 为 `bluetoothctl` 等外部蓝牙命令增加硬性超时；系统蓝牙服务无响应时只让蓝牙功能暂时不可用，不再阻塞 KOReader。
+- OTA 改为“试运行后确认”：新版本第一次启动期间保留上一版本备份，只有返回 KOReader 事件循环后才确认成功并清理备份。
+- 增加 OTA 启动失败自动恢复：若上一次新版本启动未完成确认，下一次启动优先恢复上一版本并重启 KOReader；同时可清理手动回退后遗留的 pending 状态。
+- 将旧锁屏衍生缓存清理移出启动关键路径，并增加 Store、迁移、Updater、Bluetooth 等启动阶段日志，便于定位无报错卡死。
+
+## 4.6.0-beta.6 - 2026-08-17
+
+- 统一手动、结束阅读、休眠与连续模式的精确进度上传路径：自动上传不再使用 `_position_for_report()` 的近似 fallback，优先复用完整 SourcePosition 原生 `wr_data_co` 坐标。
+- 修复云端 `chapterOffset` 被错误按章节 `wordCount` 截断的问题；原生 `co` 保持 raw-XHTML UTF-16 坐标，并在后台反向映射成精确 fractional progress，避免 5993/8325 被误读成 5531。
+- 所有进度提交无论接口是否显式 accepted 都执行云端回读确认；阅读时间 final flush 与阅读进度结果拆分日志/状态，未确认进度保留为 pending，不再被“final upload success”掩盖。
+- 删除“回到阅读处/回到当前位置”及 GoBackLink 入口，原位置改为“返回主页”；连续进度模式只有取得原生精确坐标时才上传进度，否则该周期仅上传阅读时间。
+## 4.6.0-beta.5 - 2026-08-16
+
+- 修复最近阅读延迟：Reader 确认当前书后立即写入统一会话快照并同步锁屏目标；返回主页前局部替换“最近阅读”卡片，不再依赖整页刷新或后台书架重算。
+- 重构主页休眠壁纸接管：觅阅仅在最近阅读封面可用时覆盖 KOReader；封面不可用或功能关闭时恢复 KOReader 原生 Screensaver，自定义图片、随机图片等设置不再被 `disable` 分支吞掉。
+- 删除 Screensaver 准备阶段的主页预冻结与重复 suspend 副作用；主页/后台任务只在真正 `onSuspend()` 中冻结，避免 KPW6、Oasis3 出现书架留屏、重复禁止输入和休眠软锁。
+- 主页无 `FileManager.instance` 时仅在 Screensaver setup 调用期间临时复用原 FileManager host，使 EPUB 原生/自定义封面和 KOReader 原生休眠设置仍可正常解析；调用结束立即恢复实例，不改变正常 UI 生命周期。
+
+## 4.6.0-beta.4 - 2026-08-16
+
+- 修复直接熄屏/休眠时“结束阅读上传”被 Suspend 生命周期打断：最终精确进度、批注与最后一段阅读时间由同一收尾屏障保护，完成或 8 秒超时后才释放后台锁。
+- 收尾期间禁止 `reader_ready`、进度确认、恢复等入口重新启动 60 秒阅读时间服务；同一本书的迟到识别结果不再让最终进度任务因 generation 变化被当成旧任务丢弃。
+- 保留熄屏继续下载：阅读收尾锁与下载锁彼此独立；无网络时只保存本地并直接休眠，不补传历史阅读时间债务。
+- 修复主页“需处理 1”幽灵角标：全局批注统计不再计入已经从本地消失的旧定位失败记录，并改为“批注待确认”，详情可直接看到具体书籍与原因。
+
+## 4.6.0-beta.3 - 2026-08-16
+
+- 修复打开书籍后云端进度检查被“等待阅读器空闲”长期推迟的问题：首次页面显示后立即启动同步识别与云端检查，正常翻页/菜单操作不再延后读取。
+- 真正重新打开书籍时强制读取最新微信读书进度；仅横竖屏、重排等同一次阅读会话内部重建允许复用最近验证状态。
+- 收紧精确进度判断：双方都有章节坐标时以章节 UID + 章节内位置为准，不再用接近的整书百分比掩盖章节不一致。
+- 结束阅读遇到微信读书“已提交但未明确确认”时，自动读取云端位置二次确认；确认一致即成功，不盲目重传。
+- 修复休眠收尾尚未完成时唤醒又启动新的 60 秒阅读时间服务，减少 stale worker 与收尾竞态。
+- 所有状态提示改为有宽度限制的多行显示；“正在保存本次阅读”拆成当前任务与后续动作两行，避免超出 Kindle 屏幕。
+- 同步诊断中的“重新定位失败记录”改为真实状态：无失败时显示“无失败记录”，有问题时显示待重新检查数量。
+- 修正内测发布工作流：更新清单只发布到固定 `beta-channel` Release，不再回写 `main/update-beta.json`，避免每次发布后自动产生额外 commit、迫使下一次 push 前先 pull。
+
+## 4.6.0-beta.2 - 2026-08-16
+- 重构阅读同步：阅读时间默认每 60 秒独立上传，不再为了计时自动计算或提交阅读进度；仅“阅读过程中自动上传进度”模式会随时间任务携带当前位置。
+- 阅读进度改为“结束阅读时 / 阅读过程中 / 不自动”三档，默认结束阅读时上传；打开书籍检查云端进度改为独立设置。
+- 批注默认阅读中只保存本地，结束阅读时集中上传；返回主页、返回 KOReader、切书、退出/重启及正常关书统一执行最终本地保存与按需云端收尾。
+- 休眠接入后台锁屏收尾：有下载继续沿用下载伪休眠，仅有同步时短暂保持后台，完成、失败或超时后释放；同步菜单与阅读页状态同步重做。
+
+## 4.6.0-beta.1 - 2026-08-16
+- 大书架进一步减负：停止保存未被使用的微信书架原始数据副本，降低书架缓存体积与后续读写负担。
+- 新增“微信书架范围”：默认仍显示全部书架；超大书架可选择一个或多个微信分组，只让所选书籍进入后续缓存、排序与主页流程，并可临时加载全部书架。
+- 保留 beta.27 的当前页 8 本、按页封面、页面缓存与快速切页取消旧任务逻辑，不以分组过滤替代现有主页优化。
+- 合入 PR #23：修复从觅阅主页添加本地书库目录或选择下载目录时，文件夹选择器可能因缺少 KOReader 界面实例而崩溃。
+
+## 4.5.0-beta.27 - 2026-08-16
+- 收尾主页按页加载：已访问的微信书架页在本次主页会话中直接复用，返回上一页不再重复检查本地版本、进度与封面；缓存仅保留最近 8 页。
+- 强化快速切页：切页或切换书架来源时立即终止上一页尚未完成的封面下载、缩略图生成与当前页本地信息任务，旧页延迟重试也不会再次启动。
+- 云书架自动刷新与主页显示彻底分离：完整远端结果只替换轻量索引，随后仅重建当前可见 8 本，不再连带重建已下载、本地书籍等主页数据。
+- 消除残余整书架扫描：下载进度、封面下载完成和缩略图更新改用 bookId/封面索引直接定位，避免大书架下每次状态变化都遍历数百本。
+
+## 4.5.0-beta.26 - 2026-08-16
+- 在 beta.25 当前页 8 本边界上恢复主页即时性：常规封面每批最多 4 本、主页小封面每批 2 本，并缩短批次与交互后的等待。
+- 提升主页小封面清晰度至约 1.22× 显示尺寸；仍只处理当前可见页，不预加载未访问页面，快速翻页继续取消旧页目标。
+- 缩短 Reader 返回主页与普通主页操作的保护窗口；下载重步骤只做更短的临时让路，断点恢复、卡死恢复、阅读冻结与低内存休眠全部保留。
+- 拆分临时性能保护：普通界面卡顿只降低界面后台负担，不再连带限速下载；仅手动轻量模式或真实低内存继续启用全局保护。
+
+## 4.5.0-beta.25 - 2026-08-16
+- 优化主页微信书架：完整书架仅保留轻量分页索引，下载状态、阅读进度与封面文件检查只处理当前可见的 8 本。
+- 优化切页加载：切到下一页后才准备该页书籍与封面；未访问页面不做封面检查或补全，快速切页继续以最新可见页为准。
+- 保留最近阅读独立处理：若最近阅读来自微信书架，仅额外准备这一册，不再因此整理整个账号书架。
+- 保持 beta.24 的封面限速、交互让路、下载恢复与低内存保护不变，便于单独验证主页分页改造对卡顿的改善。
+
+## 4.5.0-beta.24 - 2026-08-16
+- 修复前台下载可能长期停在 0%/读取目录：缩短目录异常重试链，前台按阶段检测真实进展并从已保存断点自恢复；后台仍保留宽松恢复阈值。
+- 修复大书架切页后旧页面任务继续占资源及卡顿后旧点击误开书：后台目标立即跟随当前页，丢弃换页前积压点击，并阻止同一次过渡中的重复开书。
+- 优化下载与主页共存：正常下载与当前页封面继续并行，仅在重下载阶段叠加真实内存压力时让封面任务让路；卡住下载的取消也更快生效。
+- 调整阅读时间安全策略：保持约 60 秒常规实时上报并限制单次时长；失败、未确认或休眠产生的历史时长不再缓存补传或恢复后集中追传。
+
+## 4.5.0-beta.23 - 2026-08-16
+- 修复 KO2 等低内存设备下载图片章节时可能出现 `not enough memory`：章节图片包改为直接写入磁盘并逐项解包，不再把整包和全部图片同时留在内存。
+- 稳定 长下载增加真实传输/解包心跳；活动任务连续 120 秒无有效进展时终止旧 worker，并仅从已保存断点恢复一次，避免十几分钟“假死”。
+- 优化 新下载与断点恢复的章节图片都保持磁盘文件形式，远程补图同样按文件处理；不会在恢复章节时再次把全部图片读进内存。
+- 稳定 退出 KOReader 前若仍有下载，先请求安全休眠；8 秒内无法释放则取消本次退出，不再带着活跃下载强行交接给系统。
+
+## 4.5.0-beta.22 - 2026-08-16
+- 优化桌面前台调度：主页点击、长按与切页改为 soft-yield，不再取消封面/元数据 worker 或清空后台待办；当前小任务完成后再让路。
+- 优化书架封面：当前页渐进补全，远程封面每批最多 2 本、主页衍生图每批 1 本；缩略图按实际书架尺寸约 1.12× 生成，降低解码、缩放、PNG 编码与内存成本。
+- 平滑迁移旧封面：beta.21 的 home2 高清缩略图继续即时显示，空闲时逐本生成 home3 轻量图，确认成功后再删除该书旧 home2；原始高清封面永久保留。
+- 稳定桌面/Reader 生命周期：阅读期间冻结桌面维护任务，未知 CloseDocument 先按内部 reload 观察，不提前拆同步/评论/网络状态；自动书架刷新周期延长，减少大书架反复扫描。
+
+## 4.5.0-beta.21 - 2026-08-16
+- 修复下载过程中因主页/阅读操作进入硬暂停后可能长期不恢复、需要手动取消再开始的问题；普通交互改为短时让路，不再冻结整个下载任务。
+- 优化前台流畅度：网络与轻量章节工作可继续，正文转换、批注处理与 EPUB 打包等重步骤在交互期间自动延后，空闲后继续。
+- 增加临时暂停自愈：主页交互、阅读交互或页面切换的异常残留暂停超过安全时限会自动清理，不影响手动暂停、网络恢复或低内存保护。
+- 保留断点续传、锁屏后台下载、页面切换保护、IPv4 慢速检测及重资源休眠恢复机制。
+
+## 4.5.0-beta.20 - 2026-08-16
+- 修复部分会员/新格式书籍每章只显示开头：兼容微信读书连续多 XHTML 正文，按顺序合并全部 `<body>` 内容后再生成 EPUB。
+- 修复旧版残缺正文断点被继续复用：新增正文处理版本，仅自动重抓旧正文缓存，不清空批注/想法数据库。
+- 稳定 完成章节与正文断点增加 XHTML 外层标签校验，异常结构不再被标记为 100% 下载成功。
+- 诊断 每章记录解密字节数、正文块数量与合并后字节数，便于区分正文格式变化、权限限制与网络截断。
+
+## 4.5.0-beta.19 - 2026-08-16
+- 稳定 后台下载纳入重资源仲裁；进入 KOReader 文件管理或遇到低内存/下载重阶段时，可在安全检查点休眠子进程并从断点自动恢复。
+- 优化 连续翻页、主页操作与重任务切换合并下载暂停/恢复，减少 worker 与 standby lock 高频反复切换；普通网络等待仍可继续。
+- 修复 Web 批注接口确认 `-2012` 登录超时后，本次下载直接使用可用备用通道，不再每章重复请求已失效接口。
+- 诊断 增加重下载阶段、可用内存、暂停确认与安全休眠快照；保留现有锁屏后台下载、电源状态机与 Reader 前台优先逻辑。
+
+## 4.5.0-beta.17 - 2026-08-15
+- 稳定 将活跃下载锁屏保活与真正休眠分流：下载继续时只保留下载 worker，其余后台任务全部冻结；无下载或长时间无有效进度时按原机制允许真正休眠。
+- 修复 真休眠不再触发阅读时间 final upload；未上报尾段仅本地保存，并在唤醒后的正常阅读上报中安全补交。
+- 稳定 Reader 返回主页超时时不再取消后台下载；新增电源状态代际与异常短唤醒日志，阻断休眠/恢复期间旧后台任务继续抢占。
+- 修复 阅读与主页 Wi-Fi 列表缺少 SSID/加密字段时的原生设置报错，保留 KOReader 原网络选择界面。
+
+## 4.5.0-beta.16 - 2026-08-15
+- 新增统一后台任务调度：书架、扫描、书籍信息、封面处理与同步摘要不再同时抢占老设备资源，用户操作可优先打断自动重任务。
+- 检测到持续卡顿或内存紧张时自动启用临时轻量保护；后台 worker 若出现内存分配失败，会立即收紧任务规模并延后非必要工作。
+- 返回主页、交互与休眠期间进一步冻结后台任务；恢复后按串行顺序逐步释放，减少“刚回主页/刚唤醒就卡住”的情况。
+- 增强后台任务、内存余量与延后原因日志，便于继续定位 KO1 长休眠与 KO2 越用越卡问题。
+
+## 4.5.0-beta.15 - 2026-08-15
+- 阅读下滑栏新增 KOReader 一级入口：点击打开原生阅读菜单，长按可进入文件管理器。
+- 同步状态拆分阅读进度、阅读时间与批注；旧失败批注升级后自动按新规则重试一次。
+- 无法安全定位的批注改为“需要处理”，不再被普通同步反复重试；支持逐条重试或仅保留本地。
+- 同步诊断区分状态、测试与恢复；修复书籍会明确提示批注同步问题不属于书籍损坏。
+
+## 4.5.0-beta.14 - 2026-08-15
+- 修复部分书籍下载到末尾因脚注图标、模板占位图等稳定孤立引用被误判为正文缺图；真正的远程正文图片缺失仍会阻止覆盖原文件。
+- 最终图片检查改为先清理已知辅助引用、再只重试受影响章节；修复后仍完全相同且无真实缺图记录的本地孤立引用才会安全移除。
+- 下载进度改为只增不减，失败时保留最后进度；修复缺图阶段明确显示检查／修复状态，并修复缺失 `wtref_N` 返回链接导致整章脚注回退的问题。
+- 高亮跨脚注同步改为按原始脚注图片的实际位置建立精确 `[N]` 显示映射，正文自身的 `[数字]` 不再进入脚注兼容候选。
+
+## 4.5.0-beta.13 - 2026-08-15
+- 修复阅读边缘评论防误触偶发不生效；命中保护区时优先翻页，不再同时打开评论。
+- 防误触范围调整为 10% / 15% / 20% / 25% / 30%，新安装默认 15%，旧用户已有 10%–20% 设置保持不变；旧 5% 自动迁移到 10%。
+- 修复跨图片脚注编号的本地高亮无法上传：严格定位失败后，仅对确认为脚注转换产生的 `[N]` 显示编号做安全兼容。
+- 脚注兼容继续执行唯一定位、正文回读与范围校验；上传内容取微信原始正文，不把本地生成的脚注编号写回云端。
+
+## 4.5.0-beta.12 - 2026-08-15
+- 重做蓝牙能力检测：不再依赖不存在的 KOReader 全局控制器，启动时一次性探测可用后端；下滑工具栏只读内存状态，不增加下滑查询。
+- 支持蓝牙的设备自动显示快捷入口；点击直接开启/关闭，长按进入设备列表，可查看已连接/已配对/附近设备并执行连接、断开、配对与扫描。
+- Kindle 使用 Lab126 `com.lab126.btfd` 原生接口；标准 BlueZ 环境（包括可用的 Kobo/Linux）自动接入 `bluetoothctl`，没有可靠后端的设备不显示入口。
+- 修复旧用户自定义下滑栏把蓝牙永久设为隐藏的问题；首次确认支持后自动加入一次，之后仍尊重用户手动开关。
+
+## 4.5.0-beta.11 - 2026-08-15
+- 调整锁屏“画框”视觉参数：由统一 76% 改为宽 84% / 高 86% 的独立限制，继续保持原比例、严格居中与细边框。
+- 竖版书封在画框模式下不再显得过小，保留明显留白，但封面主体更接近完整模式的视觉大小。
+- 仅微调锁屏画框的显示比例，不改动 beta.10 已完成的实时锁屏渲染、高质量封面选择与原生阅读设置链路。
+
+## 4.5.0-beta.10 - 2026-08-15
+- 锁屏封面取消预生成 PNG 与后台预热，休眠时直接使用最高质量原始封面渲染“画框 / 完整 / 铺满”；画框改为 76% 严格居中。
+- 更新封面改为安全替换：新图验证成功且不降清晰度后再替换旧图，并清理主页衍生图与 beta.9 旧锁屏缓存，不触碰 EPUB/KOReader 原生封面。
+- 页边距与渲染模式优先直接调用 KOReader ReaderTypeset 原生模块，觅阅只同步 document.configurable 并回读当前书籍状态。
+- 阅读设置加入短时原生变更保护与诊断日志，避免正常排版变化被生命周期监测误判为异常 Reader 消失。
+
+## 4.5.0-beta.9 - 2026-08-15
+- 修复页边距、渲染模式与字符间距调整只改变当前画面却未同步 KOReader 当前书籍设置的问题，改为完整复用 KOReader 原生设置通道。
+- 页边距增加上下同步状态；连续增减、预设切换与重新打开书籍都以 KOReader 实际值为准。
+- 本地书封面优先使用 KOReader 原生自定义封面/BookInfo 来源，主页缩略图改为等比例完整显示，不再居中裁切。
+- 锁屏新增“画框 / 完整 / 铺满”三种样式，默认画框：封面保持比例、严格居中、最大 84% 并加细边框。
+
+## 4.5.0-beta.8 - 2026-08-14
+- 修复 beta.7 评论字体重复缩放导致字号异常变大，评论字号改为 12–48 连续调节并加入实时预览。
+- 正文字体、字号、字重与行距整合为同页实时预览，支持恢复当前书籍及调用 KOReader 默认设置应用到全部书籍。
+- 阅读刷新设置改为 KOReader 同款完整选项：从不、每页、每 6 页、自定义 1/2/3、每章，并区分普通/夜间刷新值。
+- 字体与评论调节保持页面常驻，单次调整不再关闭菜单；继续保留批注点击展开管理等 beta.7 行为。
+
+## 4.5.0-beta.7 - 2026-08-14
+- 修复自定义界面字体切换后整体字号异常缩小，并让下滑快捷项按实际数量自动铺满。
+- 夜间模式、前光、色温、方向、刷新频率与全屏刷新改为复用 KOReader 原生控制。
+- 阅读记录改为点击后原地展开跳转、修改与删除操作，不再依赖长按管理。
+- 延时截图继续保留，但实际截图与保存改由 KOReader 完成。
+
+## 4.5.0-beta.6 - 2026-08-14
+
+- 修复搜索弹窗把 `highlight` 等内部图标名称直接显示成文字的问题；弹窗图标统一优先使用现有 SVG，异常图标也不会再越界泄漏名称。
+- 新安装默认使用插件模式；已经选择过觅阅桌面或插件模式的用户继续保留原选择，OTA 与重启不会重置运行模式。
+- 主页下滑工具栏扩展为最多八项，默认加入全屏刷新；支持蓝牙控制的 Kindle 显示蓝牙，不支持时由同步等现有快捷项补位；“退出 KOReader”缩短为“退出 KO”。
+- 阅读界面下滑第一栏增加条件蓝牙入口；Wi-Fi SSID 不再提前硬截断，长名称最多显示两行并在必要时省略，避免横向溢出或上下裁字。
+
+## 4.5.0-beta.5 - 2026-08-14
+
+- 搜索入口分为“搜索微信读书 / 搜索我的书籍 / 搜索批注”；主页可搜索未加入书架的微信读书并直接下载，同时支持跨书搜索划线、想法和书签。
+- 完善批注管理：列表点击直接跳到正文，长按可添加/修改想法、仅删除想法、删除划线/书签或整条批注，并继续使用现有同步状态。
+- 修复 TXT 网文章节标题缺少“第X章”的问题，并避免已有章节前缀被重复添加。
+- 修复部分书籍脚注转换后章尾重复显示，未成功转换的原脚注继续保留。
+
+## 4.5.0-beta.4 - 2026-08-14
+
+- 修复 MiuRead 主页角落点击/长按等手势被全屏页面截断，空白区域重新交给 KOReader 已配置手势。
+- 统一四角与左右边缘优先级；评论边缘防误触不再抢占已配置的角落动作。
+- 主页与阅读页下滑栏把“旋转”改为“方向锁定”，支持点击锁定/解锁、长按选择竖屏/横屏/自动旋转。
+- Reader 内部重载使用更长的安全等待并以全屏过渡层遮住主页，避免排版或旋转后短暂跳回主页。
+
+## 4.5.0-beta.3 - 2026-08-14
+
+- 修复熄屏/唤醒后临时暂停状态残留，开屏后下载可继续。
+- 后台下载保持设备唤醒；长时间无进度会释放唤醒锁，避免断网持续耗电。
+- 连续网络失败后停止逐章无效重试，保存断点并等待网络恢复后继续。
+- 网络完全不可用时补充 IPv4 恢复检测；登录失效不再按普通章节失败反复重试。
+
+本文件记录 MiuRead 内测通道的版本变化。尚未发布的内容写入 `Unreleased`；发布后移动到对应版本。
+
+## Unreleased
+
+- 暂无。
+
+## 4.5.0-beta.2 - 2026-08-14
+
+- 修复 阅读同步修复增加唯一任务保护并移除重复回读重试，自动修复与手动操作不再同时启动多轮修复。
+- 同步 `chapterUid + chapterOffset` 一致时直接认定同一阅读位置，不再因整书百分比差异误报；已验证状态可跨重新打开书籍和 KOReader 重启恢复。
+- 稳定 已验证阅读会话锁定当前章节目录基准，忽略短时间内 22/23 章这类目录漂移，避免同一位置被重新换算。
+- 修复 无法可靠恢复的旧批注不再让整本书永久待修复；阅读页统一为一个“检查与修复”入口，真正异常才需要用户处理。
+
+## 4.5.0-beta.1 - 2026-08-14
+
+- 修复 批注坐标验证不再因少量官方摘要不完全一致而整章误判，支持完整/子串证据并由单条闭环结果决定安全上传。
+- 修复 旧书签增加本地文字与上下文锚点恢复；无法可靠定位时继续保留本地，不猜测错误位置。
+- 稳定 旧失败批注升级后自动重新评估，并为可能误判的想法/划线增加独立的同步类型识别。
+- 诊断 鉴权失效会整批停止上传；坐标诊断增加 exact/contained/mismatch 明细，便于定位剩余异常。
+
+## 4.3.0-beta.48 - 2026-08-14
+
+- 回退 完整撤销 beta46 与 beta47 的云端 native `co` 反向解析、原文锚点跳转及相关云端进度重算逻辑。
+- 恢复 云端 → KOReader 读取、比较与跳转恢复为 beta45 的原有实现，不保留新的反向定位或诊断路径。
+- 保留 KOReader → 微信继续使用 beta45 已验证的 raw XHTML UTF-16 native `wr-co` 精确上传。
+- 范围 除版本号与本条 Changelog 外，阅读进度相关运行时代码与 beta45 完全一致。
+
+## 4.3.0-beta.47 - 2026-08-14
+
+- 修复 云端 `progress` 字段可能长期停留在 98/100，beta46 错把它重新当整书位置，现改为优先用 `chapterUid + native co` 逆解原文位置。
+- 精度 云端 native `co` 在后台直接还原为章节 source ratio，再结合完整目录得到可比较的整书百分比；读取失败时才使用章节级兼容回退。
+- 稳定 网页/官方两个来源优先按 `chapterUid + co` 判断是否同一位置，上传回读也优先按 native 坐标确认，不再被陈旧 `pr` 误判。
+- 性能 云端读取阶段生成的原文锚点会直接复用于“使用云端位置”，避免再次下载/解析同一章节。
+
+## 4.3.0-beta.46 - 2026-08-14
+
+- 精度 云端 `chapterOffset` 按与 beta45 相同的原生 `wr-co` 坐标逆解回完整 XHTML 源位置，再定位本地同一句正文。
+- 跳转 云端位置优先使用原文文字锚点直接跳到 KOReader XPointer，不再把 native `co` 当作 `wordCount` 比例。
+- 兼容 原生逆向定位失败、章节不匹配或本地搜索不唯一时自动退回 beta43/45 的百分比跳转，不影响现有上传链路。
+- 性能 原始章节获取与坐标逆解只在主动采用云端位置时进入子进程；正常翻页、后台阅读时间上报不增加扫描。
+
+## 4.3.0-beta.45 - 2026-08-14
+
+- 精度 `co` 改为微信 Web Reader 同源的完整 raw XHTML UTF-16 源坐标，不再把 `wordCount` 当作偏移尺度或上限。
+- 同步 原文锚点确定章节与源位置后直接生成 native `wr-co`；完整 EPUB 的 beta43 逆映射仅继续用于 `pr` 与诊断，native 失败时保留原 fallback。
+- 清理 移除 beta44 云端校准锚点、插值与偏置主逻辑，旧校准缓存不再参与阅读进度上传。
+- 稳定 Native offset 标记贯穿后台阅读上报并升级服务版本；原文解析仍只在上报前子进程执行，正常翻页不增加扫描。
+
+## 4.3.0-beta.44 - 2026-08-13
+
+- 精度 从真实云端位置跳转后自动记录章节内 `source position ↔ chapterOffset` 校准锚点，后续上传可修正剩余页级偏差。
+- 算法 单锚点仅在附近渐进修正 beta43 的逆映射；同章具备两个可靠锚点时使用线性插值，避免全书固定系数误伤其他章节。
+- 安全 校准按书籍 core hash 与 chapterUid 隔离，章节不一致、读者已移动、候选偏移异常时自动放弃校准并继续使用 beta43 基线。
+- 性能 校准只在主动采用云端阅读位置后后台捕获一次，正常翻页与 60 秒阅读上报不增加额外扫描。
+
+## 4.3.0-beta.43 - 2026-08-13
+
+- 精度 阅读进度优先使用 XPointer 对应的连续文档位置，不再用页码比例反推整书坐标。
+- 精度 云端跳转保留小数百分比，去掉整数取整造成的长书位置误差。
+- 协议 阅读上报的 `pr` 改为与微信 Web Reader 一致的向下取整语义，并继续以 `chapterUid + co` 为主坐标。
+- 诊断 增加高精度跳转与坐标来源日志，便于继续确认剩余页级误差。
+
+## 4.3.0-beta.42 - 2026-08-13
+
+- 同步 完整 EPUB 的上传位置改为优先使用“云端 chapterOffset → 本地整书位置”映射的逆运算，减少长书中累积的页数偏差。
+- 精度 微信原始正文锚点继续负责确认当前章节，并保留 source_co 与 inverse_co 双候选日志；章节不一致时自动退回原始正文坐标。
+- 校验 上传后的云端回读优先比较 chapterUid + chapterOffset，不再仅以整书百分比接近作为成功依据。
+- 稳定 单章、范围下载以及本地目录与整书目录不等价时继续使用原有原文定位算法，不强行套用整书逆映射。
+
+## 4.3.0-beta.41 - 2026-08-13
+
+- 修复 旧版已下载 EPUB 的本地章节映射缺失时，自动从书内元数据恢复 chapter_map。
+- 同步 完整目录获取成功后不再因 local_map_empty / local_chapter_missing 阻断进度换算。
+- 兼容 已下载书籍无需重新下载，恢复过程只读取 EPUB 内置元数据，不扫描正文也不联网。
+- 稳定 单章与范围下载仍只把本地章节作为局部映射，整书目录继续通过原有安全链路获取。
+
+## 4.3.0-beta.40 - 2026-08-13
+
+- 修复 阅读进度不会再长期停在“等待章节换算”，缺少完整目录时会后台准备并自动继续。
+- 兼容 完整书与单章书统一通过 chapterUid 映射整书目录，单章也可安全换算整书进度。
+- 同步 首次比对、手动上传与自动上报共用同一位置解析链，优先微信原始正文定位并保留旧算法回退。
+- 稳定 普通同步状态重置不再删除仍有效的章节同步上下文，目录准备失败会显示明确状态而非无限等待。
+
+## 4.3.0-beta.39 - 2026-08-13
+
+- 同步 阅读进度优先通过当前正文锚点匹配微信原始章节，提高本机上传云端的位置精度。
+- 性能 精确定位仅在进度上报前执行，正常翻页不扫描章节正文，上传间隔继续保持 60 秒。
+- 兼容 已下载书籍无需重新下载，原始章节按需获取并缓存，同一章节不会重复请求。
+- 稳定 原始章节定位失败时自动回退现有进度算法，不影响原有阅读进度与阅读时间同步。
+
+## 4.3.0-beta.38 - 2026-08-11
+
+- 性能 轻量模式扩展为全局前台优先策略，后台下载、封面、书籍资料和自动更新会更保守地执行，阅读、下载和同步功能保持完整。
+- 性能 自动检测改为分别判断阅读工具栏、主页面板、打开书籍、返回主页和评论卡顿，避免不同操作互相累计造成误判。
+- 性能 轻量模式下微信书架/本地书库自动检查调整为 30/60 分钟，封面和本地资料缩小处理批次并增加后台间隔。
+- 诊断 新增打开书籍、Reader→主页、主页下滑和阅读下滑的真实耗时记录，用于识别持续性卡顿并建议启用轻量模式。
+
+## 4.3.0-beta.37 - 2026-08-11
+
+- 修复 最近阅读通过跨实例共享 Reader 打开事件更新，0%/100%、不翻页、断网或关闭进度同步时也能正确成为最近阅读。
+- 交互 主页快捷“刷新”改为“更新”；单击更新当前栏目，长按新增刷新整个主页，并保留微信书架、本地书库、最近阅读信息与全屏刷新。
+- 性能 时间改为分钟级顶部局部更新，封面与元数据优先局部更新；主页状态变化以 250 ms 合并并继续避让交互及 Reader 返回保护窗口。
+- 性能 微信书架自动检查采用 10 分钟 TTL，本地书库采用 20 分钟 TTL 且仅空闲时检查；刷新整个主页不会强制联网、扫描或执行墨水屏全刷。
+
+## 4.3.0-beta.36 - 2026-08-11
+
+- 性能 账号状态、书籍详情与章节目录读取改用独立后台网络 worker，慢网络不再占用 UI 主线程。
+- 稳定 同类请求自动去重，新交互会使旧请求失效；切书、进入 Reader、休眠或退出后不会让过期网络结果重新弹出界面。
+- 兼容 章节目录后台读取保留原有登录续期能力，仅在凭据确实更新且仍属同一登录会话时回写，避免跨账号或旧请求污染当前状态。
+- 诊断 新增交互网络任务耗时日志，分别记录网络等待和 UI 回调耗时；不修改下载、同步、封面、最近阅读及休眠主链。
+
+## 4.3.0-beta.35 - 2026-08-11
+
+- 设置 网络补全图书信息恢复为推荐默认开启，并记录用户主动选择；升级只补缺失默认，不再用布局版本整体覆盖已有主页快捷栏配置。
+- 交互 首页“刷新”单击改为立即整屏刷新且不联网、不扫描、不弹提示；长按继续提供当前栏目更新、书架更新、元数据与刷新设置。
+- 修复 “最近阅读”改为优先采用本机真实 Reader 记录，0% 与 100% 书籍也可成为最近阅读，并修正旧时间字段遮蔽新阅读时间的问题。
+- 性能 最近阅读只在 Reader 就绪时写入内存状态，返回主页后沿用现有空闲窗口局部更新 Hero；不增加翻页写盘、常驻轮询或书架全量重建。
+
+## 4.3.0-beta.34 - 2026-08-11
+
+- 修复 Kindle 休眠进入锁屏时若 Reader/FileManager 原生实例已释放，不再跳过锁屏初始化，避免设备进入输入抑制后无法正常唤醒。
+- 稳定 锁屏绘制前提前冻结主页封面、元数据等后台任务，消除后台图片任务与休眠切换同时发生的竞态。
+- 性能 保留 beta.33 的快速 Reader→主页路径，不恢复同步创建隐藏 FileManager；正常返回主页仍无需等待原生底层页面。
+- 诊断 新增休眠锁屏前置保护日志，区分原生 UI 路径与觅阅主页回退路径，便于后续确认设备休眠生命周期。
+
+## 4.3.0-beta.33 - 2026-08-11
+
+- 性能 后台下载仅按 5% 更新当前书籍进度区域，封面与其他书籍不再随下载进度重建；下载期间暂停主页封面与本地元数据美化任务。
+- 修复 稳定本地封面不再重复写入，缩略图失败增加冷却并采用完成后原子替换，减少主页静置自刷、棋盘格与封面闪烁。
+- 修复 Reader 关闭后优先直接恢复已保留的觅阅主页，不再等待或重建隐藏 FileManager，降低返回主页的异常长等待。
+- 同步 阅读时间区分成功、云端未确认与明确失败；连续未确认自动刷新当前书同步上下文，旧时间不重复补传。
+
+## 4.3.0-beta.32 - 2026-08-11
+
+- 网络 下载默认继续自动选择 IPv4/IPv6；连续 4 个有效请求中至少 3 个首次响应超过 3 秒时才进入慢速验证。
+- 网络 慢速验证对同一服务器执行两组自动线路与 IPv4 对照，两组均达到至少快 50% 且快 1 秒才提示切换，减少服务器慢响应造成的误判。
+- 交互 下载设置新增“自动/仅 IPv4”；确认切换后当前任务从下一次请求开始使用 IPv4，已下载章节与断点不重置。
+- 兼容 IPv4 限制仅作用于觅阅下载子进程，不关闭设备 IPv6，也不影响 KOReader 其他联网功能；用户拒绝后本次任务不再重复提示。
+
+## 4.3.0-beta.31 - 2026-08-10
+
+- 修复 用户主动更新最近阅读书籍信息时不再被主页交互保护窗口拦截，网络补全任务可正常启动。
+- 稳定 手动网络元数据任务遇到后台 worker 占用时短暂排队，自动补全仍继续避让主页前台操作。
+- 诊断 增加网络元数据补全结果、来源与缺失字段日志，并区分部分资料未找到与网络任务失败。
+
+## 4.3.0-beta.30 - 2026-08-10
+
+- 同步 阅读进度在上传前优先用当前 XPointer 与章节正文锚点精确换算，减少排版变化造成的位置偏差。
+- 性能 精确定位只在自动上传前或手动同步时执行，翻页路径不新增正文解析，上传间隔仍保持 60 秒。
+- 兼容 无法精确定位时自动退回原有进度算法，关闭书籍与休眠流程继续保持轻量。
+- 修复 单章下载按章节内位置提交阅读进度，避免整书百分比被误作章节比例。
+
+## 4.3.0-beta.29 - 2026-08-10
+
+- 交互 新增“防误触”阅读快捷入口，边缘翻页保护默认开启，左右各 10%，可选择 5%、10%、15% 或 20%。
+- 交互 点击页边划线时优先执行翻页，正文中间区域的划线评论操作保持不变。
+- 界面 阅读快捷第一行改为五项等宽布局，并统一搜索、回到阅读、批注、评论与防误触图标的视觉尺寸和垂直位置。
+
+## 4.3.0-beta.28 - 2026-08-10
+
+- 界面 放大设置列表右侧状态与当前值字体，减少与左侧标题之间过大的字号落差。
+- 界面 扩大右侧状态区域，长状态文字在字号增大后仍保留足够显示空间。
+- 界面 同步调整阅读设置与阅读控制中心的右侧状态字级，统一设置页信息层级。
+- 界面 放大设置列表分页页码，改善电子墨水屏上的辨识度。
+
+## 4.3.0-beta.27 - 2026-08-10
+
+- 修复 Reader 内部重建被误判为用户退出，避免无操作时返回主页并保留同书阅读会话。
+- 修复 自动旋转与尺寸变化重复触发，稳定尺寸后只执行一次 Reader 与主页重建。
+- 修复 长时间待机恢复时直接重排旧窗口层的问题，改为按当前尺寸分阶段恢复。
+- 稳定 加强生命周期任务失效、超时回退与连续重建保护，Suspend 期间不新增计时任务。
+
+## 4.3.0-beta.26 - 2026-08-10
+
+- 修复 后台下载窗口关闭后清除失效引用 再次点击后台下载可重新打开实时进度
+- 修复 下载进度窗口仅在实际显示时刷新 防止隐藏窗口持续刷新留下白色方框
+- 修复 下载窗口被页面切换休眠或其他弹窗关闭时自动转为后台任务 保持任务与界面状态一致
+- 界面 下载进度窗口关闭后重绘原区域 并清理遗留下载窗口 避免电子墨水残影
+
+## 4.3.0-beta.25 - 2026-08-10
+
+- 界面 主页中间快捷栏觅阅设置点击改为标准气泡菜单 长按继续保留扩展功能与快捷项管理
+- 界面 书籍长按气泡移除底部横向分隔线 保留更多书籍操作并以留白和文字层级区分
+- 界面 同类气泡底部操作统一去除多余分隔线并收紧上下间距 减少弹窗底部空白和割裂感
+- 界面 更多书籍操作与返回书籍操作去除装饰性箭头 右上角更多和下滑控制中心保持原有独立逻辑
+
+## 4.3.0-beta.24 - 2026-08-10
+
+- 性能 评论弹窗减少异常保护写入并按具体评论内容复用缓存 同时记录查找解析显示分阶段耗时
+- 性能 本地划线想法快照一次准备目录并复用章节映射 大量批注不再重复构建目录并记录耗时
+- 性能 普通评论同步与更新设置合并空闲保存 关键账号下载会话数据仍保持即时可靠写入
+- 性能 更新清单检查与安装包下载改为子进程后台执行 网络失败不再阻塞主页或阅读界面
+
+## 4.3.0-beta.23 - 2026-08-10
+
+- 性能 返回主页后增加前台保护期 浮层打开及关闭后的操作期间暂停封面元数据与下载恢复
+- 性能 修复阅读返回后主页交互优先回调未恢复的问题 点击与滑动可立即让后台任务让路
+- 性能 已生成封面先用文件状态快速确认 未变化时直接复用 不再重复读取书籍并解码比较封面
+- 诊断 增加返回主页总耗时 FileManager 建立耗时与封面后台任务耗时记录 便于继续定位波动
+
+## 4.3.0-beta.22 - 2026-08-10
+
+- 性能 返回首页先释放页面 再延后安装与下载队列 无任务直接跳过
+- 性能 待安装检查仅在确有任务时重载设置 并记录各阶段耗时
+- 界面 阅读设置页不再默认显示右箭头 阅读同步三项开关行为与状态样式统一
+- 更新 修复 UTF-8 项目符号替换与全角空格匹配 避免更新说明或中文文件键被破坏
+
+## 4.3.0-beta.21 - 2026-08-10
+
+- 交互 修复主页六快捷为刷新搜索下载同步休眠觅阅设置 彻底移除主页前光候选
+- 菜单 右上更多觅阅设置自定义工具维护恢复普通页面 气泡仅用于快捷扩展与书籍操作
+- 书架 点击直读或状态处理 长按统一管理气泡 奇数操作铺满并优化底部操作栏留白
+- 前光 下滑六快捷下保留开关夜间亮度色温直调 改为事件级下拉隔离防误触
+
+## 4.3.0-beta.20 - 2026-08-10
+
+- 交互 主页六快捷点击主操作 长按扩展并保留左移右移更换隐藏
+- 书架 已下载和本地书点击直读 未下载或异常书点击处理 长按统一管理
+- 前光 下滑六快捷下新增前光开关 夜间模式 亮度色温直调和防误触
+- 界面 设置维护确认统一规整气泡 休眠长按加入KOReader和设备电源操作
+
+## 4.3.0-beta.19 - 2026-08-10
+
+- 交互 恢复主页快捷栏点击气泡 长按独立管理气泡 书籍长按保留就地操作
+- 界面 气泡统一为规整圆角与一体式尾巴 不使用手绘装饰
+- 书架 长按书籍优先显示常用操作 其余功能收进更多操作
+- 稳定 气泡关闭后销毁不复用 长按释放不再误触点击
+
+## 4.3.0-beta.18 - 2026-08-10
+
+- 稳定 修复设置 快捷面板和阅读工具栏重复打开后可能退出的问题
+- 性能 阅读时间与状态写入从30秒调整为60秒 减少重复封面处理和后台预热
+- 界面 重排主页Wi-Fi 同步 时间 电池区域 统一阅读快捷栏图标大小与基线
+- 风格 重做觅阅设置为统一列表 移除手绘边框 角标与气泡尾巴
+
+## 4.3.0-beta.17 - 2026-08-10
+
+- 性能 缓存主页和阅读快捷面板 延后同步扫描与封面任务 降低首次下滑和翻页卡顿
+- 交互 恢复更多为完整觅阅菜单 下载点击看状态长按进入管理 快捷设置去重
+- 界面 统一阅读工具栏图标尺寸与基线 主页补充标准无线网络和电池图标
+- 后台 用户操作时暂停书库封面下载等非必要任务 空闲后自动恢复
+
+## 4.3.0-beta.16 - 2026-08-09
+
+- 主页 重整刷新下载同步与觅阅设置 删除重复入口并统一阅读页导航
+- 书库 重做本地书库浏览与自动更新 过滤隐藏文件 自动补全可见书籍封面
+- 同步 汇总进度时间划线想法状态 支持跨书本地批注手动同步
+- 界面 放大觅阅设置字体 支持界面字体选择 统一封面角标并修复地区时区显示
+
+## 4.3.0-beta.15 - 2026-08-09
+
+- 修复 addBookmark 最终请求使用 Base64 UTF8 markText
+- 协议 同步层保留明文仅在 API 写入前编码
+- 章节 优先使用微信读书 chapterIdx 避免本地索引
+- 安全 保留真实 bookVersion 坐标校验和失败待同步
+
+## 4.3.0-beta.14 - 2026-08-09
+
+- 修复 划线上传改用微信读书真实书籍版本
+- 版本 从阅读页状态 书架缓存 书籍信息多路解析
+- 安全 无真实 bookVersion 时保留本地批注并停止错误请求
+- 持久化 下载和书架记录保存真实书籍版本供后续同步
+
+## 4.3.0-beta.13 - 2026-08-09
+
+- 修复划线上传参数兼容并采用网页默认划线样式
+- 批注同步改为独立手动入口并正确统计上传删除
+- 统一阅读下滑工具栏批注图标视觉尺寸
+- 自动批注上传暂不启用等待真机验证
+
+## 4.3.0-beta.12 - 2026-08-09
+
+- 划线 使用原文 markText 修复微信读书 addBookmark 参数
+- 删除 接入批注云端删除并保留失败待办
+- 安全 删除请求不盲重试 网络未知保留状态
+- 同步 旧待同步划线与待删除记录可继续重试
+
+## 4.3.0-beta.11 - 2026-08-09
+
+- 坐标 完整解密 XHTML 作为书签 划线 想法统一 range 基准
+- 修复 段尾选区不再吞入换行与缩进空白
+- 安全 增加双向校验与微信读书官方 range 锚点校验
+- 同步 恢复手动上传 旧坐标已同步记录不自动重传
+
+## 4.3.0-beta.9 - 2026-08-09
+
+- 界面 阅读页新增统一批注入口 书签划线想法不再分散显示
+- 同步 阅读页可直接开启并手动同步当前书全部本地批注
+- 设置 主页仅保留全局开关 手动说明和想法可见范围
+- 整理 阅读控制中心合并批注入口并区分阅读进度同步
+
+## 4.3.0-beta.8 - 2026-08-09
+
+- 界面 修复桌面模式评论与标注未接入批注云同步入口
+- 同步 账号与同步新增本地批注同步快捷入口并明确为手动上传
+- 诊断 增加批注同步初始化 开关和手动触发日志
+- 兼容 插件模式与桌面模式统一使用同一套批注设置菜单
+
+## 4.3.0-beta.7 - 2026-08-09
+
+- 批注 修复本地划线与想法分类并补全上下文定位
+- 坐标 上传统一走 PosMap Bridge 并验证章节与 range
+- 同步 增加相邻章节校验和分阶段失败原因
+- 安全 定位不唯一或校验失败时继续只保留本地
+
+## 4.3.0-beta.6 - 2026-08-09
+
+- 本地批注 支持书签 划线 想法手动云同步
+- 坐标 统一 Range Runes PosMap 定位和校验
+- 同步 支持去重 bookmarkId 保存及书签划线云端删除
+- 安全 失败不误传 网络结果未知不重复提交
+
+## 4.3.0-beta.4 - 2026-08-09
+
+- 阅读 恢复稳定工具栏生命周期 仅缓存轻量状态并增加性能日志
+- 模式 更新和普通重启不再弹出模式提醒 仅首次安装或主动切换后提示
+- 封面 保留高清锁屏与主页缩略图并让后台处理避让阅读操作
+
+## 4.3.0-beta.3 - 2026-08-09
+
+- 阅读 复用工具栏并优先处理前台手势 降低首次下滑与偶发卡顿
+- 封面 增强锁屏清晰度 后台生成主页专用高清缩略图
+- 性能 阅读时间上报避让前台操作 保持原有同步规则
+
+## 4.3.0-beta.2 - 2026-08-09
+
+- 修复: 主页与阅读界面弹窗分页残留和重叠
+- 锁屏: 优先高清封面 按屏幕比例裁切并铺满
+
+## 4.2.0-beta.17 - 2026-08-09
+
+- 同步: 区分未确认与真实故障 普通网络和服务器波动不再反复要求修复
+- 性能: 主页和阅读下滑面板改用缓存状态 减少网络磁盘读取和重复刷新
+- 主页: 恢复用户名账户入口 统一同一本书的主页阅读进度
+
+## 4.2.0-beta.16 - 2026-08-09
+
+- 主页: 重排顶部状态栏 分离电量并以当前Wi-Fi名称显示网络状态
+- 下滑: 六列布局保持不变 统一图标标题副标题高度 修正图标水平对齐
+- 界面: 移除主页顶部账户占位 更多改为明确文字入口
+
+## 4.2.0-beta.15 - 2026-08-09
+
+- 优化: 下滑工具栏恢复六列并放大图标文字 Wi-Fi显示当前网络名
+- 界面: 主页相关入口统一觅阅样式 阅读页顶部和快捷操作放大并优化间距
+- 调整: 加入休眠 系统操作收进工具与维护 保留自定义布局
+
+## 4.2.0-beta.14 - 2026-08-09
+
+- 优化: 下滑工具栏改为三列双行 放大图标与文字 Wi-Fi直接显示当前网络名
+- 调整: 默认加入休眠 退出与重启关机收进工具与维护 并保留自定义布局
+- 阅读: 放大阅读页顶部与快捷操作字体图标 优化首页 Wi-Fi 同步 电量与更多的间距
+
+## 4.2.0-beta.13 - 2026-08-09
+
+- 重做: 阅读下拉工具栏改为秩序横条式 书名 章节与状态分层显示
+- 直达: 搜索 书签 划线 想法 评论 字体 行距 页面均可一级操作
+- 显示: 前光与色温独立调节 新增夜间模式 旋转 截图 全屏刷新
+
+## 4.2.0-beta.12 - 2026-08-09
+
+- 重做: 阅读下拉菜单改为三组轻量入口, 书签划线想法分开
+- 修复: 关闭评论后内部链接不再报错, 书内搜索可正常使用
+- 统一: 阅读同步和诊断改用觅阅界面, 字体设置精简并新增独立行距
+
+## 4.2.0-beta.11 - 2026-08-09
+
+- 新增: 阅读快捷面板加入完整功能入口, 书签, 返回, 页面和设备快捷操作
+- 优化: 顶部面板改为固定布局, 调整间距与图标比例, 取消动态展开和重叠结构
+- 优化: 完整阅读菜单分为阅读, 排版, 书籍和设备, 常用排版不再进入 KOReader 总菜单
+
+## 4.2.0-beta.10 - 2026-08-09
+
+- 新增: 顶部阅读控制中心, 前光和色温直接调节, 评论状态可快速切换
+- 优化: 取消底部菜单和更多分类, 改为五个阅读入口与原地工具展开
+- 修复: 目录打开后自动跟随当前阅读章节, Wi-Fi和返回逻辑同步整理
+
+## 4.2.0-beta.9 - 2026-08-09
+
+- 新增: 阅读评论开关, 前光和色温可在阅读菜单直接调节
+- 优化: 阅读主菜单固定为主页, 目录, 进度, 字体, 评论和更多
+- 优化: 增加 Wi-Fi 等设备快捷操作, 精简更多菜单和重复入口
+
+## 4.2.0-beta.8 - 2026-08-08
+
+- 新增: 检测界面冲突, 并根据当前环境提示切换运行模式
+- 优化: 插件模式彻底隔离桌面主页和阅读界面, 不再加载桌面专属设置
+- 优化: 移除临时桌面入口, 仅在界面环境变化后再次提醒
+
+## 4.2.0-beta.6 - 2026-08-08
+
+- 修复: 阅读时后台下载暂停现在会真正作用到下载进程
+- 优化: 评论窗口首屏优先 后续分页按需生成
+- 新增: 轻量模式和卡顿检测 低内存模式更名为低内存保护
+
+## 4.2.0-beta.5 - 2026-08-08
+
+- 修复: 阅读进度按完整目录和当前章节换算 切书后旧同步状态不会写回
+- 修复: 同步修复增加云端回读确认 未确认的上下文不会保存
+- 优化: 已生成但批注未完整的书可直接修复 仅补缺失内容并保留正文
+
+## 4.2.0-beta.4 - 2026-08-08
+
+- 修复: 修复同步先验证登录并保留原有章节状态 不再提前清空同步上下文
+- 修复: 新章节上下文仅在微信读书确认同步成功后替换旧状态
+- 优化: 增加章节映射诊断并隐藏普通界面的内部错误路径
+
+## 4.2.0-beta.3 - 2026-08-08
+
+- 修复: 单本书同步异常时直接提供修复同步 不再后台反复重试
+- 修复: 特殊章节可按可信章节 ID 建立同步 不再因字数为零直接丢弃
+- 优化: 阅读时间失败不补传 同步异常仅暂停当前书 其他书籍不受影响
+
+## 4.2.0-beta.2 - 2026-08-07
+
+- 修复: 最近阅读刷新同步强制更新当前书籍封面
+- 优化: 新封面立即替换主页书架和锁屏缓存
+- 优化: 已下载书籍无需重新生成文件即可刷新封面
+
+## 4.2.0-beta.1 - 2026-08-07
+
+- 新增: 时间与时区设置 支持常用地区时区和固定 UTC 偏移
+- 优化: 下载进度改为书籍卡片细进度条 已下载和阅读进度取消白框
+- 优化: 提升主页和锁屏封面清晰度 锁屏封面按设备缓存
+
+## 4.1.2-beta.10 - 2026-08-07
+
+- 优化: 下滑工具栏改为六列双排 最多十二项 工具维护独立收纳
+- 新增: 主页快捷自定义和当前书籍元数据手动刷新
+- 优化: 元数据默认开启 仅最近阅读变化时自动补全
+- 修复: Wi-Fi开启时长按换网列表立即关闭
+
+## 4.1.2-beta.9 - 2026-08-07
+
+- 清理: 删除已失效和未调用的旧版兼容代码
+- 优化: 精简已关闭的访问验证和锁定逻辑
+- 优化: 移除无效的后台评论索引维护代码
+- 保持: 旧书恢复 评论读取 下载与阅读功能不变
+
+## 4.1.2-beta.8 - 2026-08-06
+
+- 修复: 已连接时Wi-Fi网络列表打开后立即消失
+- 修复: 切换网络期间主页刷新覆盖网络选择窗口
+- 优化: 网络列表关闭后再刷新主页Wi-Fi状态
+- 保持: Wi-Fi短按开关 长按进入网络列表
+
+## 4.1.2-beta.7 - 2026-08-06
+
+- 修复: 评论字号改为18 22 26 30四档最终值
+- 修复: 评论特大字号仍小于常用正文字号的问题
+- 新增: 主页觅阅设置弹窗增加更新设置入口
+- 修复: 主页Wi-Fi长按无法进入网络列表的问题
+
+## 4.1.2-beta.6 - 2026-08-06
+
+- 修复: 评论与正文统一使用同一字体来源
+- 修复: 评论字号取消重复换算并统一四档大小
+- 调整: 字体排版移除重复评论入口 快捷面板统一为评论显示
+- 新增: 主页 Wi-Fi 长按进入网络列表切换连接
+
+## 4.1.2-beta.5 - 2026-08-06
+
+- 新增: 多页评论加入左右翻页提示
+- 新增: 评论增加中文 符号和 Emoji 字体回退
+- 优化: 连续翻阅六页后清理评论弹窗残影
+- 修复: 部分用户名 评论和箭头中的特殊符号显示异常
+
+## 4.1.2-beta.4 - 2026-08-06
+
+- 新增: 正文与评论之间加入保留左右留白的实线分隔
+- 新增: 不同评论之间加入保留左右留白的虚线分隔
+- 调整: 用户名 点赞数和续页标记改为灰色
+- 优化: 分隔线高度纳入分页计算 避免评论截断和额外留白
+
+## 4.1.2-beta.3 - 2026-08-05
+
+- 新增: 想法弹窗支持上下滑动翻页 保留点击和实体键
+- 调整: 评论字号整体减小一级 现在的小改为标准
+- 优化: 保留评论换行 清理尾部异常空白并显示页码
+- 优化: 复用弹窗和分页结果 翻页只刷新评论区域
+
+## 4.1.2-beta.2 - 2026-08-05
+
+- 新增: 想法 评论和下载断点统一改用 SQLite
+- 迁移: 打开旧书时可立即迁移 稍后处理或不再提示
+- 进度: 大量数据迁移时显示进度 支持停止后继续
+- 优化: 取消外部评论索引 现有书籍无需重新下载
+
+## 4.1.2-beta.1 - 2026-08-05
+
+- 降低划线和想法下载触发频率限制的概率
+- 优先使用 Web 接口并将想法请求改为自适应批次
+- 受限时保留断点并继续生成正文且支持稍后补全
+- 建立独立内测更新通道
+
+## Earlier history
+
+更早的个人测试通道历史仍保留在 Git 历史和旧 tag 中，不在此处重新整理。
