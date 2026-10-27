@@ -57,6 +57,7 @@ SPECS = {
     "start_min": ("HEAVY_DOWNLOAD_START_RATIO", "HEAVY_DOWNLOAD_START_FLOOR_KB", "HEAVY_DOWNLOAD_START_MIN_KB"),
     "resume_min": ("HEAVY_DOWNLOAD_RESUME_RATIO", "HEAVY_DOWNLOAD_RESUME_FLOOR_KB", "HEAVY_DOWNLOAD_RESUME_MIN_KB"),
     "running_min": ("HEAVY_DOWNLOAD_RUNNING_RATIO", "HEAVY_DOWNLOAD_RUNNING_FLOOR_KB", "HEAVY_DOWNLOAD_RUNNING_MIN_KB"),
+    "package_abort": ("HEAVY_PACKAGE_ABORT_RATIO", "HEAVY_PACKAGE_ABORT_FLOOR_KB", "HEAVY_PACKAGE_ABORT_KB"),
     "native_hibernate": ("HEAVY_NATIVE_HIBERNATE_RATIO", "HEAVY_NATIVE_HIBERNATE_FLOOR_KB", "HEAVY_NATIVE_HIBERNATE_KB"),
     "native_critical": ("HEAVY_NATIVE_CRITICAL_RATIO", "HEAVY_NATIVE_CRITICAL_FLOOR_KB", "HEAVY_NATIVE_CRITICAL_KB"),
     "cover_coexist": ("DOWNLOAD_COEXIST_RATIO", "DOWNLOAD_COEXIST_FLOOR_KB", "DOWNLOAD_COVER_COEXIST_MIN_KB"),
@@ -73,18 +74,21 @@ EXPECTED = {
         "native_hibernate": 62915, "native_critical": 36864, "cover_coexist": 65536,
         "typography_hibernate": 52429, "typography_critical": 32768,
         "soft": 65536, "critical": 40960,
+        "package_abort": 26214,
     },
     512 * 1024: {
         "start_min": 98304, "resume_min": 98304, "running_min": 73728,
         "native_hibernate": 98304, "native_critical": 65536, "cover_coexist": 81920,
         "typography_hibernate": 73728, "typography_critical": 49152,
         "soft": 65536, "critical": 41943,
+        "package_abort": 36864,
     },
     1024 * 1024: {
         "start_min": 98304, "resume_min": 98304, "running_min": 73728,
         "native_hibernate": 98304, "native_critical": 65536, "cover_coexist": 81920,
         "typography_hibernate": 73728, "typography_critical": 49152,
         "soft": 125829, "critical": 81920,
+        "package_abort": 36864,
     },
     None: {},  # filled below from caps
 }
@@ -176,6 +180,10 @@ check("Config.TYPOGRAPHY_HIBERNATE_MEMORY_KB" not in main_lua,
       "main.lua no longer consumes the absolute typography hibernate line")
 check("Config.TYPOGRAPHY_CRITICAL_MEMORY_KB" not in main_lua,
       "main.lua no longer consumes the absolute typography critical line")
+downloader = read(PLUGIN / "miuread" / "downloader.lua")
+for needle in ("package aborted by hibernate marker", "package aborted for memory",
+               "__MIUREAD_HIBERNATE__:package", "package_abort"):
+    check(needle in downloader, "downloader.lua package guard contains %s" % needle)
 check("排版重整需要内存" in download_task,
       "download_task.lua differentiates typography hibernate messages")
 

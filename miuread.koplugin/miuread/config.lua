@@ -356,6 +356,14 @@ local C = {
     HEAVY_DOWNLOAD_RESUME_FLOOR_KB = 44 * 1024,
     HEAVY_DOWNLOAD_RUNNING_RATIO = 0.16,
     HEAVY_DOWNLOAD_RUNNING_FLOOR_KB = 36 * 1024,
+    -- Last-resort abort floor for the EPUB package stage. Packaging has no
+    -- checkpoint, so the worker prefers finishing over aborting; on a 256 MiB
+    -- device that pushed free memory to 18 MiB overnight and wedged the whole
+    -- OS right before the install finished. Below this line the package pass
+    -- is discarded (chapters stay checkpointed) and retried in a later window.
+    HEAVY_PACKAGE_ABORT_RATIO = 0.10,
+    HEAVY_PACKAGE_ABORT_FLOOR_KB = 24 * 1024,
+    HEAVY_PACKAGE_ABORT_KB = 36 * 1024,
     HEAVY_NATIVE_HIBERNATE_RATIO = 0.24,
     HEAVY_NATIVE_HIBERNATE_FLOOR_KB = 56 * 1024,
     HEAVY_NATIVE_CRITICAL_RATIO = 0.14,

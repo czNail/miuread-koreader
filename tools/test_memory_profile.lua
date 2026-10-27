@@ -111,5 +111,9 @@ assert(main_lua:find("exit_forced_stop"),"forced-stop exit must park as hibernat
 
 assert(main_lua:find("thresholds().typography_critical"),"typography critical line not scaled")
 assert(main_lua:find("thresholds().typography_hibernate"),"typography hibernate line not scaled")
+local downloader=assert(io.open(root.."/miuread.koplugin/miuread/downloader.lua","rb")):read("*a")
+assert(downloader:find("package aborted by hibernate marker",1,true),"package hibernate-marker guard missing")
+assert(downloader:find("package aborted for memory",1,true),"package memory-floor guard missing")
+assert(downloader:find("__MIUREAD_HIBERNATE__:package",1,true),"package abort sentinel missing")
 assert(main_lua:find("排版重整需要内存",1,true),"typography hibernate message not differentiated")
 print("memory profile contract: PASS")

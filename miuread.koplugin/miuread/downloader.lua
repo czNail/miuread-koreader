@@ -1101,9 +1101,34 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         "chapters=",tostring(#chapters),"assets=",tostring(#assets),
         "memory_kb=",tostring(math.floor(collectgarbage("count"))))
     local now=os.time()
+    -- The package loops never re-enter respect_reader_priority, so a
+    -- hibernate marker written mid-package used to be ignored until install
+    -- finished; on a small-memory device the run continued down to ~18 MiB
+    -- free and wedged the whole OS. Check the marker and a hard memory floor
+    -- here per entry: aborting discards only this package pass (chapters stay
+    -- checkpointed) and the parent parks the task for a later retry window.
+    local RuntimePressureWorker=require("miuread.runtime_pressure")
+    local package_abort_kb=RuntimePressureWorker.thresholds().package_abort
+    local package_guard_count=0
+    local function package_guard()
+        package_guard_count=package_guard_count+1
+        if package_guard_count%16~=0 then return end
+        if type(opt.hibernating)=="function" and opt.hibernating() then
+            logger.warn("[MiuRead][Download] package aborted by hibernate marker")
+            error("__MIUREAD_HIBERNATE__:package")
+        end
+        local memory=RuntimePressureWorker.memory_snapshot(true)
+        local available=memory and tonumber(memory.available_kb or 0) or 0
+        if available>0 and available<package_abort_kb then
+            logger.warn("[MiuRead][Download] package aborted for memory",
+                "memory_kb=",tostring(available),"floor_kb=",tostring(package_abort_kb))
+            error("__MIUREAD_HIBERNATE__:package")
+        end
+    end
     local function package_progress(detail)
         detail=type(detail)=="table" and detail or {}
         ensure_not_cancelled()
+        package_guard()
         local current=math.max(0,tonumber(detail.current) or 0)
         local total=math.max(1,tonumber(detail.total) or 1)
         local phase=tostring(detail.phase or "package")
@@ -1170,6 +1195,7 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
     local validation_last_report_at=0
     validation_options.on_progress=function(detail)
         ensure_not_cancelled()
+        package_guard()
         detail=type(detail)=="table" and detail or {}
         local current=math.max(0,tonumber(detail.current) or 0)
         local total=math.max(1,tonumber(detail.total) or 1)
