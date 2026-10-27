@@ -276,6 +276,7 @@ function DownloadProgress:set_state(state)
         package = "验证并生成 EPUB",
         rate_limit = "等待请求恢复",
         restart = "从断点自动恢复",
+        hibernated = "已安全休眠，稍后自动继续",
         done = "下载完成",
         error = "下载失败",
         cancelled = "下载已取消",

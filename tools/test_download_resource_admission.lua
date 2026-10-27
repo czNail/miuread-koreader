@@ -27,6 +27,8 @@ test('fresh and resumed must require same fork margin',function()
     eq(Admission.check({available_kb=110*1024},config),true)
 end)
 test('defensive maximum when configs diverge',function()
+    -- Standalone fallback path: without the runtime pressure profile (no
+    -- /proc or its dependencies), admission keeps the defensive maximum.
     eq(Admission.minimum({HEAVY_DOWNLOAD_START_MIN_KB=100,HEAVY_DOWNLOAD_RESUME_MIN_KB=200}),200)
 end)
 test('meminfo not present remains compatible',function()

@@ -357,6 +357,8 @@ jobs:
           lua5.1 tools/test_store_repair.lua
           lua5.1 tools/test_cloud_freshness_contract.lua
           lua5.1 tools/test_beta10_translation_dependency_contract.lua
+          lua5.1 tools/test_memory_profile.lua
+          lua5.1 tools/test_download_safety.lua
           luajit tools/test_translation.lua
           luajit tools/test_translation_generation.lua
           luajit tools/test_translation_fetch.lua
