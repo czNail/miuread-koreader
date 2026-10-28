@@ -322,6 +322,11 @@ jobs:
           sudo apt-get install -y lua5.1 luajit
           find miuread.koplugin -type f -name '*.lua' -print0 | xargs -0 -n1 luac5.1 -p
           lua5.1 tools/test_api_transports.lua
+          # Beta.17 contracts must run in the publishing gate as well as locally.
+          lua5.1 tools/test_beta17_transport_cooldown.lua
+          lua5.1 tools/test_beta17_sync_contract.lua
+          lua5.1 tools/test_beta17_worker_and_comments.lua
+          lua5.1 tools/test_beta15_comment_response.lua
           lua5.1 tools/test_diagnostic_log.lua
           lua5.1 tools/test_bookstore.lua
           lua5.1 tools/test_bookstore_ui.lua

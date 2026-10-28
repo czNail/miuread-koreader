@@ -31,7 +31,9 @@ assert(main:find('local authority_conflict=false',1,true),"legacy ambiguous conf
 assert(main:find('reason=="remote_exact_unresolved"',1,true),"false reconciliation fences need targeted release")
 assert(main:find('return true,reason',1,true),"other transaction fences must remain effective")
 assert(main:find('verify_only=true',1,true) and main:find('web_only=true',1,true),"Web-only confirmation missing")
-assert(main:find('remote_newer_pending_local_retained',1,true),"remote-newer fetch must preserve pending")
+assert(main:find('kindle_pending_send_authoritative',1,true),
+ "Kindle-first replay no longer bypasses remote timestamp veto")
+assert(main:find('pending_already_saved=true',1,true),"remote-newer state discarded a saved Kindle position")
 assert(service:find('next_due = now + interval',1,true),"reading interval must never send")
 assert(not service:find('next_due = run_report(control, elapsed, false, "interval")',1,true),"periodic report still active")
 assert(service:find('local drop_time=false',1,true),"unsubmitted time cannot be dropped on retry exhaustion")

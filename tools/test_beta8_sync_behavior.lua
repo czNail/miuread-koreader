@@ -146,5 +146,8 @@ assert(not ok and err=='text_anchor_search_no_match','nil no-hit misclassified a
 assert(not main:find('deferred_until_reading_end',1,true),'redundant low-level upload veto reintroduced')
 assert(not main:find('UIManager:scheduleIn(.08,function() if self.ui and self.ui.document then self:upload_local_progress(false) end end)',1,true),
  'book-open network write reintroduced')
-assert(main:find('remote_newer_pending_local_retained',1,true),'cloud fetch erased pending data')
+assert(main:find('kindle_pending_send_authoritative',1,true),
+ 'Kindle pending position still depends on a fresh cloud-read decision')
+assert(main:find('pending_already_saved=true',1,true) and main:find('_progress_snapshot_current(book_id,position)',1,true),
+ 'authoritative saved upload lost its pending snapshot or generation check')
 print('beta8 sync/time/anchor behavior: PASS')
