@@ -26,12 +26,12 @@ end
 function api:readreviews() return self.answer end
 local ann=Ann:new(api)
 local res=ann:fetch_chapter('book','chapter')
-assert(res.complete==false and #res.pending_ranges==2 and res.thought_count==0,
-    'Empty response must retain pending ranges')
+assert(res.complete and #res.pending_ranges==0 and res.thought_count==0,
+    'Well-formed empty first-page is a completed bounded fetch')
 api.answer={reviews={{range='1-4',pageReviews={}}}}
 res=ann:fetch_chapter('book','chapter')
-assert(res.complete==false and #res.pending_ranges==1 and res.pending_ranges[1]=='5-9',
-    'Partial response must retain only missing range')
+assert(res.complete and #res.pending_ranges==0,
+    'Sparse first-page result must not force endless missing-range retries')
 api.answer={reviews={{range='1-4',pageReviews={}},{range='5-9',
     pageReviews={{review={reviewId='r1',review={content='Nested comment',author={name='reader'}}}}}}}}
 res=ann:fetch_chapter('book','chapter')

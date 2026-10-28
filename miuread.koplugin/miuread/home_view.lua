@@ -1606,7 +1606,38 @@ function HomeWidget:_rebuild()
     if previous and previous ~= children and previous.free then pcall(previous.free, previous) end
 end
 
+-- KOReader may execute delayed Home dirty callbacks after a dialog has
+-- appeared. A lower home widget must never repaint over a foreground modal.
+local function foreground_over_home(home)
+    local stack=UIManager._window_stack or {}
+    local home_index=nil
+    for index,window in ipairs(stack) do
+        if window and window.widget==home then home_index=index;break end
+    end
+    if not home_index then return false end
+    for index=home_index+1,#stack do
+        local widget=stack[index] and stack[index].widget
+        if widget and widget._miuread_modal_surface==true then return true end
+    end
+    return false
+end
+
 function HomeWidget:_mark_dirty(kind, previous_region)
+    if foreground_over_home(self) then
+        -- Keep just one coalesced retry. The live Home layer may continue
+        -- updating data in the meantime; repaint only after dialogs close.
+        if not self._miu_occluded_dirty_task then
+            local task
+            task=function()
+                if self._miu_closed or self._miu_occluded_dirty_task~=task then return end
+                self._miu_occluded_dirty_task=nil
+                self:_mark_dirty("page")
+            end
+            self._miu_occluded_dirty_task=task
+            UIManager:scheduleIn(.35,task)
+        end
+        return
+    end
     local region
     if kind == "section" then region = self.section_dimen
     elseif kind == "header" then region = self.header_dimen
@@ -1637,6 +1668,11 @@ function HomeWidget:_mark_dirty(kind, previous_region)
                 if self._miu_closed or self._section_clean_refresh_task~=task then return end
                 self._section_clean_refresh_task=nil
                 if self._miu_input_suspended==true or self._miu_device_suspended==true then return end
+                if foreground_over_home(self) then
+                    -- Defer the full waveform rather than corrupt the modal.
+                    self:_mark_dirty("page")
+                    return
+                end
                 UIManager:setDirty(self,function() return "full",clean_region end)
                 logger.info("[MiuRead][HomeSwitchPerf] quality cleanup","delay_ms=",tostring(math.floor((tonumber(Config.HOME_SECTION_CLEAN_REFRESH_DELAY) or 2.8)*1000+.5)))
             end
@@ -2077,6 +2113,7 @@ function HomeWidget:onCloseWidget()
     self._dimension_refresh_generation=(tonumber(self._dimension_refresh_generation) or 0)+1
     if self._dimension_refresh_task then UIManager:unschedule(self._dimension_refresh_task); self._dimension_refresh_task=nil end
     if self._section_clean_refresh_task then UIManager:unschedule(self._section_clean_refresh_task); self._section_clean_refresh_task=nil end
+    if self._miu_occluded_dirty_task then UIManager:unschedule(self._miu_occluded_dirty_task); self._miu_occluded_dirty_task=nil end
     self:_clear_inactive_section_cache()
     if live_widget == self then live_widget = nil end
     if self.opts and self.opts.on_close then pcall(self.opts.on_close, self) end

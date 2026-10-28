@@ -827,6 +827,11 @@ function Api:_web_readreviews(id,chapter_uid,batch)
     local last
     local candidates=unique_candidates(chapter_uid)
     if #candidates==0 then error("/web/book/readReviews: invalid chapterUid") end
+    -- chapterUid in POST JSON is number-sensitive on some reader endpoints.
+    -- Try the numeric representation first, while preserving a string fallback
+    -- for nonnumeric chapter IDs and data-specific request errors.
+    local numeric=tonumber(scalar(chapter_uid))
+    if numeric then candidates=unique_candidates(numeric) end
     for _,uid in ipairs(candidates) do
         local options=U.copy(WEB_ANNOTATION_REQUEST_OPTIONS)
         options.headers=annotation_headers(id,uid)
@@ -847,8 +852,29 @@ function Api:_web_readreviews(id,chapter_uid,batch)
     error(last or "web readReviews failed")
 end
 
+-- Independent chapter-level public feed for diagnosing/rescuing zero-result
+-- range responses. This is *not* an exhaustive replacement for readReviews:
+-- the feed normally contains only a subset of public thoughts. Never infer
+-- that an empty chapter feed proves there are no public reviews.
+function Api:chapter_public_reviews(id,chapter_uid)
+    local uid=scalar(chapter_uid)
+    if uid==nil or tostring(uid)=="" then error("invalid chapterUid") end
+    local url="https://weread.qq.com/web/review/list?bookId="
+        ..Protocol.escape(tostring(id or ""))
+        .."&chapterUid="..Protocol.escape(uid)
+        .."&listType=8&maxIdx=0&count=100&listMode=3&synckey=0"
+    local options=U.copy(WEB_ANNOTATION_REQUEST_OPTIONS)
+    options.retries=0 -- one bounded supplemental check, not an endless retry
+    options.headers=annotation_headers(id,uid)
+    return self:_recover_web_once("chapter_public_reviews",function()
+        local value=self.http:get_json(url,options)
+        return unwrap(value)
+    end,true)
+end
+
 function Api:_agent_readreviews(id,chapter_uid,batch)
-    local value=self:_chapter_call("/book/readreviews",id,chapter_uid,
+    local normalized=tonumber(scalar(chapter_uid)) or chapter_uid
+    local value=self:_chapter_call("/book/readreviews",id,normalized,
         {reviews=sanitize(batch or {})},AGENT_ANNOTATION_REQUEST_OPTIONS)
     if type(value)=="table" then value._annotation_source="agent" end
     return value
@@ -865,7 +891,8 @@ local function review_coverage(response,batch)
     end
     for _,item in ipairs(response.reviews) do
         if type(item)=="table" then
-            local key=tostring(item.range or item.markRange or "")
+            local key=tostring(item.range or item.markRange
+                or (type(item.review)=="table" and item.review.range) or "")
             if requested[key] and type(item.pageReviews or item.reviews or item.updated)=="table" then
                 found[key]=true
             end
@@ -886,9 +913,12 @@ local function review_rows(value)
 end
 local function review_items(row)
     if type(row)~="table" then return {} end
-    return type(row.pageReviews)=="table" and row.pageReviews
-        or (type(row.reviews)=="table" and row.reviews
-        or (type(row.updated)=="table" and row.updated or {}))
+    if type(row.pageReviews)=="table" then return row.pageReviews end
+    if type(row.reviews)=="table" then return row.reviews end
+    if type(row.updated)=="table" then return row.updated end
+    -- Some Web responses use a flat entry rather than pageReviews per range.
+    if type(row.review)=="table" or type(row.content)=="string" then return {row} end
+    return {}
 end
 local function review_count(value)
     local count=0
@@ -900,7 +930,8 @@ local function join_review_responses(web,agent,batch)
     for _,item in ipairs(batch or {}) do allowed[tostring(item.range or "")]=true end
     local function merge(source)
         for _,row in ipairs(review_rows(source)) do
-            local key=type(row)=="table" and tostring(row.range or row.markRange or "") or ""
+            local key=type(row)=="table" and tostring(row.range or row.markRange
+                or (type(row.review)=="table" and row.review.range) or "") or ""
             if allowed[key] and type(row)=="table" then
                 local incoming=review_items(row)
                 local target=by_range[key]
@@ -925,18 +956,28 @@ local function join_review_responses(web,agent,batch)
                     end
                 end
                 target._miu_sources[#target._miu_sources+1]=source._annotation_source or "unknown"
-                -- Explicit total=0 is only authoritative when both responses agree.
+                -- A zero is authoritative only if both independent sources
+                -- explicitly state zero; missing totals are NOT zero.
                 local total=tonumber(row.totalCount or row.total or row.reviewCount)
-                if total~=nil then target._miu_total=math.max(total,tonumber(target._miu_total or 0) or 0) end
+                local origin=source==web and "web" or "agent"
+                target._miu_totals=target._miu_totals or {}
+                target._miu_totals[origin]=total
+                if total~=nil then
+                    target._miu_total=math.max(total,tonumber(target._miu_total or 0) or 0)
+                end
             end
         end
     end
     merge(web);merge(agent)
     local uncertain={}
     for _,item in ipairs(sequence) do
-        if item._miu_total==nil and #item.pageReviews==0 then uncertain[item.range]=true end
-        if item._miu_total~=nil and #item.pageReviews<item._miu_total then uncertain[item.range]=true end
+        local totals=item._miu_totals or {}
+        local both_zero=totals.web==0 and totals.agent==0
+        if #item.pageReviews==0 and not both_zero then uncertain[item.range]=true end
+        -- Only the first page (count=30) is requested. Remaining history is
+        -- intentionally best-effort and cannot be classified as a failure.
         item._miu_seen=nil
+        item._miu_totals=nil
     end
     return {reviews=sequence,_annotation_source="merged",_miu_uncertain_ranges=uncertain}
 end
@@ -946,10 +987,11 @@ local function mark_unverified_single_source(response)
     local uncertain={}
     for _,row in ipairs(review_rows(response)) do
         if type(row)=="table" then
-            local key=tostring(row.range or row.markRange or "")
+            local key=tostring(row.range or row.markRange
+                or (type(row.review)=="table" and row.review.range) or "")
             local n=#review_items(row)
             local expected=tonumber(row.totalCount or row.reviewCount or row.total)
-            if key~="" and (n==0 and expected~=0 or expected and expected>n) then
+            if key~="" and n==0 then
                 uncertain[key]=true
             end
         end
@@ -998,7 +1040,8 @@ function Api:readreviews(id, chapter_uid, batch)
             if entries==0 or (declared>0 and entries<declared) then
                 local uncertain={}
                 for _,row in ipairs(review_rows(value)) do
-                    local key=tostring(row.range or row.markRange or "")
+                    local key=tostring(row.range or row.markRange
+                or (type(row.review)=="table" and row.review.range) or "")
                     local n=#review_items(row)
                     local expected=tonumber(row.totalCount or row.reviewCount or row.total)
                     if key~="" and (n==0 or (expected and expected>n)) then uncertain[key]=true end

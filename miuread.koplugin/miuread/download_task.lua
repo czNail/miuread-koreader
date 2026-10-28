@@ -2268,13 +2268,16 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
     local task_token = stamp .. "-" .. tostring(math.random(100000,999999))
     local clean_book = serializable_copy(book)
     local clean_options = serializable_copy(options or {})
-    -- B4 single-edition gate. Attached pre-upgrade workers continue independently
-    -- and are not rewritten while they own an existing partial checkpoint.
-    clean_options.annotations=false
-    clean_options.annotation_requested=nil
-    clean_options.annotation_pending=nil
-    clean_options.annotation_fallback=nil
-    clean_options.annotation_only=nil
+    -- beta.19: keep the user's explicit clean-vs-notes edition choice when
+    -- handing off to the worker. Never silently convert an annotated EPUB
+    -- request into a clean one (this was the remaining B4 admission gate).
+    clean_options.annotations=clean_options.annotations==true
+    if not clean_options.annotations then
+        clean_options.annotation_requested=nil
+        clean_options.annotation_pending=nil
+        clean_options.annotation_fallback=nil
+        clean_options.annotation_only=nil
+    end
     clean_options._stall_restart_count=math.max(0,tonumber(clean_options._stall_restart_count) or 0)
     clean_options.download_run_id=tostring(clean_options.download_run_id or task_token)
     clean_options.reader_active_path="/tmp/miuread-reader-active.flag"

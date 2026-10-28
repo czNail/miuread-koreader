@@ -52,7 +52,22 @@ ok('local_coordinate_unresolved=true' in main,'unresolved state included in fail
 ok('can_clear_stale=replayable~=true and not (anchor_only and saved_anchor~=nil)' in main,'recoverable anchors not stale')
 ok('text="恢复精确位置"' in main,'manual anchor recovery action')
 ok('lightweight service exited after requested stop' in sync,'ReadReport requested stop is informational')
-ok('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)' in worker,'ReadReport fresh GET cloud guard retained')
+# Beta.17 intentionally replaced the mandatory fresh-Web GET for reading-time
+# uploads with an exact, validated Kindle-native position.  This check must
+# validate the new guard rather than require an obsolete source line.
+time_start = worker.find("    if reading_time_compat then\n")
+time_end = worker.find("    local accepted, result", time_start + 1) if time_start >= 0 else -1
+time_branch = worker[time_start:time_end] if time_start >= 0 and time_end > time_start else ""
+ok(bool(time_branch)
+   and 'estimate_position(book,progress_ratio)' in time_branch
+   and 'local_position.native_offset==true' in time_branch
+   and 'tostring(local_position.offset_basis or "")=="wr_data_co"' in time_branch
+   and 'validate_terminal_progress(book,local_position)' in time_branch
+   and 'position_override.source="kindle_native_time_guard"' in time_branch
+   and 'request_dispatched=false' in time_branch
+   and 'refresh_remote_anchor(client, book_id, book)' not in time_branch
+   and 'protocol_time_only, position_override' in worker[time_end:time_end+260],
+   'ReadReport Kindle-native time guard retained without mandatory Web GET')
 ok('remote_wire_anchor' in sync,'remote wire anchor retained')
 ok('POSITION_CLOCK_SKEW_GRACE_SECONDS = 30' in config,'30s clock skew guard retained')
 ok('lua5.1 tools/test_591_beta1_progress_recovery.lua' in workflow,'new recovery contract in release workflow')

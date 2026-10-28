@@ -2454,6 +2454,31 @@ function Store:save_session(id,patch,flush_now)
     -- recursing into a diagnostic source graph.
     compact_session_row(current,keep_chapters)
     compact_session_row(incoming,keep_chapters)
+    -- An old detached worker must not recreate a task the user deliberately
+    -- abandoned. Only a *new* reading event with a later sequence and the
+    -- current epoch may create another pending position for this book.
+    local abandoned=tonumber(current.progress_abandoned_sequence or 0) or 0
+    if abandoned>0 then
+        local task=type(incoming.pending_progress)=="table" and incoming.pending_progress
+            or type(incoming.pending_progress_coordinate)=="table" and incoming.pending_progress_coordinate
+            or type(incoming.pending_unresolved_position)=="table" and incoming.pending_unresolved_position
+        local task_seq=tonumber(task and task.progress_sequence or incoming.progress_latest_sequence or 0) or 0
+        local task_epoch=tonumber(task and task.progress_epoch or incoming.progress_epoch or 0) or 0
+        local current_epoch=math.max(1,tonumber(current.progress_epoch or 1) or 1)
+        local stale=(task~=nil or incoming.progress_epoch~=nil)
+            and (task_seq<=abandoned or (task_epoch>0 and task_epoch<current_epoch))
+        if stale then
+            for _,field in ipairs({
+                "pending_progress","pending_progress_coordinate","pending_unresolved_position",
+                "progress_epoch","progress_sync_state","progress_upload_state",
+                "progress_submission_phase","progress_upload_error","progress_upload_pending_at",
+                "progress_latest_sequence","progress_resolution_choice","progress_resolution_at",
+                "progress_upload_submitted_at","progress_worker_active",
+            }) do incoming[field]=nil end
+            logger.info("[MiuRead][ProgressAbandon] old callback ignored","book=",k,
+                "sequence=",task_seq,"abandoned=",abandoned)
+        end
+    end
     a[k]=U.merge(current,incoming)
     local _,removed=compact_session_row(a[k],keep_chapters)
     if removed>0 then
@@ -2501,6 +2526,50 @@ function Store:reset_progress_sync_state(id,reason,flush_now)
         "reason=",tostring(reason or "manual_progress_sync_reset"))
     return books,fields
 end
+-- Explicitly discard only a saved progress upload task. This is not a
+-- progress reset: the Kindle reading position, cloud observations, reading-time
+-- debt, annotations and bookmarks must survive untouched.
+function Store:abandon_pending_progress(id,expected_epoch,expected_sequence)
+    local key=tostring(id or "")
+    if key=="" then return false,"book_missing" end
+    local sessions=self:get("sessions",{}) or {}
+    local row=type(sessions[key])=="table" and U.copy(sessions[key]) or nil
+    if not row then return false,"session_missing" end
+    local epoch=math.max(1,tonumber(row.progress_epoch or 1) or 1)
+    if expected_epoch and tonumber(expected_epoch)~=epoch then return false,"task_superseded" end
+    local pending=type(row.pending_progress)=="table" and row.pending_progress
+        or type(row.pending_progress_coordinate)=="table" and row.pending_progress_coordinate
+        or type(row.pending_unresolved_position)=="table" and row.pending_unresolved_position
+    if not pending then return false,"already_resolved" end
+    local sequence=tonumber(pending.progress_sequence or 0) or 0
+    if expected_sequence and tonumber(expected_sequence)~=sequence then return false,"task_superseded" end
+    -- Advance the epoch *before* removing the task. Existing detached progress
+    -- callbacks check this generation and cannot recreate the discarded row.
+    row.progress_epoch=epoch+1
+    for _,field in ipairs({
+        "pending_progress","pending_progress_coordinate","pending_unresolved_position",
+        "progress_upload_error","progress_upload_pending_at","progress_upload_submitted_at",
+        "progress_upload_chapter_uid","progress_upload_co","progress_upload_remote_co",
+        "progress_write_blocked","progress_write_block_reason","progress_write_blocked_at",
+        "progress_last_verify_reason","progress_last_verify_at",
+    }) do row[field]=nil end
+    row.progress_upload_state=false
+    row.progress_submission_phase=false
+    row.progress_resubmit_allowed=false
+    row.progress_worker_active=false
+    row.progress_sync_state="abandoned"
+    row.progress_sync_message="已放弃旧的上传任务；当前 Kindle 阅读位置仍保留"
+    row.progress_state_reset_at=os.time()
+    row.progress_state_reset_reason="user_abandoned_progress_upload"
+    row.progress_abandoned_sequence=sequence
+    sessions[key]=row
+    self.db:saveSetting("sessions",sessions)
+    local saved,err=self:flush("abandon_progress:"..key)
+    if saved==false then return false,err or "save_failed" end
+    logger.info("[MiuRead][ProgressAbandon] saved","book=",key,"sequence=",sequence,"epoch=",row.progress_epoch)
+    return true
+end
+
 function Store:clear_session(id) local a=self:get("sessions",{}); a[tostring(id)]=nil; self:set("sessions",a) end
 function Store:shelf_cache() return U.merge(defaults.shelf_cache,self:get("shelf_cache",{})) end
 function Store:save_shelf_cache(v) return self:set("shelf_cache",U.merge(defaults.shelf_cache,v or {})) end

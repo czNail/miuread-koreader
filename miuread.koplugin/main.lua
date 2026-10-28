@@ -626,6 +626,9 @@ local function install_home_screensaver_patch()
 end
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
 local RUNTIME_MODE_KEY="__MIUREAD_RUNTIME_MODE"
+-- The variant menu is declared above the download executor. Forward-declare
+-- its shared options normalizer so Lua does not resolve it as a nil global.
+local b4_content_only_options
 local Plugin=WidgetContainer:extend{name="miuread",is_doc_only=false,version=Config.VERSION}
 
 function Plugin:_reader_session_kind()
@@ -8951,25 +8954,25 @@ function Plugin:_home_variant_download_action(target,annotations,context)
 
     if task and task.status=="active" then
         local percent=self:_download_percent(task.state)
-        label="正文下载中（"..tostring(percent).."%）"
+        label=(annotations and "带评论版" or "正文").."下载中（"..tostring(percent).."%）"
         detail="点击查看当前下载进度"
         callback=function() self:show_downloads() end
     elseif installed then
         -- A readable local copy stays simply "已下载" even if a previous
         -- re-download left a recoverable checkpoint. The shelf menu describes
         -- what is usable now, not an update lifecycle.
-        label="正文已下载"
-        detail="打开、重新下载或查看本机正文"
-        callback=function() BookLocalFilesDialog.open_variant(self,book_id,"clean") end
+        label=annotations and "带评论版已下载" or "正文已下载"
+        detail=annotations and "打开或管理带评论的本机版本" or "打开、重新下载或查看本机正文"
+        callback=function() BookLocalFilesDialog.open_variant(self,book_id,annotations and "notes" or "clean") end
     elseif task or repair then
-        label="继续下载正文"
+        label=annotations and "继续下载带评论版" or "继续下载正文"
         detail="上次任务未完成，点击继续"
         local options=b4_content_only_options((task and task.options) or (repair and repair.options))
         callback=function() self:choose_download_mode(target,options,false) end
     else
-        label="下载正文"
-        detail="只下载正文，评论在阅读时按需获取"
-        callback=function() self:choose_download_mode(target,{annotations=false},false) end
+        label=annotations and "下载正文与公开想法" or "下载正文"
+        detail=annotations and "另存带评论 EPUB，本机纯正文版不受影响" or "只下载正文，评论在阅读时按需获取"
+        callback=function() self:choose_download_mode(target,{annotations=annotations==true},false) end
     end
 
     return {
@@ -10012,12 +10015,15 @@ function Plugin:_home_hold_book(book,anchor)
         actions[#actions+1]={icon="book",label="阅读",detail="打开最近使用的本地版本",callback=function() self:_home_open_book(target,nil,nil,true) end}
     end
 
-    -- Single clean-EPUB download action. Existing notes editions remain accessible
-    -- through 本机文件; legacy unfinished notes caches are never reused as clean.
+    -- Main actions follow local availability. Keep an explicit separate
+    -- notes edition within More, never overwrite the clean EPUB silently.
     local download_state=self:_download_state()
     local repairs=id~="" and (BookIntegrity.partial_repairs(self.store,id) or {}) or {}
     local clean_context=self:_home_variant_download_context(id,false,download_state,repairs)
-    actions[#actions+1]=self:_home_variant_download_action(target,false,clean_context)
+    local notes_context=self:_home_variant_download_context(id,true,download_state,repairs)
+    if not available then
+        actions[#actions+1]=self:_home_variant_download_action(target,false,clean_context)
+    end
 
     local same_download=tostring(download_state.book_id or download_state.bookId or "")==id
     local task_options=same_download and self:_home_download_task_options(download_state) or nil
@@ -10033,7 +10039,9 @@ function Plugin:_home_hold_book(book,anchor)
         local downloaded_chapters=tonumber(local_summary.downloaded_chapter_count or local_summary.chapter_count or 0) or 0
         chapter_label="按章节下载（已下载 "..tostring(downloaded_chapters).." 章）"
     end
-    actions[#actions+1]={icon="▤",label=chapter_label,detail=chapter_detail,callback=chapter_callback}
+    if not available then
+        actions[#actions+1]={icon="▤",label=chapter_label,detail=chapter_detail,callback=chapter_callback}
+    end
     if local_summary.has_local==true then
         actions[#actions+1]={icon="▤",label="本机文件",detail="查看或删除已下载内容",callback=function()
             BookLocalFilesDialog.open_generated(self,id)
@@ -10048,9 +10056,20 @@ function Plugin:_home_hold_book(book,anchor)
         end
     end
     local finished_action=self:_finished_status_action(target)
-    if finished_action then
-        actions[#actions+1]={icon="✓",label=finished_action.text,detail=finished_action.post_text,callback=finished_action.callback}
+    -- Less clutter on downloaded books; keep advanced actions available.
+    local more_actions={self:_home_variant_download_action(target,true,notes_context)}
+    if available then
+        more_actions[#more_actions+1]={icon="▤",label=chapter_label,detail=chapter_detail,callback=chapter_callback}
+        more_actions[#more_actions+1]=self:_home_variant_download_action(target,false,clean_context)
     end
+    if finished_action then
+        more_actions[#more_actions+1]={icon="✓",label=finished_action.text,detail=finished_action.post_text,callback=finished_action.callback}
+    end
+    actions[#actions+1]={icon="⚙",label="更多操作",detail="带评论下载、章节管理和阅读状态",callback=function()
+        ActionSheet.show{anchor=anchor,preferred_direction="above",width_ratio=.72,
+            title="更多操作 · "..tostring(target.title or "书籍"),
+            actions=more_actions,wide_last=(#more_actions%2==1)}
+    end}
     ActionSheet.show{
         anchor=anchor,
         preferred_direction="above",
@@ -10074,8 +10093,17 @@ function Plugin:_home_action_entries()
 
     local sync_summary=self:_home_sync_summary()
     local sync_badge=nil
-    if sync_summary.failed>0 then sync_badge="!"
-    elseif sync_summary.total>0 then sync_badge=sync_summary.total>99 and "99+" or tostring(sync_summary.total) end
+    local hide_progress_badge=self.store:preferences().hide_progress_sync_badge==true
+    local shown_failed=math.max(0,tonumber(sync_summary.failed or 0) or 0)
+    local shown_total=math.max(0,tonumber(sync_summary.total or 0) or 0)
+    if hide_progress_badge then
+        -- Hide only the user's abandoned/failed progress alerts. A genuine
+        -- annotation failure must still be visible on the shared Sync icon.
+        shown_failed=math.max(0,shown_failed-(tonumber(sync_summary.progress_failed or 0) or 0))
+        shown_total=math.max(0,shown_total-(tonumber(sync_summary.progress or 0) or 0))
+    end
+    if shown_failed>0 then sync_badge="!"
+    elseif shown_total>0 then sync_badge=shown_total>99 and "99+" or tostring(shown_total) end
 
     local function hold_for(key,label)
         return function(anchor)
@@ -14420,10 +14448,10 @@ function Plugin:_reader_comment_status_label(scope)
     if not status.has_cache then
         return status.status=="error" and "上次获取失败 · 尚无缓存" or "尚未获取"
     end
-    if status.status=="error" then return "更新失败 · 本地保留 "..tostring(status.comments).." 条" end
-    if status.status=="partial" then return "部分缓存 · "..tostring(status.comments).." 条" end
-    if status.status=="empty" then return "本次接口返回 0 条" end
-    return "本地已保存 "..tostring(status.comments).." 条"
+    if status.status=="error" and status.has_cache then return "本地评论可用" end
+    if status.status=="partial" then return "已有本地评论，可继续更新" end
+    if status.status=="empty" then return "暂无公开评论" end
+    return "本地评论可用"
 end
 
 function Plugin:_show_current_chapter_comments(scope,back_callback)
@@ -14434,7 +14462,9 @@ function Plugin:_show_current_chapter_comments(scope,back_callback)
     end
     local groups,err=self.comment_sync:load(scope.book_id,scope.chapter_uid)
     if type(groups)~="table" then
-        self:info("本章还没有可读取的评论缓存。"..(err and ("\n"..tostring(err)) or ""))
+        logger.warn("[MiuRead][Comments] cached read unavailable", "book=",scope.book_id,
+            "chapter=",scope.chapter_uid,"reason=",U.first_line(tostring(err or "cache_missing"),90))
+        self:info("本章评论暂时无法读取，请稍后重试。")
         return false
     end
     local items={}
@@ -14463,11 +14493,11 @@ function Plugin:_show_current_chapter_comments(scope,back_callback)
         end
     end
     if #items==0 then
-        self:info("本章评论缓存为空。\n已获取的空结果也会持久保存，不会自动联网重试。")
+        self:toast("本章暂无可显示的评论",2)
         return true
     end
     return ReaderListDialog.show{
-        title="本章已缓存评论",subtitle=tostring(#items).." 条 · 本地离线数据",
+        title="本章评论",subtitle="本地已保存的公开想法",
         items=items,page_size=6,
         on_back=back_callback or function() self:_show_reader_comment_center() end,
         on_home=function() return self:_reader_home_action("comment cache") end,
@@ -14488,18 +14518,23 @@ function Plugin:_fetch_current_chapter_comments(force,return_to_comments)
     self:online("获取本章公开评论",function()
         local result,err=self.comment_sync:fetch(scope.book_id,scope.chapter_uid,{force=force==true})
         if not result then
-            self:info("本章评论获取失败，已有评论不会删除：\n"..U.first_line(err,180))
+            local saved=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+            if saved.has_cache and (tonumber(saved.comments) or 0)>0 then
+                UIManager:scheduleIn(.12,function() self:_show_current_chapter_comments(scope,return_to_comments) end)
+            else
+                self:toast("评论暂时无法获取，请检查网络或登录",3)
+            end
             return
         end
-        if result.partial then
-            self:info("本次评论获取未完成，已保存成功返回的数据。\n可稍后点击“继续获取本章评论”。"..
-                (result.error~="" and ("\n"..U.first_line(result.error,160)) or ""))
-        else
-            local label=result.cached and "已读取本地评论" or "本章评论已保存到本地"
-            self:toast(label.." · "..tostring(result.comments or 0).." 条",2)
+        -- Public thoughts are opportunistic; a partial batch does not merit
+        -- a warning dialog and must not hide successfully saved comments.
+        local latest=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+        if latest.has_cache and (tonumber(latest.comments) or 0)>0 then
             UIManager:scheduleIn(.12,function()
                 self:_show_current_chapter_comments(scope,return_to_comments)
             end)
+        elseif latest.status=="error" or (not result.cached and result.error_kind=="authentication") then
+            self:toast("评论暂时无法获取，请检查登录和网络",3)
         end
         -- Cached rows are now projected onto the open EPUB without rewriting it.
         UIManager:scheduleIn(.16,function() self:_refresh_current_comment_overlay(true) end)
@@ -19313,15 +19348,18 @@ function Plugin:_download_preflight(callback)
     return check_battery()
 end
 
--- B4: all *new* download jobs generate a clean EPUB. Legacy notes EPUBs
--- remain readable; their records and active workers are never rewritten in place.
-local function b4_content_only_options(options)
+-- Preserve explicit edition choice. Clean EPUB is still the default, while
+-- the existing notes downloader remains available as a separate edition.
+-- Historical queued/repaired jobs keep their selected annotations setting.
+b4_content_only_options=function(options)
     local result=U.copy(type(options)=="table" and options or {})
-    result.annotations=false
-    result.annotation_requested=nil
-    result.annotation_pending=nil
-    result.annotation_fallback=nil
-    result.annotation_only=nil
+    result.annotations=result.annotations==true
+    if not result.annotations then
+        result.annotation_requested=nil
+        result.annotation_pending=nil
+        result.annotation_fallback=nil
+        result.annotation_only=nil
+    end
     return result
 end
 
@@ -20416,7 +20454,7 @@ end
 
 function Plugin:_download_job_key(book,opt)
     opt=opt or {}
-    local kind="clean" -- new jobs have only one edition identity
+    local kind=opt.annotations==true and "notes" or "clean"
     return table.concat({
         tostring(book and book.bookId or ""),kind,tostring(opt.chapter_uid or "full"),
         tostring(opt.limit or "all"),tostring(opt.range_start_index or ""),
@@ -20661,8 +20699,8 @@ function Plugin:show_waiting_downloads()
 end
 
 function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
-    -- Also enforce the policy at the executor boundary: repaired, queued and
-    -- historical menu callbacks may still carry annotations=true.
+    -- Normalize the edition flag at the executor boundary. Existing queued
+    -- notes jobs are allowed, while unspecified jobs default to clean.
     opt=b4_content_only_options(opt)
     local is_prefetch=opt.prefetch==true
     if is_prefetch then
@@ -23387,6 +23425,10 @@ function Plugin:_home_sync_status_label_from_summary(summary)
     local active=tonumber(summary.progress_active or 0) or 0
     if self.annotation_async and self.annotation_async:busy() then active=active+1 end
     local failed=tonumber(summary.failed_total or 0) or 0
+    if self.store:preferences().hide_progress_sync_badge==true then
+        active=math.max(0,active-(tonumber(summary.progress_active or 0) or 0))
+        failed=math.max(0,failed-(tonumber(summary.progress or 0) or 0))
+    end
     if active>0 then return "同步中 "..tostring(active) end
     if failed>0 then return "同步失败 "..tostring(failed) end
     if summary.checking==true then return "同步检查中" end
@@ -23495,6 +23537,8 @@ function Plugin:_progress_sync_issue_items()
                     and tonumber(pending_progress.canonical_offset or pending_progress.chapter_offset or pending_progress.offset)~=nil
                 items[#items+1]={
                     book_id=tostring(id),title=title,state=state,
+                    progress_epoch=tonumber(session.progress_epoch or 1) or 1,
+                    pending_sequence=tonumber((pending_progress or pending_coordinate or pending_unresolved or {}).progress_sequence or 0) or 0,
                     state_label=coordinate_only and "正在换算整书位置"
                         or (anchor_only and (saved_anchor and "正在恢复精确位置" or "需要重新打开本书确认")
                         or (authority_conflict and "需要选择本机或云端"
@@ -24289,6 +24333,31 @@ function Plugin:_force_local_progress_issue(item,callback)
     return started~=false
 end
 
+function Plugin:_abandon_progress_issue(item)
+    local id=tostring(item and item.book_id or "")
+    if id=="" then return false end
+    local session=(self:_persisted_sessions()[id]) or self.store:session(id) or {}
+    if item.progress_epoch and tonumber(item.progress_epoch)~=(tonumber(session.progress_epoch or 1) or 1) then
+        return false,"task_superseded"
+    end
+    local pending=type(session.pending_progress)=="table" and session.pending_progress
+        or type(session.pending_progress_coordinate)=="table" and session.pending_progress_coordinate
+        or type(session.pending_unresolved_position)=="table" and session.pending_unresolved_position
+    if not pending then return false,"already_resolved" end
+    if item.pending_sequence and tonumber(item.pending_sequence)~=(tonumber(pending.progress_sequence or 0) or 0) then
+        return false,"task_superseded"
+    end
+    local ok,err=self.store:abandon_pending_progress(id,
+        tonumber(session.progress_epoch or 1) or 1,
+        tonumber(pending.progress_sequence or 0) or 0)
+    if ok then
+        self:_clear_progress_write_fence(id,"manual_progress_abandon")
+        self:_refresh_progress_issue_surfaces()
+        self:_invalidate_home_sync_status()
+    end
+    return ok,err
+end
+
 function Plugin:_show_progress_sync_issue_detail(item)
     item=type(item)=="table" and item or {}
     local latest
@@ -24385,8 +24454,14 @@ function Plugin:_show_progress_sync_issue_detail(item)
             end)
         end}
     end
-    -- No destructive manual choice for ordinary sync recovery.  Cloud-newer
-    -- pending rows are automatically retired only after a verified local jump.
+    rows[#rows+1]={text="放弃此条上传记录",post_text="仅清除上传任务，不删除本机阅读进度与阅读时间",callback=function()
+        UIManager:show(ConfirmBox:new{text="放弃这条阅读进度上传任务？\n\n只清除这次待上传记录，保留 Kindle 阅读位置、阅读时长、批注与评论。已发出的云端请求可能仍在处理。继续阅读后会生成新任务。",
+            ok_callback=function()
+                local ok,err=self:_abandon_progress_issue(item)
+                if ok then self:toast("已放弃这条上传记录",2)
+                else self:toast(err=="task_superseded" and "记录已更新，请重新打开列表" or "记录已处理或暂时无法清除",3) end
+            end})
+    end}
     if item.can_clear_stale then
         rows[#rows+1]={text="位置记录尚不完整",post_text="重新打开本书后自动尝试恢复",enabled=false,readonly_label=true}
     end
@@ -24397,8 +24472,9 @@ end
 function Plugin:show_progress_sync_issues()
     self:_clear_verified_progress_ghosts()
     local items=self:_progress_sync_issue_items()
-    if #items==0 then self:toast("当前没有进度同步失败",2); return true end
     local rows={}
+    -- Keep reminder preferences accessible even when all failed tasks have
+    -- been dismissed; otherwise the "hide" switch could never be undone.
     rows[#rows+1]={text="全部重新同步",post_text=tostring(#items).." 本 · 与主页同步使用同一恢复流程",
         callback=function() self:_sync_home_pending({source="progress_issues"}) end}
     local verify_count=0
@@ -24407,6 +24483,26 @@ function Plugin:show_progress_sync_issues()
         rows[#rows+1]={text="重新处理进度同步失败",post_text=tostring(verify_count).." 本 · 只读取云端，不重复上传",
             callback=function() self:_retry_all_saved_progress_verifications(items) end}
     end
+    local is_hidden=self.store:preferences().hide_progress_sync_badge==true
+    rows[#rows+1]={text=is_hidden and "显示首页同步提醒" or "隐藏首页同步提醒",
+        post_text="只影响首页数字和感叹号，不清除任务",callback=function()
+            local prefs=self.store:preferences()
+            prefs.hide_progress_sync_badge=not (prefs.hide_progress_sync_badge==true)
+            self.store:save_preferences(prefs)
+            self:_invalidate_home_sync_status()
+            self:toast(prefs.hide_progress_sync_badge and "已隐藏同步提醒" or "已恢复同步提醒",2)
+        end}
+    rows[#rows+1]={text="清除全部待上传进度记录",post_text="仅清理进度上传任务，保留本机阅读位置和阅读时间",callback=function()
+        UIManager:show(ConfirmBox:new{text="放弃全部待上传的阅读进度记录？\n\n这不会删除本机书籍、当前阅读位置、阅读时间、批注或评论。已发出的云端请求可能仍在处理。",
+            ok_callback=function()
+                local count=0
+                for _,entry in ipairs(items) do
+                    local ok=self:_abandon_progress_issue(entry)
+                    if ok then count=count+1 end
+                end
+                self:toast(count>0 and "旧进度上传任务已清除" or "没有需要清除的旧任务",3)
+            end})
+    end}
     for _,item in ipairs(items) do
         local suffix=item.local_percent and (string.format("%.1f%%",item.local_percent).." · ") or ""
         rows[#rows+1]={
@@ -24414,6 +24510,9 @@ function Plugin:show_progress_sync_issues()
             post_text=suffix..item.state_label.." · "..U.utf8_truncate(item.reason,34,"…"),
             callback=function() self:_show_progress_sync_issue_detail(item) end,
         }
+    end
+    if #items==0 then
+        rows[#rows+1]={text="当前没有进度同步失败",enabled=false,readonly_label=true}
     end
     return self:list("进度同步失败",rows,"当前没有进度同步失败")
 end

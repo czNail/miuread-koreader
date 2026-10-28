@@ -35,8 +35,8 @@ class Integrity(unittest.TestCase):
     def test_beta15_comment_hotfix_preserved(self):
         annotations=(ROOT/'miuread.koplugin/miuread/annotations.lua').read_text(encoding='utf-8')
         api=(ROOT/'miuread.koplugin/miuread/api_web.lua').read_text(encoding='utf-8')
-        self.assertIn('mark_batch_completed(confirmed)',annotations)
-        self.assertIn('response lacks ',annotations)
+        self.assertIn('mark_batch_completed(batch)',annotations)
+        self.assertIn('missing review list',annotations)
         self.assertIn('_agent_readreviews',api)
 
 if __name__ == '__main__': unittest.main()

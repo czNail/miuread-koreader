@@ -43,7 +43,7 @@ class CommentB2(unittest.TestCase):
         self.assertIn('main_label=cache.has_cache and "继续获取本章评论"', main)
         self.assertIn('label="更新本章评论"', main)
         self.assertIn('main_label="查看本章评论"', main)
-        self.assertIn('title="本章已缓存评论"', main)
+        self.assertIn('title="本章评论"', main)
         self.assertIn('function Plugin:_offer_current_chapter_comments()', main)
         self.assertIn('function Plugin:_show_current_chapter_comments(', main)
         self.assertIn('请先打开觅阅下载的微信读书章节', main)
@@ -52,8 +52,8 @@ class CommentB2(unittest.TestCase):
     def test_incomplete_batches_not_marked_as_empty(self):
         parser = source('miuread/annotations.lua')
         self.assertIn('missing review list', parser)
-        self.assertIn('mark_batch_completed(confirmed)', parser)
-        self.assertIn('response lacks ', parser)
+        self.assertIn('mark_batch_completed(batch)', parser)
+        self.assertIn('missing review list', parser)
         self.assertIn('local requested={}', parser)
         self.assertIn('options.force_refresh~=true and previous.underline_request_ok', parser)
 

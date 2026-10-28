@@ -14,7 +14,7 @@ local main=read("miuread.koplugin/main.lua")
 local worker=read("miuread.koplugin/miuread/legacy/read_report_worker.lua")
 local sync=read("miuread.koplugin/miuread/sync.lua")
 local service=read("miuread.koplugin/miuread/read_report_service.lua")
-assert(config:find('VERSION = "6.1.0-beta.17"',1,true),"beta.17 metadata")
+assert(config:match('VERSION%s*=%s*"%d+%.%d+%.%d+%-beta%.%d+"'),"beta release metadata")
 
 -- The user has made Kindle the authoritative position on each safe upload.
 local replay=fragment(main,"function Plugin:_submit_saved_pending_progress","function Plugin:_submit_all_saved_pending_progress")

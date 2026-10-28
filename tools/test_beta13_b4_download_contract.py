@@ -29,7 +29,10 @@ class B4DownloadContract(unittest.TestCase):
             part=main[main.index('function Plugin:'+name+'('):]
             self.assertIn('b4_content_only_options(opt)',part[:320],name)
         task=src('miuread/download_task.lua')
-        self.assertIn('clean_options.annotations=false',task)
+        # beta.19 restores the optional notes edition without changing the
+        # default clean download or leaking note checkpoints into clean jobs.
+        self.assertIn('clean_options.annotations=clean_options.annotations==true',task)
+        self.assertIn('if not clean_options.annotations then',task)
         self.assertIn('clean_options.annotation_requested=nil',task)
         self.assertIn('clean_options.annotation_pending=nil',task)
         # Do not call the annotation API when options.annotations is false.

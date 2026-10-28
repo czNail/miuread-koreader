@@ -44,7 +44,7 @@ function CommentSync:fetch(book_id, chapter_uid, options)
     if self.running then return nil,"已有评论获取任务正在进行" end
     local old_state=self:status(book_id,chapter_uid)
     if old_state.has_cache and old_state.status~="partial" and old_state.status~="error"
-        and options.force~=true then
+        and old_state.status~="empty" and options.force~=true then
         return {cached=true, status=old_state.status, comments=old_state.comments,
             groups=old_state.groups, complete=true}
     end
@@ -64,7 +64,8 @@ function CommentSync:fetch(book_id, chapter_uid, options)
     -- A failed refresh may retain an older *complete* checkpoint. A new
     -- explicit retry must contact the server, not silently reuse that old
     -- completion bit as proof the failed refresh was already done.
-    local retry_full=old_state.status=="error" and previous and previous.complete==true
+    local retry_full=(old_state.status=="error" or old_state.status=="empty")
+        and previous and previous.complete==true
     self.running=true
     local function persist(snapshot)
         if snapshot.underline_request_ok~=true then
