@@ -56,6 +56,8 @@ function Ui.text(text, width, height, face, opts)
         text = tostring(text or ""),
         face = face,
         bold = opts.bold == true,
+        max_width = math.max(1, tonumber(width) or 1),
+        truncate_with_ellipsis = opts.ellipsis ~= false,
         fgcolor = opts.fgcolor or Blitbuffer.COLOR_BLACK,
     }
     return Ui.align(child, width, height, opts.halign or opts.alignment or "center", opts.valign or "center")
@@ -63,17 +65,29 @@ end
 
 function Ui.textbox(text, width, height, face, opts)
     opts = opts or {}
+    -- Do not use `(condition and nil or fallback)`: in Lua it always selects
+    -- fallback and silently defeats the natural-height mode.
+    local bounded_height = math.max(1, tonumber(height) or 1)
+    if opts.natural_height == true then bounded_height = nil end
     local child = TextBoxWidget:new{
         text = tostring(text or ""),
         face = face,
         bold = opts.bold == true,
-        width = math.max(1, width),
+        width = math.max(1, tonumber(width) or 1),
+        -- A parent AlignContainer does not clip painting. Pass a real height
+        -- to TextBoxWidget so long labels cannot draw over adjacent rows.
+        height = bounded_height,
         height_adjust = true,
         height_overflow_show_ellipsis = opts.ellipsis ~= false,
         alignment = opts.text_alignment or opts.alignment or "left",
         fgcolor = opts.fgcolor or Blitbuffer.COLOR_BLACK,
     }
-    return Ui.align(child, width, height, opts.halign or opts.alignment or "left", opts.valign or "center")
+    local layout_h = height
+    if opts.natural_height == true then
+        local size = child:getSize()
+        layout_h = size and size.h or height
+    end
+    return Ui.align(child, width, layout_h, opts.halign or opts.alignment or "left", opts.valign or "center")
 end
 
 function Ui.icon(value, width, height, size, opts)

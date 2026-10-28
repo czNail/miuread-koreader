@@ -19,7 +19,7 @@ class B1Safety(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertIsNotNone(config)
         self.assertEqual(meta.group(1), config.group(1))
-        self.assertRegex(meta.group(1), r'^6\.1\.0-beta\.13(?:-B[1-6])?$')
+        self.assertRegex(meta.group(1), r'^6\.1\.0-beta\.(?:13(?:-B[1-6])?|14)$')
 
     def test_comments_are_incrementally_merged(self):
         db = source('miuread/thought_database.lua')

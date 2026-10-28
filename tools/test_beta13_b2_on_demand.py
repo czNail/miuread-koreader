@@ -16,7 +16,7 @@ class CommentB2(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertIsNotNone(config)
         self.assertEqual(meta.group(1), config.group(1))
-        self.assertRegex(meta.group(1), r'^6\.1\.0-beta\.13(?:-B[1-6])?$')
+        self.assertRegex(meta.group(1), r'^6\.1\.0-beta\.(?:13(?:-B[1-6])?|14)$')
 
     def test_no_epub_writes_or_auto_download_in_new_module(self):
         module = source('miuread/comment_sync.lua')
@@ -41,7 +41,8 @@ class CommentB2(unittest.TestCase):
         self.assertIn('self.comment_sync=require("miuread.comment_sync"):new(self.api,self.store,self.annotations)', main)
         self.assertIn('or "获取本章评论"', main)
         self.assertIn('label="更新本章评论"', main)
-        self.assertIn('label="本章已缓存评论"', main)
+        self.assertIn('main_label="查看本章评论"', main)
+        self.assertIn('title="本章已缓存评论"', main)
         self.assertIn('function Plugin:_offer_current_chapter_comments()', main)
         self.assertIn('function Plugin:_show_current_chapter_comments(', main)
         self.assertIn('请先打开觅阅下载的微信读书章节', main)

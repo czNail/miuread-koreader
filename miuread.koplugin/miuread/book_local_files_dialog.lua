@@ -27,7 +27,6 @@ local function show_variant(plugin, book_id, variant)
     local kind = tostring(variant.kind or "")
     local label = tostring(variant.label or "版本")
     local items = {
-        {text = "文件大小", post_text = human_size(variant.size), enabled = false},
         {text = "打开" .. label, callback = function() plugin:open_file(variant.file) end},
     }
     if kind == "clean" then
@@ -36,12 +35,16 @@ local function show_variant(plugin, book_id, variant)
             callback = function() plugin:choose_download_mode(book, {annotations = false}, false) end,
         }
     end
-    -- Old notes files stay readable/manageable, but have no notes-download action.
+    -- Legacy variants remain manageable but deletion is an explicit
+    -- advanced action, distinct from the full-book cleanup operation.
     items[#items + 1] = {
-        text = "删除" .. label,
-        callback = function() plugin:_confirm_delete_variant(book_id, kind, book.title or book_id) end,
+        text = "高级文件管理",sub_item_table_func=function() return {
+            {text="仅删除"..label,callback=function()
+                plugin:_confirm_delete_variant(book_id,kind,book.title or book_id)
+            end},
+        } end,
     }
-    return plugin:list(label .. " · 本机文件", items)
+    return plugin:list(label .. " · " .. human_size(variant.size), items)
 end
 
 function M.open_variant(plugin, book_id, kind)
@@ -85,7 +88,7 @@ function M.open_generated(plugin, book_ref)
         }
     end
     items[#items + 1] = {
-        text = "删除全部本机内容",
+        text = "删除书籍（清理本机全部关联数据）",
         separator = true,
         callback = function() plugin:_confirm_delete_book_downloads(book_id, stored.title or book_id) end,
     }
@@ -103,7 +106,7 @@ function M.open_local(plugin, book)
     end
     local size = plugin.book_delete_service and plugin.book_delete_service:local_file_size(path) or (tonumber((lfs.attributes(path) or {}).size) or 0)
     local items = {
-        {text = path:match("([^/]+)$") or path, post_text = human_size(size), enabled = false},
+        {text = "文件信息", post_text = human_size(size), callback = function() plugin:info(path .. "\n" .. human_size(size)) end},
         {text = "在 KOReader 文件管理中查看", callback = function() plugin:_home_open_koreader_filemanager(path, true) end},
         {text = "删除本地文件", separator = true, callback = function()
             local current = tostring(plugin:_current_document_path() or "")

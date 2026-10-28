@@ -6367,16 +6367,15 @@ function Plugin:_home_group_settings_menu(group)
     local order_key=is_action and "action_order" or "panel_order"
     local version_key=is_action and "action_layout_version" or "panel_layout_version"
     local rows={}
+    -- Actions first. Selection count is a lightweight summary after them,
+    -- not a disabled first-row obstacle to changing the layout.
+    local selection_summary=""
     if not is_action then
         local selected=self:_home_group_enabled_count("panel")
-        local overflow=math.max(0,selected-HOME_PANEL_MAX_VISIBLE)
-        rows[#rows+1]={
-            text=overflow>0 and ("已选择 "..tostring(selected).." 项 · 请取消 "..tostring(overflow).." 项")
-                or ("已选择 "..tostring(selected).." / "..tostring(HOME_PANEL_MAX_VISIBLE)),
-            post_text=overflow>0 and ("最多 "..tostring(HOME_PANEL_MAX_VISIBLE).." 项") or "单行显示",
-            enabled=false,
-        }
+        selection_summary=tostring(selected).." / "..tostring(HOME_PANEL_MAX_VISIBLE)
     end
+    rows[#rows+1]={text="调整顺序",post_text=selection_summary,
+        sub_item_table_func=function() return self:_home_group_order_menu(group) end}
     for _,key in ipairs(order) do
         local item_key=key
         if is_action or self:_home_panel_item_available(item_key) then
@@ -6388,7 +6387,6 @@ function Plugin:_home_group_settings_menu(group)
             }
         end
     end
-    rows[#rows+1]={text="调整顺序",sub_item_table_func=function() return self:_home_group_order_menu(group) end}
     rows[#rows+1]={text="恢复推荐布局",callback=function()
         local home,preferences=self:_home_preferences()
         home[items_key]={}
@@ -7432,6 +7430,17 @@ function Plugin:_home_wifi_icon()
     return "wifi"
 end
 
+function Plugin:_home_header_visibility_label()
+    local home=self:_home_preferences()
+    if home.header_visible==false then return "已隐藏" end
+    local fields={"title","account","wifi","bluetooth","sync","battery","tools"}
+    local visible=type(home.header_items)=="table" and home.header_items or {}
+    for _,key in ipairs(fields) do
+        if visible[key]==false then return "部分隐藏" end
+    end
+    return "全部显示"
+end
+
 function Plugin:_home_wifi_details()
     -- No scanning during Home repaint: explicit user action only.
     local state=HomeData.cached_device_state() or {}
@@ -7439,9 +7448,10 @@ function Plugin:_home_wifi_details()
     local ssid=U.trim(tostring(state.wifi_name or ""))
     local connected=state.connected==true and state.wifi_on~=false
     local rows={
-        {text="当前连接",post_text=connected and "已连接" or "未连接",enabled=false},
-        {text=connected and (ssid~="" and ssid or "已连接（名称未知）") or status,
-            post_text=connected and (state.online==false and "互联网不可用" or "") or "",enabled=false},
+        {text="当前连接详情",post_text=connected and "已连接" or "未连接",callback=function()
+            self:info("Wi-Fi："..status.."\n当前网络："..(ssid~="" and ssid or "未获取到名称")..
+                (state.online==false and "\n互联网连接可能不可用" or ""))
+        end},
         {text="查看可用网络",post_text="使用 KOReader 网络管理",close_before_action=true,callback=function()
             return self:_home_wifi_settings()
         end},
@@ -9034,7 +9044,7 @@ function Plugin:_home_open_book(book,anchor,ges,direct_read)
     end
     self:_home_attach_local_record(book)
     local record=id~="" and self:_preferred_record(id) or nil
-    if direct_read==true and record and record.file and U.file_exists(record.file) then
+    if record and record.file and U.file_exists(record.file) then
         local now=monotonic_wall_time()
         local lock=self._home_book_open_lock
         if type(lock)=="table" and now-(tonumber(lock.started_at) or 0)<4 then
@@ -10084,9 +10094,7 @@ function Plugin:_home_action_entries()
         bookstore={icon="library",icon_key="library",label="书城",callback=function() self:show_bookstore() end},
         downloads={icon="⇩",icon_key="download",label="下载",badge=download_badge,callback=function() self:show_downloads() end},
         sync={icon="⇅",icon_key="sync",label="同步",badge=sync_badge,callback=function()
-            -- beta.11: every manual Sync entry reaches the same progress
-            -- recovery pass. The source tag is diagnostic only.
-            self:_sync_home_pending({source="home_quick"})
+            return self:show_sync_status(false)
         end},
         miuread_settings={icon="⚙",icon_key="settings",label="设置",callback=function() self:_show_home_settings_center() end},
         all_books={icon="▦",label="全部书籍",callback=function() self:show_home_all_books() end},
@@ -13754,13 +13762,8 @@ function Plugin:_set_thoughts_enabled(enabled)
         UIManager:scheduleIn(.05,function() self:_refresh_current_comment_overlay(false) end)
         if changed then
             self:toast("阅读评论已开启",1.5)
-            -- Display preference is independent of network permission. Ask
-            -- only when the user explicitly switches it on in a WeRead book.
-            if self:_reader_session_is_weread() then
-                UIManager:scheduleIn(.12,function()
-                    self:_offer_current_chapter_comments()
-                end)
-            end
+            -- R02: enabling the comment layer never initiates or offers a
+            -- network request. Fetch/update are explicit actions in Comments.
         end
     else
         self:_close_active_thought_popup("comments disabled")
@@ -14448,7 +14451,12 @@ function Plugin:_show_current_chapter_comments(scope,back_callback)
                 callback=function()
                     -- Use the same native comment popup as an in-text tap.
                     -- This preserves favorite/like/copy actions for B3 offline rows.
-                    self:_show_thought_href(Thoughts.href(scope.book_id,scope.chapter_uid,group.range))
+                    self._opening_cached_comment=true
+                    local ok,err=pcall(function()
+                        self:_show_thought_href(Thoughts.href(scope.book_id,scope.chapter_uid,group.range))
+                    end)
+                    self._opening_cached_comment=nil
+                    if not ok then self:info("打开本地评论失败："..U.first_line(err,120)) end
                 end,
             }
         end
@@ -14535,40 +14543,27 @@ function Plugin:_show_reader_comment_center(back_callback)
                 and self.comment_sync:status(scope.book_id,scope.chapter_uid)
                 or {has_cache=false,status="not_fetched",comments=0}
             local can_fetch=scope.book_id~="" and scope.chapter_uid~=""
+            local main_label
+            if cache.status=="partial" and can_fetch then main_label="继续获取本章评论"
+            elseif not cache.has_cache then main_label=cache.status=="error" and "重试获取本章评论" or "获取本章评论"
+            else main_label="查看本章评论" end
             local content_rows={
-                {icon="comment",label="本章已缓存评论",value=self:_reader_comment_status_label(scope),
-                    enabled=can_fetch and cache.has_cache,arrow=true,
-                    callback=function() self:_show_current_chapter_comments(scope,reopen) end},
-                {icon="download",label=(cache.status=="partial" or cache.status=="error")
-                        and "继续获取本章评论" or "获取本章评论",
-                    value=cache.has_cache and "使用本地缓存" or "首次获取需要联网",
-                    enabled=can_fetch,arrow=true,
-                    callback=function() self:_fetch_current_chapter_comments(false,reopen) end},
-                {icon="sync",label="更新本章评论",value="主动联网 · 不修改正文",
-                    enabled=can_fetch and cache.has_cache,arrow=true,
-                    callback=function() self:_fetch_current_chapter_comments(true,reopen) end},
-                {icon="bookmark",label="本章评论收藏",value=scope.chapter_uid~="" and (tostring(chapter_count).." 条") or "当前章节不可识别",
-                    enabled=scope.book_id~="" and scope.chapter_uid~="",arrow=true,callback=function()
-                        self:show_thought_favorites{
-                            book_id=scope.book_id,chapter_uid=scope.chapter_uid,scope_label="本章评论收藏",
-                            reader_context=true,back_callback=reopen,
-                        }
-                    end},
-                {icon="current-book",label="本书评论收藏",value=scope.book_id~="" and (tostring(book_count).." 条") or "当前书籍不可识别",
-                    enabled=scope.book_id~="",arrow=true,callback=function()
-                        self:show_thought_favorites{
-                            book_id=scope.book_id,scope_label="本书评论收藏",
-                            reader_context=true,back_callback=reopen,
-                        }
-                    end},
-                {icon="bookmark",label="全部评论收藏",value=tostring(total).." 条",enabled=total>0,arrow=true,callback=function()
-                    self:show_thought_favorites{reader_context=true,scope_label="全部评论收藏",back_callback=reopen}
-                end},
-                {icon="search",label="搜索收藏评论",value=total>0 and "评论、原文、作者、书名" or "暂无收藏",
-                    enabled=total>0,arrow=true,callback=function()
-                        self:_search_thought_favorites{reader_context=true,back_callback=reopen}
+                {icon=cache.has_cache and "comment" or "download",label=main_label,
+                    value=self:_reader_comment_status_label(scope),enabled=can_fetch,arrow=true,
+                    callback=function()
+                        if cache.status=="partial" or not cache.has_cache then
+                            self:_fetch_current_chapter_comments(false,reopen)
+                        else self:_show_current_chapter_comments(scope,reopen) end
                     end},
             }
+            if can_fetch and cache.has_cache then
+                content_rows[#content_rows+1]={icon="sync",label="更新本章评论",
+                    value="",arrow=true,callback=function() self:_fetch_current_chapter_comments(true,reopen) end}
+            end
+            content_rows[#content_rows+1]={icon="bookmark",label="我的评论收藏",
+                value=tostring(total).." 条",arrow=true,callback=function()
+                    self:show_thought_favorites{reader_context=true,scope_label="我的评论收藏",back_callback=reopen}
+                end}
             local display_rows={
                 {icon="comment",label="阅读评论",value=self:_thoughts_enabled_label(),value_bold=true,keep_open=true,callback=function()
                     self:_toggle_thoughts_enabled()
@@ -15441,12 +15436,16 @@ function Plugin:_show_reader_annotation_panel(back_callback)
             }}
             if not weread then return sections end
             sections[#sections+1]={title="微信读书同步",rows={
-                {icon="upload",label="立即同步本书批注",value="上传 删除 云端对账",value_bold=true,callback=function()
-                    self:sync_local_annotations_now()
+                {icon="upload",label="同步本书个人批注",value="可能修改云端记录",value_bold=true,callback=function()
+                    local message="同步本书个人批注可能上传新划线、书签或想法，"..
+                        "并执行此前由你标记为待云端删除的操作。\n\n"..
+                        "当前待删除："..tostring(pending_delete).." 条。是否继续？"
+                    UIManager:show(ConfirmBox:new{text=message,ok_text="确认同步",cancel_text="取消",
+                        ok_callback=function() self:sync_local_annotations_now() end})
                 end},
-                {icon="sync",label="待处理",value=pending_work>0
-                    and string.format("共 %d · 可重试 %d · 需处理 %d",pending_work,pending_upload+pending_delete,action_required)
-                    or "0 · 仍可手动对账",enabled=false},
+                {icon="sync",label="同步状态",value=pending_work>0 and ("待处理 "..tostring(pending_work).." 条")
+                    or (failed>0 and ("失败 "..tostring(failed).." 条") or "无待处理记录"),
+                    callback=function() self:show_local_annotation_sync_status() end},
                 {label="同步详情",value=legacy_synced>0
                     and string.format("已同步 %d · 旧坐标 %d",tonumber(summary.synced or 0) or 0,legacy_synced)
                     or string.format("已同步 %d · 失败 %d",tonumber(summary.synced or 0) or 0,failed),
@@ -15454,9 +15453,7 @@ function Plugin:_show_reader_annotation_panel(back_callback)
                 {icon="warning",label="需要处理",value=action_required>0 and (tostring(action_required).." 条") or "0",
                     value_bold=action_required>0,enabled=action_required>0,callback=function() self:show_annotation_sync_issues(book_id) end},
                 {label="结束阅读时上传",value=self:_annotation_close_upload_enabled() and "已开启" or "已关闭",value_bold=true,keep_open=true,callback=function() self:toggle_annotation_close_upload() end},
-                {icon="diagnostics",label="坐标诊断",value="导出 raw / coord / range",callback=function()
-                    self:sync_local_annotations_now(true)
-                end},
+
                 {label="新想法可见范围",value=self:annotation_sync_visibility_label(),callback=function()
                     self:_show_reader_menu_table("新想法可见范围",self:annotation_sync_visibility_menu(),return_to_panel)
                 end},
@@ -15725,18 +15722,19 @@ function Plugin:_show_reader_sync_panel(back_callback)
             summary=type(summary)=="table" and summary or {}
             local pending=(tonumber(summary.pending or 0) or 0)+(tonumber(summary.delete_pending or 0) or 0)
             local action=tonumber(summary.action_required or 0) or 0
-            local annotation_state=(action+pending)>0 and ("同步失败 "..tostring(action+pending)) or "已同步"
+            local annotation_state=action>0 and ("需处理 "..tostring(action))
+                or (pending>0 and ("待同步 "..tostring(pending)) or "已同步")
             return {
-                {title="当前状态",rows={
-                    {label="当前书籍",value=self:_sync_current_book_label(),arrow=false},
+                {title="操作",rows={
+                    {icon="sync",label="手动同步",callback=function() self:_show_reader_menu_table("手动同步",self:sync_now_menu(),return_to_sync) end},
+                    {icon="warning",label="失败与待处理",value=annotation_state,
+                        callback=function() self:_show_reader_sync_diagnostics_panel(return_to_sync) end},
+                    {icon="settings",label="自动同步设置",callback=function() self:_show_reader_sync_settings_panel(return_to_sync) end},
+                }},
+                {title="状态摘要",rows={
                     {label="阅读时间",value=self:_reading_time_status_label(),arrow=false},
                     {label="阅读进度",value=self:_progress_status_label(),arrow=false},
-                    {label="批注",value=annotation_state,arrow=false},
-                }},
-                {title="操作",rows={
-                    {icon="settings",label="自动同步设置",value="时间、进度、批注",callback=function() self:_show_reader_sync_settings_panel(return_to_sync) end},
-                    {icon="sync",label="手动同步",value="进度与批注",callback=function() self:_show_reader_menu_table("手动同步",self:sync_now_menu(),return_to_sync) end},
-                    {icon="diagnostics",label="诊断与修复",value="状态与高级工具",callback=function() self:_show_reader_sync_diagnostics_panel(return_to_sync) end},
+                    {label="个人批注",value=annotation_state,arrow=false},
                 }},
             }
         end,
@@ -16516,6 +16514,9 @@ function Plugin:_show_reader_device_compat_panel(back_callback)
                 {label="觅阅阅读界面设置",value="评论与控制中心",callback=function()
                     self:_show_reader_menu_table("阅读界面",self:reader_quick_panel_settings_menu(),function() self:_show_reader_device_compat_panel(back_callback) end)
                 end},
+                {label="批注坐标诊断",value="高级维护 · 导出 raw / coord / range",callback=function()
+                    self:sync_local_annotations_now(true)
+                end},
                 {label="手势与按键",value="阅读手势说明",callback=function()
                     self:_show_reader_gesture_panel(function() self:_show_reader_device_compat_panel(back_callback) end)
                 end},
@@ -16663,8 +16664,7 @@ function Plugin:_reader_quick_definitions()
         comments={key="comments",icon="comment",label="评论",active=self:_thoughts_enabled(),callback=function()
             self:_show_reader_comment_center(function() self:show_reader_quick_panel() end)
         end,hold_callback=function()
-            self:_toggle_thoughts_enabled()
-            UIManager:scheduleIn(.05,function() self:show_reader_quick_panel() end)
+            self:_show_reader_comment_center(function() self:show_reader_quick_panel() end)
         end},
         annotations={key="annotations",icon="highlight",label="批注",callback=function() self:_show_reader_annotation_panel(function() self:show_reader_quick_panel() end) end},
         edge_guard={key="edge_guard",icon=edge_enabled and "edge-guard" or "edge-guard-off",label="防误触",active=edge_enabled,callback=function()
@@ -18067,7 +18067,7 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
         header_items=home.header_items,
         on_quick_panel=function() self:show_home_quick_panel() end,
         on_wifi=function() self:_home_wifi_details() end,
-        on_battery=function() self:info("当前电量："..self:_home_battery_text()) end,
+        on_battery=nil,
         on_sync=function() self:_home_open_sync_status() end,
         on_bluetooth=function() self:_bluetooth_show_devices() end,
         on_interaction=function(first,kind) self:_home_note_interaction(first,kind) end,
@@ -19191,27 +19191,31 @@ function Plugin:book_menu(b,back_callback)
     b=U.merge(original,normalize(original))
     if Protocol.is_mp_account(b.bookId) then self:mp_account(b); return end
     local items={}
-    if not Protocol.is_mp(b.bookId) then
-        local action=require("miuread.bookstore").shelf_action(self,b)
-        if action then items[#items+1]=action end
-        items[#items+1]={text="相似推荐",callback=function()
-            require("miuread.bookstore").similar(self,b,function() self:book_menu(b,back_callback) end)
-        end}
-    end
     local preferred=self:_preferred_record(b.bookId)
     if preferred and preferred.file and U.file_exists(preferred.file) then
         items[#items+1]={text="阅读已下载书籍",callback=function() self:open_file(preferred.file) end}
     end
-    items[#items+1]={text="下载／更新正文",callback=function() self:choose_download(b,nil,false) end}
+    items[#items+1]={text=(preferred and preferred.file and U.file_exists(preferred.file)) and "更新正文" or "下载书籍",
+        callback=function() self:choose_download(b,nil,false) end}
     items[#items+1]={text="按章节下载",callback=function() self:chapters(b) end}
     if self:_has_range_variant(b.bookId) then
         items[#items+1]={text="扩展已有章节",sub_item_table_func=function() return self:range_extend_menu(b) end}
     end
     local local_summary=self.book_delete_service:summary(tostring(b.bookId))
     if local_summary.has_local==true then
-        items[#items+1]={text="本机文件（含旧版）",callback=function() BookLocalFilesDialog.open_generated(self,tostring(b.bookId)) end}
+        items[#items+1]={text="本机文件与高级管理",callback=function() BookLocalFilesDialog.open_generated(self,tostring(b.bookId)) end}
     end
     items[#items+1]={text="书籍详情",callback=function() self:book_details(b) end}
+    if not Protocol.is_mp(b.bookId) then
+        local action=require("miuread.bookstore").shelf_action(self,b)
+        if action then
+            action.text="微信书架 · "..tostring(action.text or "加入 / 移除")
+            items[#items+1]=action
+        end
+        items[#items+1]={text="相似推荐",callback=function()
+            require("miuread.bookstore").similar(self,b,function() self:book_menu(b,back_callback) end)
+        end}
+    end
     local finished_action=self:_finished_status_action(b)
     if finished_action then items[#items+1]=finished_action end
     if back_callback then items[#items+1]={text="返回列表",callback=back_callback} end
@@ -19222,6 +19226,25 @@ function Plugin:book_details(b)
     b=U.copy(b or {})
     local id=tostring(b.bookId or b.book_id or "")
     if id=="" then self:info("当前书籍缺少可查询的图书编号。") return false end
+    local stored=self.store:book(id) or {}
+    local title=U.trim(tostring(b.title or stored.title or ""))
+    local author=U.trim(tostring(b.author or stored.author or ""))
+    local intro=U.trim(tostring(b.intro or b.description or stored.intro or stored.description or ""))
+    local function fetch_online() return self:_fetch_book_details_online(b) end
+    local rows={
+        {text="阅读与本机文件",callback=function() self:book_menu(b) end},
+        {text="刷新在线信息",callback=fetch_online},
+        {text="查看已缓存简介",callback=function()
+            self:info((title~="" and title or "书籍详情").."\n"..author.."\n\n"..(intro~="" and intro or "暂无缓存简介，可主动刷新在线信息"))
+        end},
+    }
+    return self:list(title~="" and title or "书籍详情",rows)
+end
+
+function Plugin:_fetch_book_details_online(b)
+    b=U.copy(b or {})
+    local id=tostring(b.bookId or b.book_id or "")
+    if id=="" then return false end
     local auth=U.copy(self.store:auth())
     local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
@@ -20074,11 +20097,11 @@ function Plugin:show_download_status()
             title_align="center",
             buttons={
                 {first_action},
-                {{text="停止下载",callback=function()
+                {{text="停止下载（保留断点）",callback=function()
                     UIManager:close(dialog)
                     self:_force_stop_download_for_cleanup("user_stop_download",function() self:show_download_status() end)
                 end}},
-                {{text="停止并删除断点",callback=function()
+                {{text="停止并清除本次断点",callback=function()
                     UIManager:close(dialog)
                     self:_force_stop_download_for_cleanup("user_delete_partial",function()
                         local book_id=tostring(state.book_id or (state.book and state.book.bookId) or "")
@@ -20111,7 +20134,7 @@ function Plugin:show_download_status()
                     self:download(book,options,false)
                 end
             end}},
-            {{text="停止并删除断点",callback=function()
+            {{text="停止并清除本次断点",callback=function()
                 UIManager:close(dialog)
                 self:_force_stop_download_for_cleanup("user_delete_partial",function()
                     local book_id=tostring(state.book_id or (book and book.bookId) or "")
@@ -22519,11 +22542,11 @@ function Plugin:show_downloads(back_callback)
         self._downloads_menu=nil
     end
     local items={}
-    local filter=tostring(self._download_center_filter or "all")
+    local filter=tostring(self._download_center_filter or "book")
     if filter~="all" and filter~="book" and filter~="extension" then filter="all" end
     local filter_labels={all="全部",book="书籍",extension="插件"}
     items[#items+1]={
-        text="筛选",post_text=filter_labels[filter] or "全部",
+        text="任务类型",post_text=filter_labels[filter] or "书籍",
         sub_item_table_func=function()
             local function row(key,label)
                 return {text=label,post_text=self._download_center_filter==key and "当前" or "",callback=function()
@@ -22557,27 +22580,30 @@ function Plugin:show_downloads(back_callback)
     end
 
     if filter~="extension" then
-        items[#items+1]={text="书籍下载",enabled=false}
         if self:_has_download_status() then items[#items+1]={text=self:_download_status_label(),callback=function() self:show_download_status() end} end
-        items[#items+1]={text="下载设置",post_text="策略 目录与提醒",sub_item_table_func=function() return self:download_settings_menu() end}
         local queue=self.store:download_queue()
         items[#items+1]={text="等待下载",post_text=tostring(#queue).." 项",callback=function() self:show_waiting_downloads() end}
+        items[#items+1]={text="下载设置",sub_item_table_func=function() return self:download_settings_menu() end}
     end
 
 
-    items[#items+1]={text="存储",separator=true,enabled=false}
     items[#items+1]={text="存储占用",callback=function() self:show_storage_usage() end}
     items[#items+1]={text="存储与清理",callback=function() self:show_download_cleanup_dialog() end}
 
     if filter~="extension" then
-        items[#items+1]={text="已完成书籍",enabled=false}
-        for _,b in ipairs(self.store:all_books()) do
-            local labels=self:_download_book_labels(b)
-            if #labels>0 then
-                local book_id=tostring(b.book_id)
-                items[#items+1]={text=b.title or book_id,post_text=table.concat(labels," · "),callback=function() self:downloaded_book_menu(book_id) end}
+        items[#items+1]={text="已下载书籍",sub_item_table_func=function()
+            local rows={}
+            for _,b in ipairs(self.store:all_books()) do
+                local labels=self:_download_book_labels(b)
+                if #labels>0 then
+                    local book_id=tostring(b.book_id)
+                    rows[#rows+1]={text=b.title or book_id,post_text=table.concat(labels," · "),
+                        callback=function() self:downloaded_book_menu(book_id) end}
+                end
             end
-        end
+            if #rows==0 then return {{text="还没有已下载书籍",enabled=false}} end
+            return rows
+        end}
     end
     if HomeView.is_shown() and not self:_active_reader_ui() then
         self._downloads_menu=nil
@@ -22861,9 +22887,15 @@ end
 
 function Plugin:sync_now_menu()
     return {
-        {text="上传当前进度",callback=function() self:upload_local_progress(true) end},
-        {text="读取云端进度",callback=function() self:manual_sync() end},
-        {text="同步本书批注",callback=function() self:sync_local_annotations_now(false) end},
+        {text="上传本机阅读进度",callback=function() self:upload_local_progress(true) end},
+        {text="读取微信读书进度",callback=function() self:manual_sync() end},
+        {text="同步本书个人批注",callback=function()
+            UIManager:show(ConfirmBox:new{
+                text="同步个人批注会上传本地变更，也可能执行此前标记的云端删除操作。是否继续？",
+                ok_text="确认同步",cancel_text="取消",
+                ok_callback=function() self:sync_local_annotations_now(false) end,
+            })
+        end},
     }
 end
 
@@ -22873,7 +22905,7 @@ function Plugin:sync_diagnostics_status_menu()
     local summary=id~="" and (LocalAnnotationDatabase.summary(self.store,id) or {}) or {}
     local pending=(tonumber(summary.pending or 0) or 0)+(tonumber(summary.delete_pending or 0) or 0)
     local action=tonumber(summary.action_required or 0) or 0
-    local annotation=(action+pending)>0 and ("同步失败 "..tostring(action+pending)) or "已同步"
+    local annotation=action>0 and ("需处理 "..tostring(action)) or (pending>0 and ("待同步 "..tostring(pending)) or "已同步")
     return {
         {text="当前书籍",post_text=self:_sync_current_book_label(),enabled=false},
         {text="登录状态",post_text=self:logged_in() and "正常" or "需要检查",callback=function() self:show_account_status() end},
@@ -24350,16 +24382,15 @@ function Plugin:_show_progress_sync_issue_detail(item)
         return {text=title,post_text=tostring(value or "—"),enabled=false,readonly_label=true,arrow=false}
     end
     local full_reason=tostring(item.reason or "等待云端确认")
-    local rows={
+    local metadata={
         info_row("书籍",U.utf8_truncate(item.title,16,"…")),
         info_row("本机位置",percent and string.format("%.1f%%",percent) or "—"),
         info_row("章节坐标","第"..chapter.."章 · co "..co),
         info_row("状态",tostring(item.state_label or "待同步")),
         info_row("提交时间",(tonumber(pending.submitted_at or pending.captured_at or item.decided_at or 0) or 0)>0
             and U.now_text(tonumber(pending.submitted_at or pending.captured_at or item.decided_at)) or "—"),
-        {text="查看完整原因",post_text="点击查看，不截断原文",arrow=true,
-            callback=function() self:info(full_reason) end},
     }
+    local rows={{text="查看完整原因",callback=function() self:info(full_reason) end}}
     if item.requires_choice then
         rows[#rows+1]={text="以云端为准",post_text="放弃这次本机待上传；先读取微信当前位置",callback=function()
             UIManager:show(ConfirmBox:new{text="以微信读书云端位置为准？\n\n这会放弃本次本机待上传的阅读位置，并使旧 pending/retry 永久失效。不会删除书籍、批注或本机实际阅读页。",ok_callback=function()
@@ -24435,6 +24466,7 @@ function Plugin:_show_progress_sync_issue_detail(item)
     if item.can_clear_stale then
         rows[#rows+1]={text="位置记录尚不完整",post_text="重新打开本书后自动尝试恢复",enabled=false,readonly_label=true}
     end
+    rows[#rows+1]={text="详细状态与坐标",sub_item_table_func=function() return metadata end}
     return self:_show_miuread_menu("进度同步失败",rows,{page_size=10})
 end
 
@@ -24638,6 +24670,16 @@ function Plugin:_sync_progress_full_recovery(source,silent,on_done)
     local started=self:_retry_all_progress_failures(true,function(ok) finish(ok) end)
     if started==false and not completed then finish(true) end
     return started~=false or completed
+end
+
+function Plugin:_confirm_sync_retry()
+    UIManager:show(ConfirmBox:new{
+        text="尝试恢复失败的阅读进度、可安全重试的阅读时间和本地个人批注。\n\n"..
+            "个人批注同步可能执行此前明确标记的云端删除；请确认后继续。",
+        ok_text="确认重试",cancel_text="取消",
+        ok_callback=function() self:_sync_home_pending({source="confirmed_retry"}) end,
+    })
+    return true
 end
 
 function Plugin:_sync_home_pending(options)
@@ -24867,7 +24909,7 @@ function Plugin:sync_menu()
     local summary=self:_home_sync_summary(false)
     local rows={
         {text="同步状态",post_text=self:_home_sync_status_label(),callback=function() self:show_sync_status(false) end},
-        {text="重新同步失败内容",post_text="进度 批注",callback=function() self:_sync_home_pending() end},
+        {text="重试失败项目",callback=function() self:_confirm_sync_retry() end},
     }
     if (tonumber(summary.annotation_action_required or 0) or 0)>0 then
         rows[#rows+1]={text="批注同步失败",post_text=tostring(summary.annotation_action_required).." 条",callback=function() self:show_annotation_sync_issues() end}
@@ -26840,12 +26882,12 @@ function Plugin:show_sync_status(detail)
             or failed_text(math.max(0,(tonumber(pending.progress or 0) or 0)-(tonumber(pending.progress_active or 0) or 0)),
                 self:progress_sync_label())
         local rows={
-            {text="总状态",post_text=self:_home_sync_status_label(),enabled=false,bold=true},
+            {text="手动同步",sub_item_table_func=function() return self:sync_now_menu() end},
         }
         local total_failed=tonumber(pending.failed_total or 0) or 0
         if total_failed>0 then
-            rows[#rows+1]={text="全部重新同步",post_text=tostring(total_failed).." 项",
-                callback=function() self:_sync_home_pending({source="sync_status_all"}) end}
+            rows[#rows+1]={text="重试失败项目",post_text=tostring(total_failed).." 项",
+                callback=function() self:_confirm_sync_retry() end}
         end
         rows[#rows+1]={text="阅读进度",post_text=progress_status,
             enabled=(tonumber(pending.progress or 0) or 0)>0,
@@ -28006,7 +28048,7 @@ function Plugin:download_settings_menu()
     local policy_label=policy=="allow" and "允许后台下载" or (policy=="after_reading" and "退出阅读后下载" or "每次询问")
     local items={
         {text="阅读时下载策略",post_text=policy_label,sub_item_table_func=function() return self:download_reader_policy_menu() end},
-        {text="自动准备下一章",post_text="单章节阅读 · 隐藏缓存，不提前加入本地书架",checked_func=function() return self.store:preferences().chapter_prefetch_enabled==true end,keep_menu_open=true,callback=function() self:_toggle_chapter_prefetch() end},
+        {text="自动准备下一章",checked_func=function() return self.store:preferences().chapter_prefetch_enabled==true end,keep_menu_open=true,callback=function() self:_toggle_chapter_prefetch() end},
         {text="章节末尾连续阅读",post_text="最后一页继续翻进入下一章",checked_func=function() return self.store:preferences().chapter_continuous_enabled~=false end,keep_menu_open=true,callback=function() self:_toggle_chapter_continuous() end},
         {text="下载网络",post_text=self:_download_network_mode_label(),sub_item_table_func=function() return self:download_network_mode_menu() end},
         {text="下载关键进度提示",checked_func=function() return self.store:preferences().download_notice_enabled~=false end,keep_menu_open=true,callback=function() self:_toggle_preference("download_notice_enabled") end},
@@ -29288,21 +29330,34 @@ function Plugin:show_thought_favorites(options)
     local sort=options.sort or "saved"
     local reopen=function() self:show_thought_favorites(options) end
     local items={}
-    if #rows>1 then
-        items[#items+1]={
-            icon="settings",label="排序方式",text="排序方式",
-            value=self:_thought_favorite_sort_label(sort),post_text=self:_thought_favorite_sort_label(sort),
-            callback=function() self:_show_thought_favorite_sort(options) end,
-        }
+    local tools={
+        {icon="settings",label="排序方式",value=self:_thought_favorite_sort_label(sort),
+            callback=function() self:_show_thought_favorite_sort(options) end},
+        {icon="search",label="搜索收藏评论",callback=function()
+            self:_search_thought_favorites(options)
+        end},
+        {icon="bookmark",label="全部收藏",callback=function()
+            local next_options=U.copy(options);next_options.book_id=nil;next_options.chapter_uid=nil
+            next_options.query=nil;next_options.scope_label="我的评论收藏"
+            self:show_thought_favorites(next_options)
+        end},
+    }
+    local books=ThoughtFavorites.books(self.store) or {}
+    if #books>0 then
+        tools[#tools+1]={icon="current-book",label="按书籍筛选",value=tostring(#books).." 本",
+            callback=function() self:_show_thought_favorite_books(options) end}
     end
-    if U.trim(tostring(options.book_id or ""))=="" then
-        local books=ThoughtFavorites.books(self.store) or {}
-        if #books>1 then
-            items[#items+1]={
-                icon="current-book",label="按书籍查看",text="按书籍查看",
-                value=tostring(#books).." 本",post_text=tostring(#books).." 本",
-                callback=function() self:_show_thought_favorite_books(options) end,
-            }
+    local scope=self:_current_thought_favorite_scope()
+    if scope.book_id~="" then
+        tools[#tools+1]={icon="current-book",label="本书收藏",callback=function()
+            local opts=U.copy(options);opts.book_id=scope.book_id;opts.chapter_uid=nil
+            opts.scope_label="本书评论收藏";self:show_thought_favorites(opts)
+        end}
+        if scope.chapter_uid~="" then
+            tools[#tools+1]={icon="bookmark",label="本章收藏",callback=function()
+                local opts=U.copy(options);opts.book_id=scope.book_id;opts.chapter_uid=scope.chapter_uid
+                opts.scope_label="本章评论收藏";self:show_thought_favorites(opts)
+            end}
         end
     end
 
@@ -29342,13 +29397,24 @@ function Plugin:show_thought_favorites(options)
         local subtitle=tostring(#rows).." 条 · "..self:_thought_favorite_sort_label(sort)
         if U.trim(tostring(options.query or ""))~="" then subtitle="“"..tostring(options.query).."” · "..subtitle end
         return ReaderListDialog.show{
-            title=title,subtitle=subtitle,items=items,page_size=6,
+            title=title,subtitle=subtitle,page_size=6,
+            initial_page=options.initial_page or 1,
+            initial_category=options.initial_category or "favorites",
+            on_page_change=function(page,category)
+                options.initial_page=page;options.initial_category=category
+            end,
+            categories={{key="favorites",label="收藏",items=items},
+                {key="tools",label="筛选 · 排序",items=tools}},
             on_back=options.back_callback or function() self:_show_reader_comment_center() end,
             on_home=function() return self:_reader_home_action("thought favorites") end,
         }
     end
 
-    local menu_items={}
+    local menu_items={{text="筛选与排序",sub_item_table_func=function()
+        local out={}
+        for _,tool in ipairs(tools) do out[#out+1]={text=tool.label,post_text=tool.value,callback=tool.callback} end
+        return out
+    end}}
     for _,item in ipairs(items) do
         menu_items[#menu_items+1]={text=item.text,post_text=item.post_text,close_before_action=true,callback=item.callback}
     end
@@ -29668,7 +29734,9 @@ function Plugin:_show_thought_href(href)
     local info=Thoughts.parse_href(href); if not info then return false end
     -- A disabled comment layer still owns its internal links. Consume them
     -- silently instead of letting KOReader report #miuthought as invalid.
-    if not self:_thoughts_enabled() then return true end
+    -- The visual overlay switch must not block explicit offline list actions.
+    -- Legacy in-book links remain suppressed when the overlay is hidden.
+    if not self:_thoughts_enabled() and not self._opening_cached_comment then return true end
     if self._thought_popup_busy or self._thought_popup then return true end
     local runtime=self._download_runtime
     if runtime and self.download_task and self.download_task:busy() and runtime.comment_slow_notice~=true then

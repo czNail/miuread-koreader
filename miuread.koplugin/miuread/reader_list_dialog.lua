@@ -239,7 +239,7 @@ function Dialog:_row_widget(item, width, height, index)
     local text_w = math.max(1, width - pad * 2 - icon_w - value_w - arrow_w
         - gap * ((icon_w > 0 and 1 or 0) + (value_w > 0 and 1 or 0) + (arrow_w > 0 and 1 or 0)))
     local detail = tostring(item.detail or "")
-    local label_h = detail ~= "" and math.floor(height * .52) or height
+    local label_h = detail ~= "" and math.max(1, math.floor(height * .60)) or height
     local detail_h = math.max(1, height - label_h)
 
     local text_layers = OverlapGroup:new{dimen = Geom:new{w = text_w, h = height}, allow_mirroring = false}
@@ -336,7 +336,7 @@ function Dialog:_inline_actions_widget(item, width, height)
             Skin.face("smallinfofont", count >= 4 and 8.6 or 9.3, count >= 4 and 11.4 or 12.3, count >= 4 and 7.2 or 7.9), {
                 bold = action.danger == true or action.bold == true,
                 alignment = "center", halign = "center",
-                fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+                fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             }))
         group[#group + 1] = tap
         if index < count then group[#group + 1] = HorizontalSpan:new{width = gap} end
@@ -398,7 +398,10 @@ function Dialog:_build_content()
     self.selected_key = tostring(selected and selected.key or "all")
     local tab_h = #categories > 1 and math.max(Skin.dp(37, 32, 49), math.floor(sh * .036)) or 0
     local pager_h_default = Skin.dp(34, 29, 45)
-    local row_h = math.max(Skin.dp(61, 52, 82), math.floor(sh * (portrait and .057 or .080)))
+    -- A two-field row needs at least two readable text bands. On small
+    -- screens show fewer rows instead of shrinking a 2-line label into the
+    -- timestamp area.
+    local row_h = math.max(Skin.dp(83, 72, 109), math.floor(sh * (portrait and .078 or .11)))
     local action_h = Skin.dp(40, 35, 52)
     local action_gap = Skin.dp(5, 4, 7)
     local requested_page_size = self:_page_size()
@@ -408,13 +411,16 @@ function Dialog:_build_content()
     -- hidden: expanding a row must never push the final row under the footer.
     local available_rows = max_h - fixed_h - pager_h_default - action_h - action_gap
     if available_rows < row_h then
-        row_h = math.max(Skin.dp(28, 24, 37), available_rows)
+        row_h = math.max(1, available_rows)
     end
     local possible_slots = math.max(1, math.floor(math.max(1, available_rows) / math.max(1, row_h)))
     local page_size = math.max(1, math.min(requested_page_size, possible_slots))
     local items = self:_items(selected)
     local pages = math.max(1, math.ceil(#items / page_size))
     self.page = math.max(1, math.min(pages, tonumber(self.page) or 1))
+    if self.opts and type(self.opts.on_page_change)=="function" then
+        self.opts.on_page_change(self.page,self.selected_key)
+    end
     local first = (self.page - 1) * page_size + 1
     local last = math.min(#items, first + page_size - 1)
 

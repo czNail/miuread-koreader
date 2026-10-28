@@ -46,12 +46,13 @@ class B4DownloadContract(unittest.TestCase):
     def test_legacy_files_readable_not_regenerated(self):
         main=src('main.lua')
         self.assertIn('self:_preferred_record(b.bookId)',main)
-        self.assertIn('本机文件（含旧版）',main)
+        self.assertIn('本机文件与高级管理',main)
         dialog=src('miuread/book_local_files_dialog.lua')
         self.assertIn('if kind == "clean" then',dialog)
         self.assertIn('"notes"',main)
         self.assertIn('text = "打开" .. label',dialog)
-        self.assertIn('text = "删除" .. label',dialog)
+        self.assertIn('text="仅删除"..label',dialog)
+        self.assertIn('text = "高级文件管理"',dialog)
 
     def test_legacy_notes_checkpoint_not_clean_source(self):
         integrity=src('miuread/book_integrity.lua')
