@@ -167,6 +167,46 @@ assert(type(row.position_state)=='table' and type(row.position_state.remote_posi
 assert(row.position_state.remote_position.sources==nil,'cyclic position_state.remote_position.sources survived save_session')
 assert(row.position_state.remote_position.chapter_uid=='40' and row.position_state.remote_position.offset==747,'position state scalar coordinate was damaged')
 
+-- beta.19 abandon must never reset reading time or saved Kindle position.
+st:save_session('book2',{
+    progress_epoch=3,progress_latest_sequence=12,progress_verified_sequence=9,
+    pending_progress={progress_sequence=12,progress_epoch=3,chapter_uid='b',canonical_offset=117,safe=true},
+    progress_sync_state='upload_failed',progress_upload_state='pending_send',
+    pending_report_seconds=149,pending_report_safe=true,
+    local_display_progress=31.5,local_read_event_at=123456,
+},true)
+local before=assert(st:session('book2'))
+assert(type(before.pending_progress)=='table','test setup lost pending progress')
+assert(st:abandon_pending_progress('book2',3,12))
+local abandoned=assert(st:session('book2'))
+assert(abandoned.pending_progress==nil and abandoned.progress_sync_state=='abandoned',
+    'abandon did not clear the progress upload task')
+assert(abandoned.progress_epoch==4 and abandoned.progress_latest_sequence==12,
+    'abandon did not supersede old callbacks while retaining the sequence')
+assert(abandoned.pending_report_seconds==149 and abandoned.pending_report_safe==true,
+    'abandon erased unconfirmed reading-time debt')
+assert(abandoned.local_display_progress==31.5 and abandoned.local_read_event_at==123456,
+    'abandon erased the saved Kindle reading position')
+assert(not st:abandon_pending_progress('book2',3,12),'stale epoch was allowed to reapply')
+assert(not st:abandon_pending_progress('book2',4,12),'abandon operation should be idempotent')
+-- A detached upload worker with an earlier epoch/sequence must not recreate
+-- the old progress task after the user explicitly abandoned it.
+st:save_session('book2',{progress_epoch=3,progress_latest_sequence=12,
+    pending_progress={progress_sequence=12,progress_epoch=3,chapter_uid='b',canonical_offset=117},
+    progress_sync_state='upload_failed',progress_upload_state='pending_send'},true)
+assert(st:session('book2').pending_progress==nil and st:session('book2').progress_epoch==4,
+    'late old worker resurrected a user-abandoned pending progress upload')
+local durable=assert(loadfile(TMP..'/settings.lua'))()
+assert(durable.sessions.book2.progress_epoch==4 and durable.sessions.book2.pending_progress==nil
+    and durable.sessions.book2.pending_report_seconds==149,
+    'abandoned task reappeared on disk')
+-- Later reading must be able to create a new pending task in the new epoch.
+st:save_session('book2',{pending_progress={progress_sequence=13,progress_epoch=4,chapter_uid='b',canonical_offset=118},
+    progress_sync_state='deferred',progress_upload_state='pending_send'},true)
+assert(type(st:session('book2').pending_progress)=='table',
+    'abandon prevented future reading from generating a new sync task')
+print('beta19 targeted progress abandonment with time-debt preservation: PASS')
+
 local loader,err=loadfile(TMP..'/settings.lua'); assert(loader,err)
 local ok,data=pcall(loader); assert(ok and type(data)=='table','compacted settings file is not valid Lua')
 print('store compaction + schema134/135 shelf recovery migration: PASS')

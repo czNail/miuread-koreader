@@ -27,6 +27,7 @@ local ShelfProgress = require("miuread.shelf_progress")
 local Config = require("miuread.config")
 local UiScale = require("miuread.ui_scale")
 local Ui = require("miuread.ui_components")
+local HeaderLayout = require("miuread.home_header_layout")
 
 local Screen = Device.screen
 local live_widget
@@ -684,7 +685,7 @@ local function shelf_book_card(book, width, height, callback, hold_callback)
     end
     return tappable(width, height, CenterContainer:new{dimen = Geom:new{w = width, h = height}, body},
         function(anchor,ges) if callback then callback(book, anchor, ges) end end,
-        function(anchor) if hold_callback then hold_callback(book, anchor) end end)
+        hold_callback and function(anchor) hold_callback(book, anchor) end or nil)
 end
 
 local function home_action_icon(icon, width, height, enabled)
@@ -881,11 +882,24 @@ function HomeWidget:_metrics()
     local sw, sh = scale.sw, scale.sh
     local portrait = scale.portrait
     local margin = math.max(UiScale.dp(7, 7, 15), math.min(UiScale.dp(12, 9, 18), math.floor(scale.short * .016)))
+    local items=self.opts and self.opts.header_items
+    local all_hidden=type(items)=="table"
+    if all_hidden then
+        for _,key in ipairs({"title","account","wifi","bluetooth","sync","battery","tools"}) do
+            if items[key]~=false and (key~="bluetooth" or self.opts.bluetooth_visible==true) then
+                all_hidden=false
+                break
+            end
+        end
+    end
+    local header_hidden = self.opts and (self.opts.header_visible == false or all_hidden)
     local header_h = portrait
         and math.max(UiScale.dp(42, 42, 58), math.min(UiScale.dp(56, 48, 64), math.floor(sh * .052)))
         or math.max(UiScale.dp(38, 38, 52), math.min(UiScale.dp(48, 42, 56), math.floor(sh * .068)))
     local gap = math.max(UiScale.dp(4, 4, 8), math.min(UiScale.dp(7, 5, 10), math.floor(sh * .006)))
-    local line = UiScale.line("thin")
+    local line = header_hidden and 0 or UiScale.line("thin")
+    local body_y = header_hidden and margin or (margin + header_h + line + gap)
+    if header_hidden then header_h = 0; gap = 0 end
     return {
         sw = sw,
         sh = sh,
@@ -895,8 +909,8 @@ function HomeWidget:_metrics()
         line = line,
         content_w = sw - margin * 2,
         header_h = header_h,
-        body_y = margin + header_h + line + gap,
-        body_h = sh - (margin + header_h + line + gap) - margin,
+        body_y = body_y,
+        body_h = sh - body_y - margin,
     }
 end
 
@@ -905,8 +919,15 @@ function HomeWidget:_register_top_swipe(m)
     -- Own only the true status/header strip. The previous 18–26% zone
     -- overlapped the recent-reading card and competed with KOReader gestures,
     -- which made a pull-down feel delayed on Kindle.
-    local top_h = math.max(m.header_h + m.margin + m.gap, math.floor(m.sh * .10))
-    top_h = math.min(math.floor(m.sh * .14), math.max(top_h, UiScale.dp(82, 72, 118)))
+    local top_h
+    if m.header_h==0 then
+        -- Hidden header still keeps an edge swipe escape hatch, but it must
+        -- not claim a large part of the bookshelf now moved toward the top.
+        top_h=math.min(math.floor(m.sh*.055),UiScale.dp(46,38,62))
+    else
+        top_h = math.max(m.header_h + m.margin + m.gap, math.floor(m.sh * .10))
+        top_h = math.min(math.floor(m.sh * .14), math.max(top_h, UiScale.dp(82, 72, 118)))
+    end
     self.top_swipe_dimen = Geom:new{x = 0, y = 0, w = m.sw, h = math.min(m.sh, top_h)}
     self.ges_events={
         HomeQuickPanelSwipe={GestureRange:new{
@@ -959,98 +980,88 @@ function HomeWidget:onHomeShelfSwipe(_,ges)
 end
 
 function HomeWidget:_build_header(children, m)
-    -- Match the reader toolbar: only render capabilities that really exist,
-    -- and keep a visible safe inset on both ends of the status strip.
+    self._header_text_refs={}
+    self._header_field_dimens={}
+    if m.header_h==0 then return end
     local edge_pad=math.max(UiScale.dp(7,6,12),math.floor(m.content_w*.010))
     local header_x=m.margin+edge_pad
     local header_w=math.max(1,m.content_w-edge_pad*2)
-    local gap=math.max(UiScale.dp(2,2,4),math.floor(header_w*.004))
-    local has_bluetooth=self.opts.bluetooth_visible==true
-    local status_count=has_bluetooth and 5 or 4 -- wifi, [bt], sync, battery, more
-    local title_w=math.max(UiScale.dp(62,54,82),math.floor(header_w*.085))
-    local account_w=math.max(UiScale.dp(112,96,150),math.floor(header_w*.205))
-    local available=math.max(1,header_w-title_w-account_w-gap*(status_count+1))
-    local status_w=math.max(1,math.floor(available/status_count))
-    local last_w=math.max(1,available-status_w*(status_count-1))
-
-    local account_text=tostring(self.opts.account_name or "")
-    if account_text=="" then account_text="未登录" end
-    local wifi_text=tostring(self.opts.wifi_text or "")
-    if wifi_text=="" then wifi_text="Wi-Fi" end
-    local bluetooth_text=tostring(self.opts.bluetooth_text or "")
-    if bluetooth_text=="" then bluetooth_text="蓝牙" end
-    local sync_text=tostring(self.opts.sync_text or "已同步")
-
-    local account_cell=Ui.textbox(account_text,account_w,m.header_h,face("smallinfofont",10.8,14.8),{
-        bold=true,alignment="center",halign="center",fgcolor=Blitbuffer.COLOR_BLACK,height_overflow_show_ellipsis=true,
-    })
-    local function status_text(text,width,icon_space,size)
-        return Ui.textbox(text,math.max(1,width-UiScale.dp(icon_space or 22,19,31)),m.header_h,
-            face("smallinfofont",size or 10.1,(size or 10.1)+4),{
-                bold=true,alignment="left",halign="left",fgcolor=Blitbuffer.COLOR_BLACK,height_overflow_show_ellipsis=true,
-            })
+    local fields=type(self.opts.header_items)=="table" and self.opts.header_items or {}
+    local function enabled(key) return fields[key]~=false end
+    local icon_size=UiScale.dp(20,18,28)
+    local min_hit=math.max(UiScale.dp(38,32,48),icon_size+UiScale.dp(12,8,18))
+    local inside=UiScale.dp(3,2,5)
+    local items={}
+    local function add(key,w,make,callback,priority)
+        if enabled(key) and (key~="bluetooth" or self.opts.bluetooth_visible==true) then
+            items[#items+1]={key=key,width=math.max(min_hit,math.floor(w)),make=make,callback=callback,priority=priority or 0}
+        end
     end
-    local wifi_value_cell=status_text(wifi_text,status_w,24,10.2)
-    local bluetooth_value_cell=has_bluetooth and status_text(bluetooth_text,status_w,22,9.8) or nil
-    local sync_value_cell=status_text(sync_text,status_w,22,10.0)
-    local battery_target_w=has_bluetooth and status_w or status_w
-    local battery_value_cell=status_text(tostring(self.opts.battery_text or "--%"),battery_target_w,24,10.5)
-
-    local header=HorizontalGroup:new{align="center"}
-    header[#header+1]=LeftContainer:new{dimen=Geom:new{w=title_w,h=m.header_h},TextWidget:new{
-        text=self.opts.title or "觅阅",face=face("cfont",16.8,21),bold=true,
-    }}
-    header[#header+1]=HorizontalSpan:new{width=gap}
-    header[#header+1]=tappable(account_w,m.header_h,account_cell,self.opts.on_account)
-    header[#header+1]=HorizontalSpan:new{width=gap}
-
-    local field_x=header_x+title_w+gap+account_w+gap
-    self._header_field_dimens={account=Geom:new{x=header_x+title_w+gap,y=m.margin,w=account_w,h=m.header_h}}
-
-    local function add_status(key,width,child,callback)
-        header[#header+1]=tappable(width,m.header_h,child,callback)
-        self._header_field_dimens[key]=Geom:new{x=field_x,y=m.margin,w=width,h=m.header_h}
-        field_x=field_x+width
-        header[#header+1]=HorizontalSpan:new{width=gap}
-        field_x=field_x+gap
+    local title_face=face("cfont",16.8,21)
+    local label_face=face("smallinfofont",10.8,14.8)
+    local function measured(str,font,bold)
+        local text=TextWidget:new{text=tostring(str or ""),face=font,bold=bold==true}
+        local size=text:getSize()
+        local w=math.ceil(size.w or min_hit)
+        if text.free then pcall(text.free,text) end
+        return math.max(1,w)
     end
-
-    add_status("wifi",status_w,LeftContainer:new{dimen=Geom:new{w=status_w,h=m.header_h},HorizontalGroup:new{
-        align="center",Ui.icon("wifi",UiScale.dp(22,19,29),m.header_h,UiScale.dp(18,16,24),{icon_key="wifi"}),
-        HorizontalSpan:new{width=UiScale.dp(2,2,4)},wifi_value_cell,
-    }},self.opts.on_quick_panel)
-
-    if has_bluetooth then
-        add_status("bluetooth",status_w,LeftContainer:new{dimen=Geom:new{w=status_w,h=m.header_h},HorizontalGroup:new{
-            align="center",Ui.icon("bluetooth",UiScale.dp(20,18,27),m.header_h,UiScale.dp(16,14,21),{icon_key="bluetooth"}),
-            HorizontalSpan:new{width=UiScale.dp(2,1,3)},bluetooth_value_cell,
-        }},self.opts.on_bluetooth or self.opts.on_quick_panel)
-    end
-
-    add_status("sync",status_w,LeftContainer:new{dimen=Geom:new{w=status_w,h=m.header_h},HorizontalGroup:new{
-        align="center",Ui.icon("sync",UiScale.dp(20,18,27),m.header_h,UiScale.dp(16,14,21),{icon_key="sync"}),
-        HorizontalSpan:new{width=UiScale.dp(2,1,3)},sync_value_cell,
-    }},self.opts.on_sync or self.opts.on_quick_panel)
-
-    add_status("battery",status_w,CenterContainer:new{dimen=Geom:new{w=status_w,h=m.header_h},HorizontalGroup:new{
-        align="center",Ui.icon("battery",UiScale.dp(22,19,29),m.header_h,UiScale.dp(17,15,22),{icon_key="battery"}),
-        HorizontalSpan:new{width=UiScale.dp(2,1,3)},battery_value_cell,
-    }},nil)
-
-    -- The final cell owns the remainder and no trailing span is painted outside
-    -- the safe inset. This is what keeps “工具” away from the bezel.
-    local menu_w=last_w
-    header[#header+1]=tappable(menu_w,m.header_h,
-        fixed_frame(menu_w,m.header_h,{bordersize=0,background=Blitbuffer.COLOR_WHITE},
-            Ui.text("工具",menu_w,m.header_h,face("smallinfofont",10.8,14.8),{bold=true})),function()
-        logger.info("[MiuRead][Home] tools menu tapped")
+    local account=tostring(self.opts.account_name or "")
+    if account=="" then account="未登录" end
+    local battery=tostring(self.opts.battery_text or "--%")
+    local sync=tostring(self.opts.sync_text or "已同步")
+    local account_width=math.min(math.floor(header_w*.22),measured(account,label_face,true)+inside*2)
+    local battery_width=math.max(min_hit,icon_size+UiScale.dp(3,2,5)+measured("100%",label_face,true)+inside*2)
+    local sync_width=math.min(math.floor(header_w*.19),icon_size+UiScale.dp(3,2,5)+measured(sync,label_face,true)+inside*2)
+    add("title",measured(self.opts.title or "觅阅",title_face,true)+inside*2,function(w)
+        return Ui.text(self.opts.title or "觅阅",w,m.header_h,title_face,{bold=true})
+    end,nil,0)
+    local account_cell
+    add("account",account_width,function(w)
+        account_cell=Ui.textbox(account,w,m.header_h,label_face,{bold=true,alignment="center",halign="center"})
+        return account_cell
+    end,self.opts.on_account,4)
+    add("wifi",min_hit,function(w)
+        return Ui.icon(self.opts.wifi_icon or "wifi",w,m.header_h,icon_size,{icon_key=self.opts.wifi_icon or "wifi"})
+    end,self.opts.on_wifi or self.opts.on_quick_panel,0)
+    add("bluetooth",min_hit,function(w)
+        return Ui.icon("bluetooth",w,m.header_h,icon_size,{icon_key="bluetooth"})
+    end,self.opts.on_bluetooth or self.opts.on_quick_panel,5)
+    local sync_cell
+    add("sync",sync_width,function(w)
+        local icon_w=icon_size+UiScale.dp(3,2,5)
+        sync_cell=Ui.textbox(sync,math.max(1,w-icon_w),m.header_h,label_face,{bold=true,alignment="center"})
+        return HorizontalGroup:new{align="center",Ui.icon("sync",icon_size,m.header_h,icon_size),sync_cell}
+    end,self.opts.on_sync or self.opts.on_quick_panel,3)
+    local battery_cell
+    add("battery",battery_width,function(w)
+        local icon_w=icon_size+UiScale.dp(3,2,5)
+        battery_cell=Ui.textbox(battery,math.max(1,w-icon_w),m.header_h,label_face,{bold=true,alignment="center"})
+        return HorizontalGroup:new{align="center",Ui.icon("battery",icon_size,m.header_h,icon_size),battery_cell}
+    end,self.opts.on_battery,2)
+    add("tools",min_hit,function(w)
+        return Ui.icon("menu",w,m.header_h,icon_size,{icon_key="menu"})
+    end,function()
         if self.opts and self.opts.on_menu then self.opts.on_menu()
         elseif self.opts and self.opts.on_quick_panel then self.opts.on_quick_panel() end
-    end)
-
+    end,0)
+    local arranged=HeaderLayout.arrange(header_w,items,UiScale.dp(8,6,14))
+    self._header_layout=arranged
+    local header=HorizontalGroup:new{align="center"}
+    local cursor=0
+    for _,item in ipairs(arranged) do
+        local space=item.x-cursor
+        if space>0 then header[#header+1]=HorizontalSpan:new{width=space} end
+        local visual=item.make(item.width)
+        local target=CenterContainer:new{dimen=Geom:new{w=item.width,h=m.header_h},visual}
+        header[#header+1]=tappable(item.width,m.header_h,target,item.callback)
+        self._header_field_dimens[item.key]=Geom:new{x=header_x+item.x,y=m.margin,w=item.width,h=m.header_h}
+        cursor=item.x+item.width
+    end
     self._header_text_refs={
-        account=account_cell[1],wifi=wifi_value_cell[1],bluetooth=bluetooth_value_cell and bluetooth_value_cell[1] or nil,
-        sync=sync_value_cell[1],battery=battery_value_cell[1],
+        account=account_cell and account_cell[1] or nil,
+        sync=sync_cell and sync_cell[1] or nil,
+        battery=battery_cell and battery_cell[1] or nil,
     }
     self:_add(children,header_x,m.margin,header)
     self:_add(children,m.margin,m.margin+m.header_h,LineWidget:new{
@@ -1595,7 +1606,38 @@ function HomeWidget:_rebuild()
     if previous and previous ~= children and previous.free then pcall(previous.free, previous) end
 end
 
+-- KOReader may execute delayed Home dirty callbacks after a dialog has
+-- appeared. A lower home widget must never repaint over a foreground modal.
+local function foreground_over_home(home)
+    local stack=UIManager._window_stack or {}
+    local home_index=nil
+    for index,window in ipairs(stack) do
+        if window and window.widget==home then home_index=index;break end
+    end
+    if not home_index then return false end
+    for index=home_index+1,#stack do
+        local widget=stack[index] and stack[index].widget
+        if widget and widget._miuread_modal_surface==true then return true end
+    end
+    return false
+end
+
 function HomeWidget:_mark_dirty(kind, previous_region)
+    if foreground_over_home(self) then
+        -- Keep just one coalesced retry. The live Home layer may continue
+        -- updating data in the meantime; repaint only after dialogs close.
+        if not self._miu_occluded_dirty_task then
+            local task
+            task=function()
+                if self._miu_closed or self._miu_occluded_dirty_task~=task then return end
+                self._miu_occluded_dirty_task=nil
+                self:_mark_dirty("page")
+            end
+            self._miu_occluded_dirty_task=task
+            UIManager:scheduleIn(.35,task)
+        end
+        return
+    end
     local region
     if kind == "section" then region = self.section_dimen
     elseif kind == "header" then region = self.header_dimen
@@ -1626,6 +1668,11 @@ function HomeWidget:_mark_dirty(kind, previous_region)
                 if self._miu_closed or self._section_clean_refresh_task~=task then return end
                 self._section_clean_refresh_task=nil
                 if self._miu_input_suspended==true or self._miu_device_suspended==true then return end
+                if foreground_over_home(self) then
+                    -- Defer the full waveform rather than corrupt the modal.
+                    self:_mark_dirty("page")
+                    return
+                end
                 UIManager:setDirty(self,function() return "full",clean_region end)
                 logger.info("[MiuRead][HomeSwitchPerf] quality cleanup","delay_ms=",tostring(math.floor((tonumber(Config.HOME_SECTION_CLEAN_REFRESH_DELAY) or 2.8)*1000+.5)))
             end
@@ -1660,17 +1707,25 @@ function HomeWidget:updateHeader(fields)
     if fields.bluetooth_visible~=nil and (self.opts.bluetooth_visible==true)~=(fields.bluetooth_visible==true) then
         self.opts.bluetooth_visible=fields.bluetooth_visible==true
         if fields.bluetooth_text~=nil then self.opts.bluetooth_text=tostring(fields.bluetooth_text or "") end
-        return self:update(self.opts,"header")
+        if self.opts.header_visible~=false and not (self.opts.header_items and self.opts.header_items.bluetooth==false) then
+            return self:update(self.opts,"header")
+        end
+    end
+    if fields.wifi_icon~=nil and fields.wifi_icon~=self.opts.wifi_icon then
+        self.opts.wifi_icon=fields.wifi_icon
+        if self.opts.header_visible~=false and not (self.opts.header_items and self.opts.header_items.wifi==false) then
+            return self:update(self.opts,"header")
+        end
     end
     local refs=type(self._header_text_refs)=="table" and self._header_text_refs or {}
     local dimens=type(self._header_field_dimens)=="table" and self._header_field_dimens or {}
     local mapping={
         account_name={ref="account",default="未登录"},
-        wifi_text={ref="wifi",default="Wi-Fi"},
-        bluetooth_text={ref="bluetooth",default="蓝牙 --"},
         sync_text={ref="sync",default="已同步"},
         battery_text={ref="battery",default="--%"},
     }
+    if fields.wifi_text~=nil then self.opts.wifi_text=fields.wifi_text end
+    if fields.bluetooth_text~=nil then self.opts.bluetooth_text=fields.bluetooth_text end
     local changed_region
     local changed=false
     local fallback=false
@@ -1687,13 +1742,17 @@ function HomeWidget:updateHeader(fields)
                     local region=dimens[spec.ref]
                     if region then changed_region=changed_region and changed_region:combine(region) or region:copy() end
                 else
-                    fallback=true
+                    local items=self.opts.header_items
+                    if self.opts.header_visible~=false and not (type(items)=="table" and items[spec.ref]==false) then
+                        fallback=true
+                    end
                 end
             end
         end
     end
     if not changed then return true end
-    if fallback or not changed_region then return self:update(self.opts,"header") end
+    if fallback and self.opts.header_visible~=false then return self:update(self.opts,"header") end
+    if not changed_region then return true end
     local safety=UiScale.dp(3,2,5)
     local x=math.max(0,(changed_region.x or 0)-safety)
     local y=math.max(0,(changed_region.y or 0)-safety)
@@ -2054,6 +2113,7 @@ function HomeWidget:onCloseWidget()
     self._dimension_refresh_generation=(tonumber(self._dimension_refresh_generation) or 0)+1
     if self._dimension_refresh_task then UIManager:unschedule(self._dimension_refresh_task); self._dimension_refresh_task=nil end
     if self._section_clean_refresh_task then UIManager:unschedule(self._section_clean_refresh_task); self._section_clean_refresh_task=nil end
+    if self._miu_occluded_dirty_task then UIManager:unschedule(self._miu_occluded_dirty_task); self._miu_occluded_dirty_task=nil end
     self:_clear_inactive_section_cache()
     if live_widget == self then live_widget = nil end
     if self.opts and self.opts.on_close then pcall(self.opts.on_close, self) end

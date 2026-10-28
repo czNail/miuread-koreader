@@ -14,11 +14,32 @@ function M.run(api,id,desired,verify_only)
     end
     if present==desired then return {state="verified",already=true,present=present} end
     if verify_only then return {state="mismatch",present=present} end
-    local mutate=desired and api.add_to_shelf or api.remove_from_shelf
-    local sent,value=pcall(mutate,api,id)
+    -- A missing native credential is not an uncertain write. Check this only
+    -- *after* the Web readback, so an already-removed book needs no QR scan.
+    if not desired and type(api.store)=="table" and type(api.store.auth)=="function" then
+        local authenticated=require("miuread.shelf_client").credentials(api.store:auth() or {})
+        if not authenticated then
+            return {state="blocked",stage="credentials",present=present,
+                error="[MiuReadShelfAuthorization] 需要 E-Ink 客户端授权后才能从微信书架移除"}
+        end
+    end
+    -- Web cannot remove shelf entries. A user-authorized native shelf client is
+    -- the only supported write route; Web remains usable for readback.
+    -- This per-action override does not change the global API transport mode.
+    local writer=api
+    if not desired and type(api.for_channel)=="function" then
+        writer=api:for_channel("eink")
+    end
+    local mutate=desired and writer.add_to_shelf or writer.remove_from_shelf
+    local sent,value=pcall(mutate,writer,id)
     local write_error=not sent and tostring(value) or nil
-    if not desired and write_error and write_error:find("[MiuReadShelfPreflight]",1,true) then
-        return {state="blocked",stage="credentials",present=present,error=write_error}
+    if not desired and write_error and (write_error:find("[MiuReadShelfPreflight]",1,true)
+        or write_error:find("E-Ink 来源暂不可用",1,true)) then
+        -- Transport-level native cooldown is also a preflight block: no
+        -- DELETE was dispatched. Offer authorization, not an upload retry.
+        local authorization_error=write_error:find("[MiuReadShelfPreflight]",1,true)
+            and write_error or "[MiuReadShelfAuthorization] E-Ink 书架管理凭据暂不可用，请重新授权"
+        return {state="blocked",stage="credentials",present=present,error=authorization_error}
     end
     local read_error,last_present
     for _=1,2 do

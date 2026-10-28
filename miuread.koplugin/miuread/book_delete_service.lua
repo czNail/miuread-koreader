@@ -139,7 +139,13 @@ function Service:summary(book_id)
         downloaded_chapter_count = 0,
         total_bytes = 0, has_local = false,
     }
-    if not book then return out end
+    if not book then
+        -- A deleted library record may still have a book-scoped database/cache.
+        out.has_local = exists(self.store:book_cache_path(book_id))
+            or exists(self.store:prefetch_book_path(book_id))
+            or exists(self.store:cover_path(book_id))
+        return out
+    end
 
     -- "按章节下载（已下载 N 章）" should also understand a contiguous
     -- range EPUB. Build one union of chapter indexes/UIDs so a clean and notes
@@ -205,6 +211,9 @@ function Service:summary(book_id)
         end
     end
     for _ in pairs(downloaded_units) do out.downloaded_chapter_count = out.downloaded_chapter_count + 1 end
+    out.has_local = out.has_local or exists(self.store:book_cache_path(book_id))
+        or exists(self.store:prefetch_book_path(book_id))
+        or exists(self.store:cover_path(book_id))
     return out
 end
 
@@ -521,6 +530,11 @@ function Service:commit(plan)
         repair_store_recent(self, plan, true)
         self.store:forget_book_local_state(plan.book_id)
         prune_network_metadata(self.store, plan.book_id, nil)
+        for _, path in ipairs(plan.documents or {}) do
+            prune_network_metadata(self.store, nil, path)
+            prune_local_cache_rows(self.store, path)
+            prune_home_membership(self.store, path)
+        end
     elseif scope == "local_file" then
         -- The physical user file is owned by KOReader's native delete flow.
         -- Once it is gone, MiuRead may safely remove only its orphan sidecar /

@@ -551,7 +551,20 @@ for _,row in ipairs(last_home_sheet().actions) do
     if row.label=='标记为已读完' then finished_action=row end
 end
 assert(home_action,'Home long-press menu omitted shelf management')
-assert(finished_action,'Home long-press menu omitted reading status alongside shelf management')
+-- Beta.19 keeps finished status accessible under More to avoid a crowded
+-- downloaded-book action sheet; the callback must remain operational.
+if not finished_action then
+    local more
+    for _,entry in ipairs(last_home_sheet().actions) do
+        if entry.label=='更多操作' then more=entry end
+    end
+    assert(more,'Home long-press menu lost the additional actions entrance')
+    more.callback()
+    for _,entry in ipairs(last_home_sheet().actions) do
+        if entry.label=='标记为已读完' then finished_action=entry end
+    end
+end
+assert(finished_action,'Reading finished status disappeared from both menu levels')
 finished_action.callback()
 assert(p.finished_request.id=='remove' and p.finished_request.desired==true)
 writes=api.writes; home_action.callback()

@@ -1,46 +1,67 @@
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
+local Geometry = require("miuread.modal_geometry")
+local Geom = require("ui/geometry")
 
 local M = {generation = 0}
 
-local function copied(region)
-    if not region then return nil end
-    if type(region.copy) == "function" then
-        local ok, value = pcall(region.copy, region)
-        if ok and value then return value end
-    end
-    return region
-end
-
 function M.cancel_pending()
-    M.generation = (tonumber(M.generation) or 0) + 1
+    M.generation = M.generation + 1
     return M.generation
 end
 
--- CloseWidget is emitted before UIManager has actually removed the old widget.
--- First repaint the whole old frame on the next UI turn, then reopen the parent
--- after one short paint window. A final repaint of the same old frame makes the
--- newly exposed parent/new smaller dialog participate in the refresh as well.
--- The generation guard prevents a delayed parent callback from reopening after
--- the user has already navigated somewhere else.
+-- CloseWidget can run before the widget is removed from UIManager's stack.
+-- Never paint the retired window in place: ask UIManager to repaint the
+-- CURRENT stack on the next turn.  "all" requests layout paint, whereas
+-- nil requests waveform only and may leave an old frame behind.
+function M.restore(region, mode)
+    local safe = Geometry.rect(region, 3)
+    if safe then
+        UIManager:setDirty("all", mode or "ui", Geom:new(safe))
+    end
+end
+
+-- The newly revealed dialog may be larger than the retired one.  Include its
+-- frame only, not its full-screen gesture capture layer.
+local function current_modal_frame()
+    local stack = UIManager._window_stack or {}
+    for i = #stack, 1, -1 do
+        local window = stack[i]
+        local widget = window and window.widget
+        if widget and widget._miuread_modal_surface == true then
+            local rect = widget.bubble_dimen or widget.popup_dimen
+                or widget.frame_dimen or widget.panel_dimen
+            if rect then return Geometry.rect(rect, 3) end
+        end
+    end
+    return nil
+end
+
 function M.after_close(region, action, label)
     local token = M.cancel_pending()
-    local dirty = copied(region)
+    local old = Geometry.rect(region, 3)
     UIManager:nextTick(function()
-        if dirty then UIManager:setDirty("all", "ui", dirty) end
+        -- Never run a stale action after a newer explicit navigation.
+        -- A newer modal may have superseded the pending action, but its
+        -- appearance does not erase the old surface's physical ink pixels.
+        -- Restore the retired frame even when the action is stale.
+        M.restore(old)
+        if token ~= M.generation then return end
         if type(action) ~= "function" then return end
-        UIManager:scheduleIn(.05, function()
+        -- The next turn follows the retired widget's removal, not an
+        -- arbitrary 40/50ms delay which varies across e-ink devices.
+        UIManager:nextTick(function()
             if token ~= M.generation then return end
             local ok, err = pcall(action)
             if not ok then
                 logger.warn("[MiuRead][DialogTransition] action failed", tostring(label or "dialog"), tostring(err))
-                return
             end
-            if dirty then
-                UIManager:nextTick(function()
-                    UIManager:setDirty("all", "ui", dirty)
-                end)
-            end
+            -- New UI may be larger or smaller; its own show() dirties its
+            -- complete frame. Repaint the OLD footprint on the current stack
+            -- even if the action opened another dialog (and changed token).
+            UIManager:nextTick(function()
+                M.restore(Geometry.union(old, current_modal_frame()))
+            end)
         end)
     end)
     return token

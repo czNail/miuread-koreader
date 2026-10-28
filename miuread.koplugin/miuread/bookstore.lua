@@ -410,9 +410,15 @@ end
 local function change_shelf(plugin,book,desired,confirmed)
     if not plugin:require_login() then return false end
     local auth=plugin.store:auth()
-    local native=require("miuread.api_transport").preference(plugin.store)~="web"
-        and require("miuread.shelf_client").credentials(auth)
+    local native_credentials=require("miuread.shelf_client").credentials(auth)
+    local native=require("miuread.api_transport").preference(plugin.store)~="web" and native_credentials
+    -- The membership worker first checks Web state. If the book has already
+    -- been removed remotely, it can confirm without prompting for native
+    -- credentials. Otherwise it requests native authorization before any
+    -- write. Keeping this check in the worker avoids false client scans.
+    if not desired then native=native_credentials end
     if not native and tostring((auth.cookies or {}).wr_skey or "")=="" then
+        if not desired then return authorize_shelf(plugin) end
         plugin:info("管理微信书架需要网页登录，请先扫码登录或修复登录。")
         return false
     end

@@ -333,6 +333,25 @@ function SheetWidget:_build()
     else
         columns=count<=1 and 1 or 2
     end
+    -- A single-column request with many actions may be too tall on landscape
+    -- screens.  Promote to a wider grid before considering any clipping.
+    -- Every action remains accessible; only its preferred column count changes.
+    local max_h = math.floor(sh * (metrics.portrait and .66 or .82))
+    local estimated_fixed = pad * 2 + title_h + subtitle_h
+        + ((title_h + subtitle_h) > 0 and count > 0 and gap or 0)
+        + (footer_h > 0 and (footer_gap_h + footer_h) or 0)
+    for candidate = columns + 1, 3 do
+        local candidate_rows = math.ceil(count / candidate)
+        local candidate_w = math.floor((inner_w - gap * (candidate - 1)) / candidate)
+        local needed = estimated_fixed + candidate_rows * card_h + math.max(0, candidate_rows - 1) * gap
+        if candidate_w >= UiScale.dp(105, 92, 142) and needed <= max_h then
+            local original_rows = math.ceil(count / columns)
+            local original_needed = estimated_fixed + original_rows * card_h
+                + math.max(0, original_rows - 1) * gap
+            if original_needed > max_h then columns = candidate end
+            break
+        end
+    end
     local wide_last = self.opts.wide_last == true and columns == 2 and count % 2 == 1
     local rows = count > 0 and math.ceil(count / columns) or 0
     local card_w = columns == 1 and inner_w or math.floor((inner_w - gap * (columns - 1)) / columns)
@@ -341,8 +360,19 @@ function SheetWidget:_build()
         + rows * card_h + math.max(0, rows - 1) * gap
         + (footer_h > 0 and ((header_h > 0 or rows > 0) and footer_gap_h or 0) + footer_h or 0)
     local panel_h = pad * 2 + content_h
-    local max_h = math.floor(sh * (metrics.portrait and .66 or .82))
-    panel_h = math.min(max_h, panel_h)
+    if panel_h > max_h then
+        -- A clipped frame with full-size cards hides buttons below its edge.
+        -- Shrink the cards only while their tap and text areas remain usable.
+        local fixed = panel_h - rows * card_h
+        local fitted = rows > 0 and math.floor((max_h - fixed) / rows) or card_h
+        if fitted < UiScale.dp(42, 37, 54) then
+            error("action sheet does not fit; use native scrolling dialog")
+        end
+        card_h = math.min(card_h, fitted)
+        content_h = fixed - pad * 2 + rows * card_h
+        panel_h = pad * 2 + content_h
+    end
+    assert(panel_h <= max_h, "action sheet height exceeds viewport")
 
     local list = VerticalGroup:new{align = "center"}
     if has_title then

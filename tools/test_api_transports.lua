@@ -173,7 +173,26 @@ Auth.refresh=function() refreshes=refreshes+1; error('unexpected renewal') end
 http.native_error='[MiuReadAuth] error_code=-2012'
 assert(api:progress('b',{no_auth_recovery=true})._api_channel=='web' and refreshes==0)
 http.native_error=nil; Auth.refresh=old_refresh
-assert(api:book('b')._api_channel=='eink','an independent action inherited a previous fallback')
+-- Beta.17 deliberately remembers a Native authentication failure briefly to
+-- avoid replaying a known-bad E-Ink token for each independent read. The
+-- temporary cooldown is NOT the operation-local fallback scope: an auth
+-- revision change must restore normal Native selection.
+local previously_rejected=#requests
+assert(api:book('b')._api_channel=='web',
+    'a known 401 was retried instead of honoring the temporary auth cooldown')
+assert(#requests==previously_rejected+1 and
+    requests[#requests].url:find('/agent/gateway',1,true),
+    'auth cooldown did not use the expected single Web request')
+store.account.auth_revision=(store.account.auth_revision or 0)+1
+assert(api:book('b')._api_channel=='eink',
+    'an independent request remained on Web after Native auth revision')
+-- Ordinary non-auth errors must still be scoped to one request, not create
+-- the account-wide authentication cooldown.
+http.native_error='HTTP 404'
+assert(api:book('b')._api_channel=='web', 'ordinary Native fallback did not work')
+http.native_error=nil
+assert(api:book('b')._api_channel=='eink',
+    'an independent action inherited a non-authenticated fallback')
 for _,control in ipairs({'[MiuReadRateLimit] error_code=499','download cancelled','__MIUREAD_HIBERNATE__:api'}) do
     http.native_error=control; scoped=api:scope(); local web=count_web()
     assert(not pcall(scoped.search,scoped,'control') and count_web()==web)

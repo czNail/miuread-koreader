@@ -1880,6 +1880,34 @@ local function native_open_row(plugin,item)
     end
 end
 
+-- Menu presentation order only. Never remove compatibility or package facts.
+local function prioritize_extension_rows(rows)
+    local warnings, actions, details = {}, {}, {}
+    for _,row in ipairs(rows or {}) do
+        local label=tostring(row.text or "")
+        if label=="注意" or label=="一键安装不可用" or label=="自动安装不可用"
+            or label=="自动更新已停用" or label=="重复安装"
+            or label:find("插件状态",1,true)==1
+            or label:find("当前更改",1,true)==1
+            or label:find("仓库状态",1,true)==1
+            or label:find("网络状态",1,true)==1
+            or label:find("自动更新/重装",1,true)==1 then
+            warnings[#warnings+1]=row
+        elseif row.enabled==false and not row.callback and not row.sub_item_table_func then
+            details[#details+1]=row
+        else
+            actions[#actions+1]=row
+        end
+    end
+    local ordered={}
+    for _,row in ipairs(warnings) do ordered[#ordered+1]=row end
+    for _,row in ipairs(actions) do ordered[#ordered+1]=row end
+    if #details>0 then
+        ordered[#ordered+1]={text="详细信息",sub_item_table_func=function() return details end}
+    end
+    return ordered
+end
+
 local function repo_detail_rows(plugin,repo,info,release,fallback,stale)
     repo=canonical_repo(repo)
     local catalog_entry=known_repo(repo)
@@ -2010,7 +2038,7 @@ local function repo_detail_rows(plugin,repo,info,release,fallback,stale)
             rows[#rows+1]={text="一键安装不可用",post_text=block_reason or (info.archived==true and "仓库已归档" or "当前条件不支持"),enabled=false}
         end
     end
-    return rows
+    return prioritize_extension_rows(rows)
 end
 
 local function repo_detail(plugin,repo,fallback,force)
@@ -2611,7 +2639,7 @@ local function installed_detail_rows(plugin,item)
         for _,path in ipairs(item.duplicate_paths or {}) do rows[#rows+1]={text=path,enabled=false} end
         rows[#rows+1]={text="自动更新已停用",post_text="请先处理重复副本",enabled=false}
         rows[#rows+1]={text="卸载插件副本",keep_menu_open=true,callback=function() uninstall(plugin,item) end}
-        return rows
+        return prioritize_extension_rows(rows)
     end
     if valid_repo(item.repo) then
         local state=recent_update_state(update_state(plugin),item)
@@ -2630,7 +2658,7 @@ local function installed_detail_rows(plugin,item)
         end
     end
     rows[#rows+1]={text="卸载插件",keep_menu_open=true,callback=function() uninstall(plugin,item) end}
-    return rows
+    return prioritize_extension_rows(rows)
 end
 
 local function update_menu(plugin)
@@ -2796,10 +2824,10 @@ function M.menu(plugin)
         rows[#rows+1]={text="检查扩展更新",post_text=summary.trackable>0 and (tostring(summary.trackable).." 个扩展") or "暂无可检查扩展",
             enabled=summary.trackable>0,keep_menu_open=true,callback=summary.trackable>0 and function() check_updates(plugin,{silent=false}) end or nil}
     end
+    rows[#rows+1]={text="搜索扩展",keep_menu_open=true,callback=function() show_search_dialog(plugin) end}
+    rows[#rows+1]={text="觅阅推荐",sub_item_table_func=function() return recommendation_menu(plugin) end}
     rows[#rows+1]={text="已安装扩展",post_text=tostring(installed_count(plugin)).." 个",sub_item_table_func=function() return installed_menu(plugin) end}
     if pending_n>0 then rows[#rows+1]={text="待重启生效",post_text=tostring(pending_n).." 项",sub_item_table_func=function() return pending_restart_rows(plugin) end} end
-    rows[#rows+1]={text="觅阅推荐",separator=true,post_text="人工精选",sub_item_table_func=function() return recommendation_menu(plugin) end}
-    rows[#rows+1]={text="搜索扩展",keep_menu_open=true,callback=function() show_search_dialog(plugin) end}
     rows[#rows+1]={text="社区热门",post_text="GitHub",keep_menu_open=true,callback=function() github_search(plugin,"topic:koreader-plugin","社区热门",1,"popular",false) end}
     if downloads>0 then rows[#rows+1]={text="插件下载任务",separator=true,post_text=tostring(downloads).." 项",sub_item_table_func=function() return extension_download_rows(plugin) end} end
     rows[#rows+1]={text="扩展下载源",separator=downloads==0,post_text=network_mode_label(plugin),sub_item_table_func=function() return download_source_menu(plugin) end}

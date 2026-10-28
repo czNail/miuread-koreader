@@ -85,9 +85,24 @@ function Scheduler:_clear_stale_active()
     if not active then return end
     local timeout=math.max(30,tonumber(Config.BACKGROUND_LEASE_TIMEOUT_SECONDS) or 300)
     if monotonic()-(tonumber(active.started) or monotonic())>timeout then
-        logger.warn("[MiuRead][Background] stale lease released",
-            "key=",tostring(active.key),"seconds=",tostring(timeout))
-        self.active=nil
+        local alive=nil
+        if type(self.liveness_probe)=="function" then
+            local ok,value=pcall(self.liveness_probe,active.key)
+            if ok and type(value)=="boolean" then alive=value end
+        end
+        if alive==false then
+            logger.warn("[MiuRead][Background] confirmed dead lease released",
+                "key=",tostring(active.key),"seconds=",tostring(timeout))
+            self.active=nil
+            return
+        end
+        if not active.timeout_notified then
+            active.timeout_notified=true
+            logger.warn("[MiuRead][Background] long-running lease retained",
+                "key=",tostring(active.key),"seconds=",tostring(timeout),
+                "alive=",tostring(alive))
+        end
+        -- An elapsed timeout alone cannot prove the child has stopped.
     end
 end
 

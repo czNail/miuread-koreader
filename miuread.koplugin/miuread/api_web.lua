@@ -827,6 +827,11 @@ function Api:_web_readreviews(id,chapter_uid,batch)
     local last
     local candidates=unique_candidates(chapter_uid)
     if #candidates==0 then error("/web/book/readReviews: invalid chapterUid") end
+    -- chapterUid in POST JSON is number-sensitive on some reader endpoints.
+    -- Try the numeric representation first, while preserving a string fallback
+    -- for nonnumeric chapter IDs and data-specific request errors.
+    local numeric=tonumber(scalar(chapter_uid))
+    if numeric then candidates=unique_candidates(numeric) end
     for _,uid in ipairs(candidates) do
         local options=U.copy(WEB_ANNOTATION_REQUEST_OPTIONS)
         options.headers=annotation_headers(id,uid)
@@ -847,21 +852,205 @@ function Api:_web_readreviews(id,chapter_uid,batch)
     error(last or "web readReviews failed")
 end
 
+-- Independent chapter-level public feed for diagnosing/rescuing zero-result
+-- range responses. This is *not* an exhaustive replacement for readReviews:
+-- the feed normally contains only a subset of public thoughts. Never infer
+-- that an empty chapter feed proves there are no public reviews.
+function Api:chapter_public_reviews(id,chapter_uid)
+    local uid=scalar(chapter_uid)
+    if uid==nil or tostring(uid)=="" then error("invalid chapterUid") end
+    local url="https://weread.qq.com/web/review/list?bookId="
+        ..Protocol.escape(tostring(id or ""))
+        .."&chapterUid="..Protocol.escape(uid)
+        .."&listType=8&maxIdx=0&count=100&listMode=3&synckey=0"
+    local options=U.copy(WEB_ANNOTATION_REQUEST_OPTIONS)
+    options.retries=0 -- one bounded supplemental check, not an endless retry
+    options.headers=annotation_headers(id,uid)
+    return self:_recover_web_once("chapter_public_reviews",function()
+        local value=self.http:get_json(url,options)
+        return unwrap(value)
+    end,true)
+end
+
 function Api:_agent_readreviews(id,chapter_uid,batch)
-    local value=self:_chapter_call("/book/readreviews",id,chapter_uid,
+    local normalized=tonumber(scalar(chapter_uid)) or chapter_uid
+    local value=self:_chapter_call("/book/readreviews",id,normalized,
         {reviews=sanitize(batch or {})},AGENT_ANNOTATION_REQUEST_OPTIONS)
     if type(value)=="table" then value._annotation_source="agent" end
     return value
+end
+
+-- A success status and an empty `reviews` array do not establish that
+-- all requested highlight ranges were queried. Compare range coverage
+-- without logging personal review texts or user credentials.
+local function review_coverage(response,batch)
+    if type(response)~="table" or type(response.reviews)~="table" then return 0 end
+    local requested,found={},{}
+    for _,item in ipairs(batch or {}) do
+        if type(item)=="table" then requested[tostring(item.range or "")]=true end
+    end
+    for _,item in ipairs(response.reviews) do
+        if type(item)=="table" then
+            local key=tostring(item.range or item.markRange
+                or (type(item.review)=="table" and item.review.range) or "")
+            if requested[key] and type(item.pageReviews or item.reviews or item.updated)=="table" then
+                found[key]=true
+            end
+        end
+    end
+    local count=0
+    for _ in pairs(found) do count=count+1 end
+    return count
+end
+
+-- Preserve every valid range and its reviews when comparing Web/Gateway. Both
+-- providers can return the same range with different data. No empty response
+-- is allowed to erase nonempty data from another provider.
+local function review_rows(value)
+    if type(value)~="table" then return {} end
+    return type(value.reviews)=="table" and value.reviews
+        or (type(value.updated)=="table" and value.updated or {})
+end
+local function review_items(row)
+    if type(row)~="table" then return {} end
+    if type(row.pageReviews)=="table" then return row.pageReviews end
+    if type(row.reviews)=="table" then return row.reviews end
+    if type(row.updated)=="table" then return row.updated end
+    -- Some Web responses use a flat entry rather than pageReviews per range.
+    if type(row.review)=="table" or type(row.content)=="string" then return {row} end
+    return {}
+end
+local function review_count(value)
+    local count=0
+    for _,row in ipairs(review_rows(value)) do count=count+#review_items(row) end
+    return count
+end
+local function join_review_responses(web,agent,batch)
+    local allowed,by_range,sequence={},{},{}
+    for _,item in ipairs(batch or {}) do allowed[tostring(item.range or "")]=true end
+    local function merge(source)
+        for _,row in ipairs(review_rows(source)) do
+            local key=type(row)=="table" and tostring(row.range or row.markRange
+                or (type(row.review)=="table" and row.review.range) or "") or ""
+            if allowed[key] and type(row)=="table" then
+                local incoming=review_items(row)
+                local target=by_range[key]
+                if not target then
+                    target={range=key,pageReviews={},_miu_sources={}}
+                    by_range[key]=target
+                    sequence[#sequence+1]=target
+                end
+                local seen=target._miu_seen or {}
+                target._miu_seen=seen
+                for _,entry in ipairs(incoming) do
+                    if type(entry)=="table" then
+                        local key_id=tostring(entry.reviewId or entry.id or "")
+                        local nested=type(entry.review)=="table" and entry.review or entry
+                        if key_id=="" then key_id=tostring(nested.reviewId or nested.id or "") end
+                        if key_id=="" then key_id=tostring(nested.content or nested.text or "")
+                            .. "|" .. tostring(nested.createTime or nested.createdAt or "") end
+                        if not seen[key_id] then
+                            seen[key_id]=true
+                            target.pageReviews[#target.pageReviews+1]=entry
+                        end
+                    end
+                end
+                target._miu_sources[#target._miu_sources+1]=source._annotation_source or "unknown"
+                -- A zero is authoritative only if both independent sources
+                -- explicitly state zero; missing totals are NOT zero.
+                local total=tonumber(row.totalCount or row.total or row.reviewCount)
+                local origin=source==web and "web" or "agent"
+                target._miu_totals=target._miu_totals or {}
+                target._miu_totals[origin]=total
+                if total~=nil then
+                    target._miu_total=math.max(total,tonumber(target._miu_total or 0) or 0)
+                end
+            end
+        end
+    end
+    merge(web);merge(agent)
+    local uncertain={}
+    for _,item in ipairs(sequence) do
+        local totals=item._miu_totals or {}
+        local both_zero=totals.web==0 and totals.agent==0
+        if #item.pageReviews==0 and not both_zero then uncertain[item.range]=true end
+        -- Only the first page (count=30) is requested. Remaining history is
+        -- intentionally best-effort and cannot be classified as a failure.
+        item._miu_seen=nil
+        item._miu_totals=nil
+    end
+    return {reviews=sequence,_annotation_source="merged",_miu_uncertain_ranges=uncertain}
+end
+
+local function mark_unverified_single_source(response)
+    if type(response)~="table" then return response end
+    local uncertain={}
+    for _,row in ipairs(review_rows(response)) do
+        if type(row)=="table" then
+            local key=tostring(row.range or row.markRange
+                or (type(row.review)=="table" and row.review.range) or "")
+            local n=#review_items(row)
+            local expected=tonumber(row.totalCount or row.reviewCount or row.total)
+            if key~="" and n==0 then
+                uncertain[key]=true
+            end
+        end
+    end
+    response._miu_uncertain_ranges=uncertain
+    return response
 end
 
 function Api:readreviews(id, chapter_uid, batch)
     if self.web_annotation_auth_dead==true then
         logger.dbg("[MiuRead][API] web readReviews skipped; annotation circuit open",
             "book=",tostring(id),"chapter=",tostring(chapter_uid),"ranges=",tostring(#(batch or {})))
-        return self:_agent_readreviews(id,chapter_uid,batch)
+        return mark_unverified_single_source(self:_agent_readreviews(id,chapter_uid,batch))
     end
     local ok,value=pcall(self._web_readreviews,self,id,chapter_uid,batch)
-    if ok then self.web_annotation_auth_dead=false; return value end
+    if ok then
+        self.web_annotation_auth_dead=false
+        local covered=review_coverage(value,batch)
+        local entries=review_count(value)
+        logger.info("[MiuRead][Comments] Web batch", "book=",tostring(id),
+            "chapter=",tostring(chapter_uid),"requested=",tostring(#(batch or {})),
+            "covered=",tostring(covered),"entries=",tostring(entries))
+        local declared=0
+        for _,group in ipairs(review_rows(value)) do
+            local count=tonumber(group.totalCount or group.reviewCount or group.total)
+            if count and count>0 then declared=declared+count end
+        end
+        if covered<#(batch or {}) or entries==0 or (declared>0 and entries<declared) then
+            -- Coverage alone cannot establish comment completeness. Check the
+            -- second source even if all Web ranges were present but empty.
+            local agent_ok,agent=pcall(self._agent_readreviews,self,id,chapter_uid,batch)
+            if agent_ok then
+                local combined=join_review_responses(value,agent,batch)
+                logger.info("[MiuRead][Comments] cross-source batch", "book=",tostring(id),
+                    "chapter=",tostring(chapter_uid),"gateway_ranges=",tostring(review_coverage(agent,batch)),
+                    "gateway_entries=",tostring(review_count(agent)),
+                    "merged_entries=",tostring(review_count(combined)))
+                return combined
+            end
+            propagate_control_error(agent)
+            logger.warn("[MiuRead][Comments] Gateway cross-check unavailable",
+                "book=",tostring(id),"chapter=",tostring(chapter_uid),
+                "error=",U.first_line(agent,120))
+            -- A fully empty unverified Web response must not be permanently
+            -- committed as an authoritative finished chapter.
+            if entries==0 or (declared>0 and entries<declared) then
+                local uncertain={}
+                for _,row in ipairs(review_rows(value)) do
+                    local key=tostring(row.range or row.markRange
+                or (type(row.review)=="table" and row.review.range) or "")
+                    local n=#review_items(row)
+                    local expected=tonumber(row.totalCount or row.reviewCount or row.total)
+                    if key~="" and (n==0 or (expected and expected>n)) then uncertain[key]=true end
+                end
+                value._miu_uncertain_ranges=uncertain
+            end
+        end
+        return value
+    end
     propagate_control_error(value)
     self:_note_web_annotation_failure(value)
     -- Batch-shape failures must go back to the adaptive splitter. Falling
@@ -871,7 +1060,7 @@ function Api:readreviews(id, chapter_uid, batch)
     logger.warn("[MiuRead][API] web readReviews unavailable; using Skill Gateway",
         "book=",tostring(id),"chapter=",tostring(chapter_uid),
         "ranges=",tostring(#(batch or {})),"error=",tostring(value))
-    return self:_agent_readreviews(id,chapter_uid,batch)
+    return mark_unverified_single_source(self:_agent_readreviews(id,chapter_uid,batch))
 end
 
 Api._scalar = scalar

@@ -9,8 +9,9 @@ end
 function M.sync(plugin)
     return {
         {text="同步状态",post_text=plugin:_home_sync_status_label(),callback=function() plugin:show_sync_status(false) end},
-        {text="重新同步失败内容",post_text="进度 时间 批注",callback=function() plugin:_sync_home_pending() end},
-        {text="同步设置",post_text="时间 进度 批注",sub_item_table_func=function() return plugin:sync_settings_menu() end},
+        {text="手动同步",sub_item_table_func=function() return plugin:sync_now_menu() end},
+        {text="重试失败项目",callback=function() plugin:_confirm_sync_retry() end},
+        {text="同步设置",sub_item_table_func=function() return plugin:sync_settings_menu() end},
     }
 end
 
@@ -61,17 +62,17 @@ function M.reading_library(plugin)
     return {
         {text="微信读书",post_text=plugin:logged_in() and "已登录" or "未登录",sub_item_table_func=function() return weread_settings(plugin) end},
         {text="本地书库",post_text=plugin:_local_library_root_label(),sub_item_table_func=function() return plugin:local_library_preferences_menu() end},
-        {text="公众号阅读",post_text="图片与缓存",sub_item_table_func=function() return plugin:mp_settings_menu() end},
+        {text="公众号阅读",sub_item_table_func=function() return plugin:mp_settings_menu() end},
         {text="评论显示",post_text=plugin:_thought_display_label(),sub_item_table_func=function() return M.comments(plugin) end},
     }
 end
 
 function M.sync_download(plugin)
     return {
-        {text="接口通道",post_text=require("miuread.api_transport").preference(plugin.store)=="web" and "Web" or "自动（E-Ink 优先）",sub_item_table_func=function() return plugin:api_transport_menu() end},
-        {text="同步",post_text="时间 进度 批注",sub_item_table_func=function() return plugin:sync_settings_menu() end},
-        {text="下载",post_text=plugin:_download_settings_summary(),sub_item_table_func=function() return plugin:download_settings_menu() end},
-        {text="存储",post_text="缓存与清理",sub_item_table_func=function() return plugin:storage_management_menu() end},
+        {text="接口通道",post_text=require("miuread.api_transport").preference(plugin.store)=="web" and "Web" or "自动",sub_item_table_func=function() return plugin:api_transport_menu() end},
+        {text="同步",sub_item_table_func=function() return plugin:sync_settings_menu() end},
+        {text="下载",sub_item_table_func=function() return plugin:download_settings_menu() end},
+        {text="存储",sub_item_table_func=function() return plugin:storage_management_menu() end},
     }
 end
 
@@ -79,9 +80,10 @@ local function home_page_settings(plugin)
     local home=plugin:_home_preferences()
     return {
         {text="页面布局",post_text=(home.layout_style=="compact" and "紧凑布局" or "标准布局"),sub_item_table_func=function() return plugin:home_layout_settings_menu() end},
+        {text="主页顶栏显示",post_text=plugin:_home_header_visibility_label(),sub_item_table_func=function() return plugin:home_header_settings_menu() end},
         {text="主页阅读统计",post_text=plugin:_home_stats_visibility_label(home),sub_item_table_func=function() return plugin:home_stats_settings_menu() end},
         {text="显示书架封面",checked_func=function() return plugin.store:preferences().shelf_covers~=false end,keep_menu_open=true,callback=function() plugin:_toggle_preference("shelf_covers") end},
-        {text="网络补全图书信息",post_text="只补充缺失资料",checked_func=function() return plugin:_home_preferences().network_metadata~=false end,keep_menu_open=true,callback=function() plugin:_toggle_home_network_metadata() end},
+        {text="网络补全图书信息",checked_func=function() return plugin:_home_preferences().network_metadata~=false end,keep_menu_open=true,callback=function() plugin:_toggle_home_network_metadata() end},
     }
 end
 
@@ -107,10 +109,10 @@ end
 
 function M.home_interface(plugin)
     return {
-        {text="主页",post_text="布局与内容",sub_item_table_func=function() return home_page_settings(plugin) end},
-        {text="快捷入口",post_text="主页快捷栏 + 下滑控制中心",sub_item_table_func=function() return plugin:home_customization_menu() end},
+        {text="主页",sub_item_table_func=function() return home_page_settings(plugin) end},
+        {text="快捷入口",sub_item_table_func=function() return plugin:home_customization_menu() end},
         reader_toolbar_row(plugin),
-        {text="字体与显示",post_text="大小 字体与时间",sub_item_table_func=function() return display_typography_settings(plugin) end},
+        {text="字体与显示",sub_item_table_func=function() return display_typography_settings(plugin) end},
         {text="锁屏壁纸",post_text=plugin:_home_lockscreen_style_label(plugin:_home_preferences()),sub_item_table_func=function() return lockscreen_settings(plugin) end},
     }
 end
@@ -135,6 +137,8 @@ function M.update_about(plugin)
     local channel_label=plugin:_update_channel_label(channel)
     local restart_label=update.restart_mode=="auto" and "自动重启" or (update.restart_mode=="never" and "稍后手动重启" or "询问是否重启")
     return {
+        {text="检查更新",callback=plugin:safe("update",function() plugin:check_update(false) end)},
+        {text="更新通道",post_text=channel_label,sub_item_table_func=function() return plugin:update_channel_menu() end},
         {text="自动检查更新",checked_func=function()
             local _,u=plugin:_update_preferences(); return u.auto_check~=false
         end,keep_menu_open=true,callback=function()
@@ -142,11 +146,7 @@ function M.update_about(plugin)
         end},
         {text="检查频率",post_text=plugin:_update_interval_label(update.interval),sub_item_table_func=function() return plugin:update_frequency_menu() end},
         {text="更新完成后",post_text=restart_label,sub_item_table_func=function() return plugin:update_restart_menu() end},
-        {text="更新通道",post_text=channel_label,sub_item_table_func=function() return plugin:update_channel_menu() end},
-        {text="检查"..channel_label.."更新",post_text="当前："..channel_label,callback=plugin:safe("update",function() plugin:check_update(false) end)},
-        {text="当前版本",post_text=tostring(plugin.version),enabled=false},
         {text="关于觅阅",callback=plugin:safe("about",function() plugin:show_about() end)},
-        {text="许可证",post_text="AGPL-3.0-only",enabled=false},
         {text="第三方声明",callback=function() plugin:show_third_party_notices() end},
     }
 end
@@ -166,33 +166,42 @@ end
 
 function M.system_maintenance(plugin)
     return {
-        {text="导出运行日志",callback=function() plugin:export_runtime_log() end},
-        {text="同步诊断",sub_item_table_func=function() return plugin:sync_diagnostics_menu() end},
-        {text="时间诊断",callback=function()
-            local rows=plugin:diagnostics_menu()
-            local row=rows and rows[2]
-            if row and row.callback then row.callback() end
-        end},
-        {text="刷新本地书库",post_text="重新发现全部本地书",callback=function() plugin:_home_scan_local(true,true) end},
-        {text="更新缺失书籍资料",callback=function() plugin:_home_reset_local_metadata(); plugin:_home_complete_refresh(true) end},
-        {text="重建封面",callback=function() plugin:_clear_cover_cache() end},
-        {text="重建书架索引",callback=function() plugin.store:reload(); plugin.store:prune_missing_files(); plugin:_show_miuread_home_now(false,true,true,"full") end},
-        {text="检查下载完整性",callback=function() plugin:scan_downloaded_books_for_integrity_repair() end},
-        {text="存储清理",post_text="临时文件、预下载与失效封面",callback=function() plugin:show_download_cleanup_dialog() end},
+        {text="日志与状态",sub_item_table_func=function() return {
+            {text="导出运行日志",callback=function() plugin:export_runtime_log() end},
+            {text="时间诊断",callback=function()
+                local rows=plugin:diagnostics_menu(); local row=rows and rows[2]
+                if row and row.callback then row.callback() end
+            end},
+        } end},
+        {text="书库修复",sub_item_table_func=function() return {
+            {text="刷新本地书库",callback=function() plugin:_home_scan_local(true,true) end},
+            {text="更新缺失书籍资料",callback=function() plugin:_home_reset_local_metadata();plugin:_home_complete_refresh(true) end},
+            {text="重建封面",callback=function() plugin:_clear_cover_cache() end},
+            {text="重建书架索引",callback=function() plugin.store:reload();plugin.store:prune_missing_files();plugin:_show_miuread_home_now(false,true,true,"full") end},
+            {text="检查下载完整性",callback=function() plugin:scan_downloaded_books_for_integrity_repair() end},
+        } end},
+        {text="存储管理",sub_item_table_func=function() return {
+            {text="查看存储占用",callback=function() plugin:show_storage_usage() end},
+            {text="清理可再生缓存",callback=function() plugin:show_download_cleanup_dialog() end},
+        } end},
+        {text="高级诊断",sub_item_table_func=function() return {
+            {text="同步诊断",sub_item_table_func=function() return plugin:sync_diagnostics_menu() end},
+            {text="同步状态详情",sub_item_table_func=function() return plugin:sync_diagnostics_status_menu() end},
+        } end},
     }
 end
 
 function M.menu(plugin)
     local rows={
-        {text="阅读与书库",post_text="微信读书 本地书与评论",sub_item_table_func=function() return M.reading_library(plugin) end},
-        {text="同步与下载",post_text="同步 下载与存储",sub_item_table_func=function() return M.sync_download(plugin) end},
+        {text="阅读与书库",sub_item_table_func=function() return M.reading_library(plugin) end},
+        {text="同步与下载",sub_item_table_func=function() return M.sync_download(plugin) end},
     }
     if plugin:_home_enabled() then
-        rows[#rows+1]={text="首页与界面",post_text="主页 界面与快捷入口",sub_item_table_func=function() return M.home_interface(plugin) end}
+        rows[#rows+1]={text="首页与界面",sub_item_table_func=function() return M.home_interface(plugin) end}
     else
-        rows[#rows+1]={text="阅读界面",post_text="觅阅阅读工具栏",sub_item_table_func=function() return M.plugin_interface(plugin) end}
+        rows[#rows+1]={text="阅读界面",sub_item_table_func=function() return M.plugin_interface(plugin) end}
     end
-    rows[#rows+1]={text="运行与兼容",post_text="运行模式 性能与提醒",sub_item_table_func=function() return M.runtime_compat(plugin) end}
+    rows[#rows+1]={text="运行与兼容",sub_item_table_func=function() return M.runtime_compat(plugin) end}
     rows[#rows+1]={text="更新与关于",post_text=tostring(plugin.version),sub_item_table_func=function() return M.update_about(plugin) end}
     return rows
 end

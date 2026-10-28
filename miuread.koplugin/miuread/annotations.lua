@@ -63,7 +63,9 @@ end
 
 local function range_key(v)
     if type(v) ~= "table" then return "" end
-    return scalar_str(rawget(v,"range") or rawget(v,"markRange") or rawget(v,"bookmarkRange"))
+    local nested=rawget(v,"review")
+    return scalar_str(rawget(v,"range") or rawget(v,"markRange") or rawget(v,"bookmarkRange")
+        or (type(nested)=="table" and (rawget(nested,"range") or rawget(nested,"markRange"))))
 end
 
 local function array_from(data, names)
@@ -95,7 +97,12 @@ end
 
 local function review_texts(group,yield_check)
     local rows, seen, invalid = {}, {}, 0
-    local pages, skipped = table_entries(array_from(group, {"pageReviews", "reviews", "updated"}))
+    local raw=array_from(group, {"pageReviews", "reviews", "updated"})
+    if #raw==0 and type(group)=="table"
+        and (type(group.review)=="table" or type(group.content)=="string") then
+        raw={group} -- Flat Web review shape, no pageReviews wrapper.
+    end
+    local pages, skipped = table_entries(raw)
     invalid = invalid + skipped
     for page_index, page in ipairs(pages) do
         if yield_check and page_index%64==0 then yield_check() end
@@ -104,14 +111,24 @@ local function review_texts(group,yield_check)
         -- review can never abort the whole book download.
         local ok, item = pcall(function()
             if type(page) ~= "table" then return nil end
-            local nested = rawget(page, "review")
-            local r = type(nested) == "table" and nested or page
-            if type(r) ~= "table" then return nil end
-            local content = scalar_str(rawget(r, "content") or rawget(r, "review") or rawget(r, "text"))
+            -- Agent and Web may wrap the actual text at different review
+            -- depths. Never interpret a nested table as literal comment text.
+            local r = page
+            local review_id = scalar_str(rawget(page, "reviewId") or rawget(page, "id"))
+            for _ = 1, 3 do
+                if scalar_str(rawget(r, "content") or rawget(r, "text"))~="" then break end
+                local nested = rawget(r, "review")
+                if type(nested) ~= "table" then break end
+                if review_id == "" then
+                    review_id = scalar_str(rawget(nested, "reviewId") or rawget(nested, "id"))
+                end
+                r = nested
+            end
+            local content = scalar_str(rawget(r, "content") or rawget(r, "text"))
             if content == "" then return nil end
             local author = type(rawget(r, "author")) == "table" and rawget(r, "author") or {}
             local author_name = scalar_str(rawget(author, "nick") or rawget(author, "name") or rawget(r, "authorName"))
-            local key = scalar_str(rawget(r, "reviewId") or rawget(r, "id"))
+            local key = review_id
             if key == "" then key = content .. "\0" .. author_name end
             return {
                 key = key,
@@ -120,7 +137,7 @@ local function review_texts(group,yield_check)
                 created = tonumber(rawget(r, "createTime") or rawget(r, "createdAt") or 0) or 0,
                 author = author_name,
                 likes = tonumber(rawget(page, "likesCount") or rawget(r, "likesCount") or 0) or 0,
-                review_id = scalar_str(rawget(r, "reviewId") or rawget(r, "id")),
+                review_id = review_id,
             }
         end)
         if ok and item and not seen[item.key] then
@@ -151,7 +168,7 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
         underline_count=0,thought_count=0,thought_entry_count=0,errors={},underline_request_ok=false,
         underlines_partial=false,completed_ranges={},pending_ranges={},review_complete=false,complete=false}
 
-    local reuse_pending=previous and previous.underline_request_ok==true
+    local reuse_pending=previous and options.force_refresh~=true and previous.underline_request_ok==true
         and previous.underlines_partial~=true and #(previous.underlines or {})>0
         and #(previous.pending_ranges or {})>0
     if reuse_pending then
@@ -240,8 +257,18 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
                 new_invalid=new_invalid+invalid
                 if #texts>0 then
                     if not review_map[key] then review_map[key]={}; group_count=group_count+1 end
-                    for _,item in ipairs(texts) do review_map[key][#review_map[key]+1]=item end
-                    entry_count=entry_count+#texts
+                    local seen={}
+                    for _,old in ipairs(review_map[key]) do
+                        seen[tostring(old.review_id or old.content or "")]=true
+                    end
+                    for _,item in ipairs(texts) do
+                        local id=tostring(item.review_id or item.content or "")
+                        if not seen[id] then
+                            seen[id]=true
+                            review_map[key][#review_map[key]+1]=item
+                            entry_count=entry_count+1
+                        end
+                    end
                 end
             else
                 new_invalid=new_invalid+1
@@ -276,19 +303,46 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
     end
 
     local function accept_response(batch,response,label)
+        if type(response.reviews)~="table" and type(response.updated)~="table" and #response==0 then
+            result.error_kind=result.error_kind or "data"
+            result.errors[#result.errors+1]=tostring(label).." missing review list"
+            save_checkpoint()
+            return false
+        end
         local rows,invalid=table_entries(array_from(response,{"reviews","updated"}))
         local entry_invalid=merge_review_rows(rows)
         local skipped=invalid+entry_invalid
         if skipped>0 then
-            result.error_kind=result.error_kind or "data"
-            result.errors[#result.errors+1]=tostring(label).." skipped malformed review entries"
+            -- The damaged records are skipped individually; successful ones
+            -- remain available and must not trigger a user-facing failure.
             invalid_review_count=invalid_review_count+invalid
         end
-        -- A successful response is complete even when a malformed optional
-        -- review entry was skipped. Keeping the whole range pending caused
-        -- the same data to be fetched and normalized indefinitely.
+        -- We only request a bounded first page per range. An optional omitted
+        -- empty range is not a batch transport error; this completion flag
+        -- records successful sampling rather than complete server history.
+        local requested={}
+        for _,item in ipairs(batch) do
+            local key=range_key(item)
+            if key~="" then requested[key]=true end
+        end
+        -- WeRead may omit ranges with zero public thoughts and may include
+        -- malformed individual entries. Neither invalidates the usable
+        -- entries in the same batch. A structurally valid reviews array is a
+        -- successful best-effort first-page fetch, NOT proof of entire history.
+        -- Do not leave every range pending because of a single bad entry.
+        local answered,unknown=0,0
+        for _,group in ipairs(rows) do
+            local key=range_key(group)
+            if requested[key] then answered=answered+1 else unknown=unknown+1 end
+        end
+        if skipped>0 or unknown>0 then
+            logger.warn("[MiuRead][Comments] ignored malformed/extra entries",
+                "book=",result.book_id,"chapter=",result.chapter_uid,
+                "skipped=",skipped,"unrequested=",unknown)
+        end
         mark_batch_completed(batch)
         save_checkpoint()
+        return true
     end
 
     local function split_batch(batch)
@@ -308,8 +362,7 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
             return self.api:readreviews(book_id,uid,batch)
         end)
         if good then
-            accept_response(batch,response,label)
-            return true,false
+            return accept_response(batch,response,label),false
         end
 
         if is_data_specific_failure(response) and #batch>1 then
@@ -348,6 +401,76 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
         if stop then break end
     end
 
+    -- An independent Web chapter feed can reveal public thoughts even when
+    -- every underline-range response was empty. Use it only as a bounded
+    -- *positive evidence* source. An empty feed cannot prove no comments.
+    -- This path is read-only: it does not modify the EPUB.
+    if entry_count==0 and #active_ranges>0 and type(self.api.chapter_public_reviews)=="function" then
+        local feed_ok,feed=pcall(self.api.chapter_public_reviews,self.api,book_id,uid)
+        if feed_ok and type(feed)=="table" then
+            local feed_rows=array_from(feed,{"reviews","updated","list"})
+            if #feed_rows==0 and type(feed.data)=="table" then
+                feed_rows=array_from(feed.data,{"reviews","updated","list"})
+            end
+            local found,invalid_feed={},0
+            for _,row in ipairs(feed_rows) do
+                if type(row)=="table" then
+                    local nested=type(row.review)=="table" and row.review or row
+                    local key=range_key(nested)
+                    if key=="" then key=range_key(row) end
+                    if key~="" then
+                        found[key]=found[key] or {}
+                        found[key][#found[key]+1]=row
+                    else
+                        invalid_feed=invalid_feed+1
+                    end
+                else
+                    invalid_feed=invalid_feed+1
+                end
+            end
+            local recovered=0
+            for key,entries in pairs(found) do
+                local texts=review_texts({pageReviews=entries})
+                if #texts>0 then
+                    if not active_seen[key] then
+                        -- A thought range can be absent from underline listings;
+                        -- retain it as a separately located public-thought anchor.
+                        active_seen[key]=true
+                        result.underlines[#result.underlines+1]={range=key}
+                    end
+                    if not review_map[key] then review_map[key]={};group_count=group_count+1 end
+                    local already={}
+                    for _,item in ipairs(review_map[key]) do
+                        already[tostring(item.review_id or item.content or "")]=true
+                    end
+                    for _,item in ipairs(texts) do
+                        local unique=tostring(item.review_id or item.content or "")
+                        if not already[unique] then
+                            already[unique]=true
+                            review_map[key][#review_map[key]+1]=item
+                            entry_count=entry_count+1
+                            recovered=recovered+1
+                        end
+                    end
+                end
+            end
+            logger.info("[MiuRead][Comments] chapter public feed", "book=",result.book_id,
+                "chapter=",result.chapter_uid,"rows=",#feed_rows,
+                "recovered=",recovered,"missing_range=",invalid_feed)
+            if recovered>0 then
+                -- The chapter feed is a limited discovery source: some other
+                -- range reviews may still be missing. Do not claim full sync.
+                -- A positive chapter feed is useful supplemental content.
+                -- It does not invalidate already completed normal batches.
+            end
+        else
+            local reason=feed_ok and "invalid_response" or tostring(feed)
+            logger.warn("[MiuRead][Comments] chapter public feed unavailable",
+                "book=",result.book_id,"chapter=",result.chapter_uid,
+                "reason=",U.first_line(reason,100))
+        end
+    end
+
     rebuild_state()
     if invalid_review_count>0 then
         logger.warn("[MiuRead][Annotations] malformed review entries skipped",
@@ -355,7 +478,8 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
     end
     logger.info("[MiuRead][Annotations] chapter fetched","book=",result.book_id,"chapter=",result.chapter_uid,
         "underlines=",result.underline_count,"thought_groups=",result.thought_count,
-        "thought_entries=",result.thought_entry_count,"pending_ranges=",#result.pending_ranges)
+        "thought_entries=",result.thought_entry_count,"pending_ranges=",#result.pending_ranges,
+        "review_complete=",tostring(result.review_complete))
     return result
 end
 
@@ -961,7 +1085,10 @@ function Annotations:merge(previous,current)
         return current
     end
 
-    if current.underlines_partial==true and previous then
+    -- Refresh is additive. A transient empty or incomplete underline reply
+    -- cannot invalidate previously stored public thoughts/ranges. Explicit
+    -- deletion is a separate user operation, never an implicit refresh side effect.
+    if previous then
         current.underlines=merge_underlines(previous.underlines,current.underlines)
     end
 
@@ -977,7 +1104,7 @@ function Annotations:merge(previous,current)
     end
     for key in pairs(active) do
         local texts
-        if completed[key] then texts=new_map[key] or {}
+        if completed[key] then texts=merge_review_lists(old_map[key],new_map[key])
         elseif pending[key] then texts=merge_review_lists(old_map[key],new_map[key])
         else texts=merge_review_lists(old_map[key],new_map[key]) end
         groups[#groups+1]={range=key,texts=texts}

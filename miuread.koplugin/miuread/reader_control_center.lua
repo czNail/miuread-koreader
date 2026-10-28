@@ -16,6 +16,7 @@ local Widget = require("ui/widget/widget")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local TransientGuard = require("miuread.transient_guard")
+local DialogTransition = require("miuread.dialog_transition")
 local Skin = require("miuread.reader_skin")
 local Ui = require("miuread.ui_components")
 
@@ -58,7 +59,8 @@ local Center = InputContainer:extend{
     name = "miuread_reader_control_center",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Full-screen gesture capture, partial opaque ink frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     closed = false,
@@ -98,6 +100,10 @@ end
 
 function Center:_run_item(item)
     if not item or item.enabled == false then return true end
+    if item.keep_open == true then
+        if item.callback then item.callback() end
+        return true
+    end
     return self:_close(item.callback)
 end
 
@@ -204,6 +210,8 @@ function Center:_tab_widget(category, width, height, selected)
         callback = function()
             if self.selected_key ~= key then
                 self.selected_key = key
+                -- A new category starts on its first page, not the former tab's page.
+                self._section_page = 1
                 self:_rebuild()
             end
         end,
@@ -245,13 +253,79 @@ function Center:_build_root()
     local sections = category and category.sections or (self.opts.sections or {})
     sections = type(sections) == "table" and sections or {}
 
-    local body_h = self:_sections_height(sections, section_title_h, item_h, gap)
-    for _, candidate in ipairs(categories) do
-        body_h = math.max(body_h, self:_sections_height(candidate.sections, section_title_h, item_h, gap))
-    end
     local tabs_h = #categories > 1 and tab_h or 0
-    local content_h = header_h + tabs_h + gap + body_h
     local max_h = sh - top_inset - math.max(28, math.floor(sh * .052))
+    local row_budget = math.max(1, max_h - (pad * 2 + header_h + tabs_h + gap))
+    -- Keep category switching stable while bounding every row. When available
+    -- height is short, shrink rows down to a readable minimum before paging.
+    local function section_rows(list)
+        local count, titles, gaps = 0, 0, math.max(0, #list - 1)
+        for _, section in ipairs(list) do
+            if tostring(section.title or "") ~= "" then titles = titles + 1 end
+            count = count + math.max(1, #(section.items or {}))
+        end
+        return count, titles, gaps
+    end
+    local most_rows, most_titles, most_gaps = section_rows(sections)
+    for _, candidate in ipairs(categories) do
+        local n,t,g = section_rows(candidate.sections or {})
+        if n > most_rows then most_rows,most_titles,most_gaps=n,t,g end
+    end
+    local fixed_sections = most_titles * section_title_h + most_gaps * gap
+    local minimum_row = Skin.dp(34, 29, 45)
+    local room = math.floor((row_budget - fixed_sections) / math.max(1, most_rows))
+    item_h = math.min(item_h, math.max(minimum_row, room))
+    -- If a category is still taller than the screen, show a bounded subset.
+    -- The full set is kept in opts so the next page can be opened.
+    local capacity = math.max(1, math.floor(math.max(1, row_budget - section_title_h) / math.max(1,item_h)))
+    local flat = {}
+    for _, section in ipairs(sections) do
+        for _, item in ipairs(section.items or {}) do
+            flat[#flat+1] = {item=item, title=tostring(section.title or "")}
+        end
+    end
+    local paging = #flat > capacity
+    if paging then
+        -- Reserve both navigation rows *before* measuring visible content.
+        -- Otherwise Next/Previous can paint past the panel bottom.
+        capacity = math.max(1, math.floor(row_budget / math.max(1,item_h)) - 2)
+        local pages = math.max(1, math.ceil(#flat / capacity))
+        self._section_page = math.max(1, math.min(pages, tonumber(self._section_page) or 1))
+        local first=(self._section_page-1)*capacity+1
+        local page_sections={}
+        if self._section_page>1 then
+            page_sections[#page_sections+1]={items={{icon="back",label="上一页",keep_open=true,callback=function()
+                self._section_page=self._section_page-1; self:_rebuild()
+            end}}}
+        end
+        for i=first,math.min(#flat,first+capacity-1) do
+            local entry=flat[i]
+            local tail=page_sections[#page_sections]
+            if not tail or tostring(tail.title or "")~=entry.title or tail._nav then
+                tail={title=entry.title,items={}}
+                page_sections[#page_sections+1]=tail
+            end
+            tail.items[#tail.items+1]=entry.item
+        end
+        if self._section_page<pages then
+            page_sections[#page_sections+1]={items={{icon="chevron-right",label="下一页",keep_open=true,callback=function()
+                self._section_page=self._section_page+1; self:_rebuild()
+            end}}}
+        end
+        -- Recalculate with section headers; shrink rows if this page contains more headers.
+        sections=page_sections
+        while item_h>1 and self:_sections_height(sections,section_title_h,item_h,gap)>row_budget do
+            item_h=item_h-1
+        end
+    end
+    local body_h = self:_sections_height(sections, section_title_h, item_h, gap)
+    local content_h = header_h + tabs_h + gap + body_h
+    if pad * 2 + content_h > max_h then
+        -- Safe last resort: every painted row still stays inside the frame.
+        item_h = math.max(1, math.floor((row_budget - section_title_h) / math.max(1,#(sections[1] and sections[1].items or {}))))
+        body_h = self:_sections_height(sections, section_title_h, item_h, gap)
+        content_h = header_h + tabs_h + gap + body_h
+    end
     self.panel_h = math.min(max_h, pad * 2 + content_h)
     self._stable_panel_h = math.max(tonumber(self._stable_panel_h) or 0, self.panel_h)
     self.panel_h = self._stable_panel_h
@@ -410,13 +484,7 @@ function Center:onCloseWidget()
     self.pending_action = nil
     self.closed = true
     if live_center == self then live_center = nil end
-    if region then UIManager:setDirty(nil, function() return "ui", region end) end
-    if action then
-        UIManager:scheduleIn(.04, function()
-            local ok, err = pcall(action)
-            if not ok then logger.warn("[MiuRead][ReaderControlCenter] action failed", tostring(err)) end
-        end)
-    end
+    DialogTransition.after_close(region, action, "ReaderControlCenter")
 end
 
 local M = {}

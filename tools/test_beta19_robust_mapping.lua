@@ -25,7 +25,12 @@ assert(main:find('reliable_text_anchor_landing',1,true),"quiet reliable text-anc
 assert(main:find('if same_chapter and text_anchor_attempted and not reliable_text_anchor_landing',1,true),"percent fallback can still override text-anchor landing")
 assert(not main:find('精确章节内位置暂未确认',1,true),"old misleading exact-position warning still present")
 assert(main:find('已定位到云端章节附近',1,true),"real chapter-only fallback warning missing")
-assert(worker:find('local refreshed=refresh_remote_anchor(client, book_id, book)',1,true),"ReadReport fresh GET guard lost")
+assert(worker:find('local local_position,local_error=estimate_position(book,progress_ratio)',1,true),
+ "reading-time report no longer builds a valid Kindle coordinate")
+assert(worker:find('local valid,why=validate_terminal_progress(book,local_position)',1,true),
+ "reading-time report lost the terminal-position integrity guard")
+assert(worker:find('position_override.source="kindle_native_time_guard"',1,true),
+ "reading-time report lost its authoritative position selection")
 
 -- Minimal UTF-8 splitter for Lua 5.1/5.3 test portability.
 local function split_chars(s)

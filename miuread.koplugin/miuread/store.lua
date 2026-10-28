@@ -39,7 +39,7 @@ local defaults={
              annotations={state="unknown",checked_at=0,error="",code="",failures=0,retry_at=0},
              read_report={state="unknown",checked_at=0,error="",code="",failures=0,retry_at=0},
          }}},
- preferences={api_transport="auto",images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=false,download_complete_notice=true,download_reader_warning=true,download_reader_policy="ask",chapter_prefetch_enabled=true,chapter_continuous_enabled=true,download_dir="",shelf_section="account",account_shelf_kind="books",shelf_filter={enabled=false,archives={},archive_keys={}},shelf_group_hint={accounts={}},home_ui={enabled=false,layout_version=24,layout_style="desk",show_weread_stats=true,show_local_stats=true,display_size="standard",ui_font_mode="default",ui_font_face="",local_entry_root="",local_entry_version=1,local_browse_version=3,lockscreen_style="frame",lockscreen_last_native_style="frame",lockscreen_provider="native",lockscreen_pending_provider="",lockscreen_dash_source="",lockscreen_native_snapshot={},page_by_section={},source_order={"shelf","device","recent"},visible_sections={shelf=true,device=true,recent=true},library_layout_version=1,library_membership={},library_filters={shelf={source="all",kind="all",locality="all",sort="cloud"},device={source="all",kind="all",locality="all",sort="recent"}},weread_group="all",action_items={refresh=true,search=false,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false},action_order={"refresh","bookstore","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"},action_layout_version=7,panel_items={wifi=true,bluetooth=false,rotate=true,mp=true,screenshot=false,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false},panel_order={"wifi","bluetooth","rotate","mp","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"},panel_layout_version=7,more_expanded=false,network_metadata_user_set=false,network_metadata=true},reader_ui={enabled=true,plugin_mode_enabled=false,show_title=false,show_status=false,show_recent=false,recent_actions={},edge_guard_enabled=true,edge_guard_percent=15,quick_layout_version=11,quick_items={toc=true,progress=true,search=true,back=true,font=true,spacing=true,page=true,comments=true,bookmark=true,highlight=true,thought=true,sync=true},quick_order={"toc","progress","search","back","font","spacing","page","comments","bookmark","highlight","thought","sync"}},notices={reader_download=true,low_battery=true,low_storage=true,full_refresh=true,lockscreen=true,mode_switch=true,mode_environment=true},mode_intro={pending_mode="plugin",pending_reason="first_install",last_confirmed_mode="",confirmed_at=0},memory_mode={enabled=false,previous_known=false,previous_ratio=false},performance_mode={enabled=false,auto_detect=true,last_prompt_at=0,reminders_disabled=false},time_display={mode="device",zone="Asia/Shanghai",offset_minutes=480},thoughts={enabled=true,online_likes=false,font_size=22,font_face="",follow_body_font=false,width_ratio=0.90,height_ratio=0.55,display_mode="native_compact_rounded"},annotation_sync={enabled=false,review_visibility="private",highlight_style=1,highlight_color=0,close_upload_enabled=true},update={manifest=Config.UPDATE_MANIFEST,auto_check=true,interval=Config.AUTO_UPDATE_INTERVAL,last_attempt_at=0,last_success_at=0,last_prompted_version="",restart_mode="ask"},sync={time_enabled=true,progress_enabled=true,progress_mode="close",success_notice_enabled=false,error_notice_enabled=true,manual_only=false,auto_upload=false,pull_on_open=true,auto_latest_position=true,fast_local_fallback=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300}},
+ preferences={api_transport="auto",images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=false,download_complete_notice=true,download_reader_warning=true,download_reader_policy="ask",chapter_prefetch_enabled=true,chapter_continuous_enabled=true,download_dir="",shelf_section="account",account_shelf_kind="books",shelf_filter={enabled=false,archives={},archive_keys={}},shelf_group_hint={accounts={}},home_ui={enabled=false,layout_version=24,layout_style="desk",header_visible=true,header_items={title=true,account=true,wifi=true,bluetooth=true,sync=true,battery=true,tools=true},show_weread_stats=true,show_local_stats=true,display_size="standard",ui_font_mode="default",ui_font_face="",local_entry_root="",local_entry_version=1,local_browse_version=3,lockscreen_style="frame",lockscreen_last_native_style="frame",lockscreen_provider="native",lockscreen_pending_provider="",lockscreen_dash_source="",lockscreen_native_snapshot={},page_by_section={},source_order={"shelf","device","recent"},visible_sections={shelf=true,device=true,recent=true},library_layout_version=1,library_membership={},library_filters={shelf={source="all",kind="all",locality="all",sort="cloud"},device={source="all",kind="all",locality="all",sort="recent"}},weread_group="all",action_items={refresh=true,search=false,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false},action_order={"refresh","bookstore","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"},action_layout_version=7,panel_items={wifi=true,bluetooth=false,rotate=true,mp=true,screenshot=false,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false},panel_order={"wifi","bluetooth","rotate","mp","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"},panel_layout_version=7,more_expanded=false,network_metadata_user_set=false,network_metadata=true},reader_ui={enabled=true,plugin_mode_enabled=false,show_title=false,show_status=false,show_recent=false,recent_actions={},edge_guard_enabled=true,edge_guard_percent=15,quick_layout_version=11,quick_items={toc=true,progress=true,search=true,back=true,font=true,spacing=true,page=true,comments=true,bookmark=true,highlight=true,thought=true,sync=true},quick_order={"toc","progress","search","back","font","spacing","page","comments","bookmark","highlight","thought","sync"}},notices={reader_download=true,low_battery=true,low_storage=true,full_refresh=true,lockscreen=true,mode_switch=true,mode_environment=true},mode_intro={pending_mode="plugin",pending_reason="first_install",last_confirmed_mode="",confirmed_at=0},memory_mode={enabled=false,previous_known=false,previous_ratio=false},performance_mode={enabled=false,auto_detect=true,last_prompt_at=0,reminders_disabled=false},time_display={mode="device",zone="Asia/Shanghai",offset_minutes=480},thoughts={enabled=true,online_likes=false,font_size=22,font_face="",follow_body_font=false,width_ratio=0.90,height_ratio=0.55,display_mode="native_compact_rounded"},annotation_sync={enabled=false,review_visibility="private",highlight_style=1,highlight_color=0,close_upload_enabled=true},update={manifest=Config.UPDATE_MANIFEST,auto_check=true,interval=Config.AUTO_UPDATE_INTERVAL,last_attempt_at=0,last_success_at=0,last_prompted_version="",restart_mode="ask"},sync={time_enabled=true,progress_enabled=true,progress_mode="close",success_notice_enabled=false,error_notice_enabled=true,manual_only=false,auto_upload=false,pull_on_open=true,auto_latest_position=true,fast_local_fallback=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300}},
  library={},sessions={},shelf_cache={raw_books={},raw_mp={},books={},mp={},groups={updated_at=0,authoritative=false,list={},book_groups={}},effective_scope={mode="all",fingerprint="all",updated_at=0},updated_at=0,stream={enabled=false,ids={},hydrated_ids={},total=0,source="",updated_at=0}},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},recent_reads={version=1,items={}},
  prefetch_cache={},finished_status={},
@@ -570,18 +570,25 @@ function Store:new(options)
             logger.warn("[MiuRead][StoreRepair] position snapshots compacted at startup","sessions=",tostring(count))
         end
     end
-    -- beta.5: reading-time debt is no longer durable. Clear only historical
-    -- time-report retry/failure fields; progress/annotation recovery is untouched.
+    -- beta.6: preserve SAFE, provably unsent reading-time carry across restarts.
+    -- The old startup scrub cleared it unconditionally, making long sessions
+    -- lose the excess over the single-request limit after every KOReader restart.
+    -- Only repair legacy dropped state when no verified safe carry exists.
     do
         local sessions=o.db:readSetting("sessions",{}) or {}
         local cleaned=0
         for _,session in pairs(sessions) do
             if type(session)=="table" then
                 local changed=false
-                if tonumber(session.pending_report_seconds or 0)~=0 then session.pending_report_seconds=0; changed=true end
-                if session.pending_report_safe==true then session.pending_report_safe=false; changed=true end
+                local seconds=math.max(0,math.floor(tonumber(session.pending_report_seconds) or 0))
+                if session.pending_report_safe~=true and seconds>0 then
+                    -- Old unmarked time may already have been sent; do not replay.
+                    session.pending_report_seconds=0
+                    changed=true
+                end
                 local rs=tostring(session.report_state or "")
-                if rs=="time_only_failed" or rs=="best_effort_retry" or rs=="dropped" then
+                if (rs=="time_only_failed" or rs=="best_effort_retry" or rs=="dropped")
+                    and not (session.pending_report_safe==true and seconds>0) then
                     session.report_state=false
                     session.last_error=false
                     session.last_error_kind=false
@@ -594,9 +601,9 @@ function Store:new(options)
         if cleaned>0 then
             o.db:saveSetting("sessions",sessions)
             startup_dirty=true
-            logger.info("[MiuRead][StoreRepair] reading-time retry state cleared at startup","sessions=",tostring(cleaned))
+            logger.info("[MiuRead][StoreRepair] unsafe legacy read-time state scrubbed", "sessions=",tostring(cleaned))
         end
-        pcall(os.remove,data.."/readtime-recovery-v1.json")
+        -- Retain the validated recovery journal across restarts.
     end
     -- beta.6 regression recovery: beta.5 persisted progress write fences even
     -- though they described only one reconciliation attempt. Remove those
@@ -631,47 +638,10 @@ function Store:new(options)
             logger.warn("[MiuRead][StoreRepair] beta.5 progress fences recovered at startup","sessions=",tostring(cleaned))
         end
     end
-    -- beta.16 one-shot clean-room migration. 5.9 beta.4-15 all used
-    -- schema 136, so downgrading/reinstalling did not invalidate progress
-    -- transactions or CloudAnchor/report-context snapshots. Run once on the
-    -- existing store, advance each book's progress_epoch, and remove only the
-    -- sync control plane. The next open/sync must rebuild its baseline from a
-    -- fresh server observation.
-    if schema_before>=Config.SCHEMA and o.db:readSetting("progress_state_reset_beta16",false)~=true then
-        local sessions=o.db:readSetting("sessions",{}) or {}
-        local cleaned,books,fields=reset_progress_sync_sessions(sessions,"beta16_one_shot_clean_state")
-        o.db:saveSetting("sessions",cleaned)
-        o.db:saveSetting("progress_state_reset_beta16",true)
-        o.db:saveSetting("progress_state_reset_beta16_at",os.time())
-        -- Old best-effort time-recovery payloads must not survive the same reset.
-        pcall(os.remove,data.."/readtime-recovery-v1.json")
-        startup_dirty=true
-        logger.warn("[MiuRead][StoreRepair] beta.16 progress sync state reset",
-            "books=",tostring(books),"fields=",tostring(fields),"preserved=local_display/auth/books/annotations")
-    end
-    -- beta.17 repeats the control-plane reset once because beta.16 exposed a
-    -- cross-Store resurrection bug: an older Home/Reader Store could flush a
-    -- pre-reset pending transaction back over the clean disk row. beta.17 fixes
-    -- that merge below with progress_epoch authority, then performs one final
-    -- reset so installations already affected by beta.16 start clean.
-    if schema_before>=Config.SCHEMA and o.db:readSetting("progress_state_reset_beta17",false)~=true then
-        local sessions=o.db:readSetting("sessions",{}) or {}
-        local cleaned,books,fields=reset_progress_sync_sessions(sessions,"beta17_epoch_authoritative_clean_state")
-        o.db:saveSetting("sessions",cleaned)
-        o.db:saveSetting("progress_state_reset_beta17",true)
-        o.db:saveSetting("progress_state_reset_beta17_at",os.time())
-        pcall(os.remove,data.."/readtime-recovery-v1.json")
-        startup_dirty=true
-        local actionable=0
-        for _,row in pairs(cleaned) do
-            if type(row)=="table" and (type(row.pending_progress)=="table"
-                or type(row.pending_progress_coordinate)=="table") then actionable=actionable+1 end
-        end
-        logger.warn("[MiuRead][StoreRepair] beta.17 progress control reset",
-            "books=",tostring(books),"fields=",tostring(fields),
-            "actionable_after_reset=",tostring(actionable),
-            "preserved=local_display/auth/books/annotations")
-    end
+    -- beta.6: do not repeat historical beta.16/beta.17 control-plane resets.
+    -- They could discard pending_progress and provably unsent reading time on
+    -- a late upgrade whose one-shot marker was missing. Targeted repair above
+    -- recovers obsolete fences without destroying user transactions.
     -- 5.9.1-beta.1 one-shot repair: beta.19 passive exact-cache rows carried
     -- native `chapterUid + wr_data_co` but accidentally omitted `safe=true`.
     -- When such a row became the durable ReadingEnd snapshot, upload rejected
@@ -1836,6 +1806,12 @@ function Store:forget_book_local_state(id)
     U.remove_tree(self:prefetch_book_path(key))
     local sessions=self:get("sessions",{}); sessions[key]=nil; self:set("sessions",sessions)
     local covers=self:get("cover_index",{}); covers[key]=nil; self:set("cover_index",covers)
+    -- Drop per-book queued cloud-finished intents so local deletion cannot
+    -- cause an old pending request to be transmitted on a later resume.
+    local finished=self:get("finished_status",{})
+    if type(finished)=="table" and finished[key]~=nil then
+        finished[key]=nil; self:set("finished_status",finished)
+    end
 
     local queue_out={}
     for _,job in ipairs(self:download_queue()) do
@@ -1978,8 +1954,21 @@ function Store:prefetched_chapters(id)
 end
 function Store:prefetched_chapter_count(id) return #self:prefetched_chapters(id) end
 function Store:delete_book(id)
-    for _,path in ipairs(self:book_paths(id,true)) do U.remove_tree(path) end
-    self:forget_book(id)
+    -- Legacy internal entrypoint. The UI uses BookDeleteService to also remove
+    -- KOReader document sidecars/history; never delete shared favorites here.
+    local key=tostring(id or "")
+    if key=="" then return nil,"bookId missing" end
+    local paths=self:book_paths(key,true)
+    paths[#paths+1]=self:cover_path(key)
+    local favorites=tostring(self.data_dir or "").."/thought_favorites.sqlite3"
+    for _,path in ipairs(paths) do
+        -- Do not trust a damaged legacy library.file pointer to target a
+        -- global user-owned collection by accident.
+        if path~="" and path~=favorites and path~=favorites.."-wal"
+            and path~=favorites.."-shm" then U.remove_tree(path) end
+    end
+    self:forget_book_local_state(key)
+    return true
 end
 function Store:all_books()
     local o={}; for id,b in pairs(self:library()) do local x=U.copy(b); x.book_id=x.book_id or id; o[#o+1]=x end
@@ -2465,6 +2454,31 @@ function Store:save_session(id,patch,flush_now)
     -- recursing into a diagnostic source graph.
     compact_session_row(current,keep_chapters)
     compact_session_row(incoming,keep_chapters)
+    -- An old detached worker must not recreate a task the user deliberately
+    -- abandoned. Only a *new* reading event with a later sequence and the
+    -- current epoch may create another pending position for this book.
+    local abandoned=tonumber(current.progress_abandoned_sequence or 0) or 0
+    if abandoned>0 then
+        local task=type(incoming.pending_progress)=="table" and incoming.pending_progress
+            or type(incoming.pending_progress_coordinate)=="table" and incoming.pending_progress_coordinate
+            or type(incoming.pending_unresolved_position)=="table" and incoming.pending_unresolved_position
+        local task_seq=tonumber(task and task.progress_sequence or incoming.progress_latest_sequence or 0) or 0
+        local task_epoch=tonumber(task and task.progress_epoch or incoming.progress_epoch or 0) or 0
+        local current_epoch=math.max(1,tonumber(current.progress_epoch or 1) or 1)
+        local stale=(task~=nil or incoming.progress_epoch~=nil)
+            and (task_seq<=abandoned or (task_epoch>0 and task_epoch<current_epoch))
+        if stale then
+            for _,field in ipairs({
+                "pending_progress","pending_progress_coordinate","pending_unresolved_position",
+                "progress_epoch","progress_sync_state","progress_upload_state",
+                "progress_submission_phase","progress_upload_error","progress_upload_pending_at",
+                "progress_latest_sequence","progress_resolution_choice","progress_resolution_at",
+                "progress_upload_submitted_at","progress_worker_active",
+            }) do incoming[field]=nil end
+            logger.info("[MiuRead][ProgressAbandon] old callback ignored","book=",k,
+                "sequence=",task_seq,"abandoned=",abandoned)
+        end
+    end
     a[k]=U.merge(current,incoming)
     local _,removed=compact_session_row(a[k],keep_chapters)
     if removed>0 then
@@ -2512,6 +2526,50 @@ function Store:reset_progress_sync_state(id,reason,flush_now)
         "reason=",tostring(reason or "manual_progress_sync_reset"))
     return books,fields
 end
+-- Explicitly discard only a saved progress upload task. This is not a
+-- progress reset: the Kindle reading position, cloud observations, reading-time
+-- debt, annotations and bookmarks must survive untouched.
+function Store:abandon_pending_progress(id,expected_epoch,expected_sequence)
+    local key=tostring(id or "")
+    if key=="" then return false,"book_missing" end
+    local sessions=self:get("sessions",{}) or {}
+    local row=type(sessions[key])=="table" and U.copy(sessions[key]) or nil
+    if not row then return false,"session_missing" end
+    local epoch=math.max(1,tonumber(row.progress_epoch or 1) or 1)
+    if expected_epoch and tonumber(expected_epoch)~=epoch then return false,"task_superseded" end
+    local pending=type(row.pending_progress)=="table" and row.pending_progress
+        or type(row.pending_progress_coordinate)=="table" and row.pending_progress_coordinate
+        or type(row.pending_unresolved_position)=="table" and row.pending_unresolved_position
+    if not pending then return false,"already_resolved" end
+    local sequence=tonumber(pending.progress_sequence or 0) or 0
+    if expected_sequence and tonumber(expected_sequence)~=sequence then return false,"task_superseded" end
+    -- Advance the epoch *before* removing the task. Existing detached progress
+    -- callbacks check this generation and cannot recreate the discarded row.
+    row.progress_epoch=epoch+1
+    for _,field in ipairs({
+        "pending_progress","pending_progress_coordinate","pending_unresolved_position",
+        "progress_upload_error","progress_upload_pending_at","progress_upload_submitted_at",
+        "progress_upload_chapter_uid","progress_upload_co","progress_upload_remote_co",
+        "progress_write_blocked","progress_write_block_reason","progress_write_blocked_at",
+        "progress_last_verify_reason","progress_last_verify_at",
+    }) do row[field]=nil end
+    row.progress_upload_state=false
+    row.progress_submission_phase=false
+    row.progress_resubmit_allowed=false
+    row.progress_worker_active=false
+    row.progress_sync_state="abandoned"
+    row.progress_sync_message="已放弃旧的上传任务；当前 Kindle 阅读位置仍保留"
+    row.progress_state_reset_at=os.time()
+    row.progress_state_reset_reason="user_abandoned_progress_upload"
+    row.progress_abandoned_sequence=sequence
+    sessions[key]=row
+    self.db:saveSetting("sessions",sessions)
+    local saved,err=self:flush("abandon_progress:"..key)
+    if saved==false then return false,err or "save_failed" end
+    logger.info("[MiuRead][ProgressAbandon] saved","book=",key,"sequence=",sequence,"epoch=",row.progress_epoch)
+    return true
+end
+
 function Store:clear_session(id) local a=self:get("sessions",{}); a[tostring(id)]=nil; self:set("sessions",a) end
 function Store:shelf_cache() return U.merge(defaults.shelf_cache,self:get("shelf_cache",{})) end
 function Store:save_shelf_cache(v) return self:set("shelf_cache",U.merge(defaults.shelf_cache,v or {})) end
@@ -2572,16 +2630,30 @@ function Store:enqueue_download(job)
     local queue=self:download_queue()
     if #queue>=1 then return nil,"full" end
     queue[1]=U.copy(job or {})
-    self:save_download_queue(queue)
+    -- A resource-wait task is only safe if its durable queue write succeeded.
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then return nil,"queue_save_failed:"..tostring(err or "unknown") end
     return 1
 end
 function Store:dequeue_download()
     local queue=self:download_queue(); if #queue==0 then return nil end
-    local job=table.remove(queue,1); self:save_download_queue(queue); return job
+    local job=table.remove(queue,1)
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then
+        logger.warn("[MiuRead][DownloadQueue] unable to dequeue durable job",tostring(err or "unknown"))
+        return nil
+    end
+    return job
 end
 function Store:remove_queued_download(index)
     local queue=self:download_queue(); index=tonumber(index); if not index or not queue[index] then return false end
-    table.remove(queue,index); self:save_download_queue(queue); return true
+    table.remove(queue,index)
+    local saved,err=self:save_download_queue(queue)
+    if saved~=true then
+        logger.warn("[MiuRead][DownloadQueue] unable to remove durable job",tostring(err or "unknown"))
+        return false
+    end
+    return true
 end
 function Store:pending_installs() return self:get("pending_installs",{}) end
 function Store:save_pending_installs(rows) self:set("pending_installs",type(rows)=="table" and rows or {}) end

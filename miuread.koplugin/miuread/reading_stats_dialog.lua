@@ -8,6 +8,7 @@ local HorizontalSpan = require("ui/widget/horizontalspan")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local OverlapGroup = require("ui/widget/overlapgroup")
+local DialogTransition = require("miuread.dialog_transition")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
@@ -573,11 +574,7 @@ function Dialog:onCloseWidget()
     self.pending_action=nil
     self.closed=true
     if live_dialog==self then live_dialog=nil end
-    if region then UIManager:setDirty(nil,function() return "ui",region end) end
-    if action then UIManager:scheduleIn(.04,function()
-        local ok,err=pcall(action)
-        if not ok then logger.warn("[MiuRead][ReadingStats] close action failed",tostring(err)) end
-    end) end
+    DialogTransition.after_close(region, action, "ReadingStatsDialog")
 end
 
 local M={}

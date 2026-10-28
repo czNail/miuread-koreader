@@ -1,5 +1,176 @@
 # Changelog
 
+## 6.1.0-beta.19 - Best-effort comments, progress queue and UI repair
+
+- 公开想法采用尽力而为首批获取；单条异常不再将整批正常评论标记为失败，成功数据直接保存，更新时不向读者显示获取数量、失败范围或正文定位统计。
+- 保留 Web/Gateway 交叉核查及章节公开想法补充来源；评论缓存只增量合并，不删除历史评论和收藏；暂不追求所有历史评论的深度分页。
+- 支持单条及批量放弃待上传阅读进度，使用 progress_epoch 使旧后台回调失效；保留 Kindle 当前阅读位置、个人批注、评论及未确认阅读时间；首页同步提醒可单独隐藏。
+- 修正微信书架移除授权路径：删除始终通过已授权 E-Ink 写入，Web 可用于云端状态回读；账号未授权时提供扫码入口，写入结果未知时不盲目重复提交。
+- 按书籍下载状态精简长按主菜单，将带评论 EPUB、章节下载和阅读状态集中到更多操作；恢复带评论版为独立可选下载类型，默认仍为纯正文。
+- 主页绘制与延迟刷新避开前景模态弹窗，减少 E-Ink 白块和按钮遮挡风险，仍需 Kindle Voyage 实机验收。
+- 保留 Kindle 精确位置优先、时间上报安全保护和现有 GitHub 手动版本号/自动 Tag 发布流程；新增回归覆盖，未改动用户数据库 Schema。
+
+
+## 6.1.0-beta.18 - Independent public comment refresh
+
+- 独立评论更新在划线范围返回零想法时，额外查询章节级公开想法列表，仅用正向结果补充评论，不把空列表当作确认无评论。
+- 修复 Web 与 Gateway 的零条交叉确认：只有两路均明确报告 totalCount=0 才认定对应 range 为零；缺少计数字段保留待核实状态。
+- 修复强制刷新时已保存评论因新响应为空而被覆盖的问题，保留原有 SQLite 评论与收藏；旧版错误标记为 empty 的章节允许重查。
+- 保持 EPUB 下载、阅读进度、阅读时间、书架和发布工作流原有逻辑不变。
+- 增加独立评论更新专项回归测试；网络端点及登录态仍需 Kindle 实机核验。
+
+## 6.1.0-beta.17 - Kindle progress, reading time, comments and UI regressions
+
+- Kindle 精确阅读坐标优先：自动开书不再让较新的云端时间戳抢占本机位置，待上传的 Kindle 快照可直接提交，并保留提交后的云端回读确认。用户主动采用云端位置的操作仍可使用。
+- 阅读时间兼容上报使用有效的 Kindle 原生章节、偏移和进度上下文，不再因 Web getProgress 返回参数错误而直接拦截；无可信本机坐标时拒绝冒险提交，失败时长保留。
+- 评论下载检测空结果与未完成范围，Web 与 Gateway 在必要时进行交叉核对，合并有效评论并保留已有缓存；未核实的空结果不再直接标记为完整下载。
+- 恢复已下载书籍在首页、最近阅读与全部书籍中的长按管理入口；恢复评论失败后的继续获取操作；展示扩展状态及阅读控制中心分页分组。
+- 新增跨模块回归测试；不清除账号、评论缓存、收藏、个人批注、原有 EPUB 和待上传进度。微信读书接口实际接收及 Kindle 实机显示需另行验证。
+
+## 6.1.0-beta.16 - Beta release changelog and workflow reliability
+
+- 修复 CHANGELOG 中重复插入的 6.1.0-beta.14 章节：只删除内容完全一致的副本，保留所有不同版本的历史更新记录。
+- 发布准备阶段自动识别和去重完全一致的历史版本章节；同版本的说明存在实质差异时安全终止，并提供冲突行号。
+- 保留“输入版本号与更新说明即可发布”的自动生成方式，不需要单独手工编辑 CHANGELOG。
+- 增加重复章节、重复总标题、冲突说明、自动发布重试与幂等性回归测试。
+- 完整保留 beta.15 的公开评论获取修复，以及 beta.14 的弹窗与菜单 UX 功能；不改下载、同步、个人批注和云端数据处理逻辑。
+- 本版本源码通过本地测试；GitHub Actions 真实发布和 Kindle 实机仍需分别验收。
+
+## 6.1.0-beta.15 - Public comment retrieval reliability
+
+- 修复公开评论接口返回空数组时被误判为“该章已全部获取”的问题：未得到逐条划线范围确认的请求继续保持待完成状态。
+- Web 评论响应不完整时尝试官方 Gateway 回退；仅在回退响应覆盖更多目标范围时采用回退结果。
+- 兼容嵌套评论正文结构，完整保存已成功获取的评论，支持未完成范围后续重试。
+- 不修改评论缓存数据库结构和已存收藏，不改 EPUB 下载、阅读进度、阅读时间、批注同步及发布自动化。
+- 仍需 Kindle 与微信读书真实接口联调，不能将模拟通过等同于网络获取成功。
+
+## 6.1.0-beta.14 - UX and dialog layout update
+
+- 文本框显式限制实际显示高度，避免长正文跨行覆盖时间戳和下一条记录；阅读记录适配更大的文字行高，目录取消强制五行。
+- 修正阅读控制中心小屏内容溢出的布局，保留原功能与分页入口；持续沿用 beta.13 的局部重绘与弹窗切换机制。
+- 按已批准的菜单决策简化主页、下载、评论、同步、设置、扩展和系统维护：常用操作优先，元数据归入详情，冗余右侧说明精简。
+- Wi-Fi 顶栏仍只显示图标，点击可查看状态详情；下滑控制中心保留网络快速开关；主页电量不再可点击，主页同步打开状态页。
+- 评论显示开关不触发联网；离线评论列表可以在覆盖层关闭后查看详情；收藏统一入口并提供筛选与排序工具，返回列表恢复页码。
+- 同步与个人批注操作提供明确云端影响确认，保留收藏、数据库、下载及云端安全逻辑。
+- Kindle E-Ink 显示、网络接口与手势仍需要实机验收，本地语法/模拟测试不替代设备验证。
+
+
+## 6.1.0-beta.13 - Beta Update
+
+- 统一正文 EPUB 下载，整书、单章、范围及预下载不再新建带评论 EPUB；旧文件保留识别与打开能力。
+- 公开评论由阅读器主动获取，保存到现有每书 SQLite，支持离线查看、增量合并、部分失败续传及独立更新。
+- 在纯净 EPUB 中使用保守 XPointer 定位和非侵入式划线覆盖层；无法准确定位的评论仍在章节离线列表保留。
+- 评论数据库 V4 迁移保留历史数据。删除书籍清理关联本地缓存、保留全局评论收藏；删除前的安全上传不执行云端删除。
+- 主页顶栏按内容宽度均匀分配留白，支持逐项与整栏隐藏；Wi-Fi 仅显示状态图标，点击后进入连接详情与网络管理。
+- 修复弹窗内容裁切、大小弹窗切换残影及背景恢复时序，尽量保持 E-Ink 局部刷新。
+- B7 整合修复：删除后的只读评论查询不再重建缓存目录；章节失效时清除旧覆盖标记；划线绘制限制在阅读视口；极窄屏避免顶栏溢出。
+- 保留阅读进度、阅读时间、个人批注同步及原有 Beta/Tag 发布工作流；Kindle 实机显示与微信读书线上接口仍需验证。
+
+
+## 6.1.0-beta.13-B4 - Development checkpoint (not a release)
+
+- New whole-book, single-chapter, range, and prefetch jobs generate clean EPUB only; no comments are requested during book downloads.
+- Remove edition-choice dialogs across shelf, book menu, current-book rebuild, and chapter/range actions; retain the existing foreground/background/after-reading choices.
+- Existing legacy notes EPUBs can still be opened or deleted via local file management, without offering a new notes download.
+- Keep older clean EPUB paths for KOReader sidecars; new clean EPUBs use a filename without an edition suffix.
+- Ignore legacy notes-only repair checkpoints instead of interpreting them as clean EPUB content; retain their data untouched.
+- Preserve B1–B3 comment cache, annotation sync, and overlay behavior. B5 top bar and B6 E-Ink dialog changes remain out of scope.
+
+## 6.1.0-beta.13-B3 - Development checkpoint (not a release)
+
+- B3 only: project cached public comments onto pure EPUB via conservative, offline XPointer location matching; never write or rebuild EPUB.
+- Persist matched/unmatched document-specific locations in existing per-book thoughts.sqlite3; invalidate on changed document or quote.
+- ReaderView paint overlay + tap to existing native thought popup (favorites/copy/likes), with chapter-scoped cache, layout invalidation and lifecycle cleanup.
+- Preserve link-based behavior for legacy notes EPUBs; ambiguous, missing and unverified anchors remain accessible through the chapter's offline comment list.
+- Does not remove dual-version download choices (B4), modify homepage (B5) or global dialogs (B6). Kindle/KOReader display and WeRead live-API integration still require device verification.
+
+## 6.1.0-beta.13-B2 - Development checkpoint (not a release)
+
+- 以 B1 为基线新增按需的本章公开评论同步：不在打开书籍、翻页或后台下载时自动请求评论。
+- 评论中心新增本章缓存列表、主动获取、断点续传与独立更新；首次启用评论且未缓存时询问是否联网。
+- 评论和范围级断点共同提交到现有 `thoughts.sqlite3`，支持重启后恢复；正常二次查看完全离线。
+- 明确区分网络失败、部分获取和合法空结果，非破坏性合并新评论，异常响应不清空旧内容。
+- 保留 API 的可核实能力边界：当前每个范围最多请求首批 30 条，不声称已穷尽所有历史评论。
+- B2 暂时在阅读器提供独立的离线评论列表；正文 XPointer 覆盖层为 B3，双版本下载入口调整为 B4。
+- B1 收藏、删除与个人云端批注保护继续保留；未改动发布自动化、进度同步或阅读时间上报。
+
+## 6.1.0-beta.13-B1 - Development checkpoint (not a release)
+
+- 评论数据库 Schema V3 → V4 原地升级：新增章节同步状态与定位缓存表，保留历史评论和迁移记录。
+- 评论保存改为按 review_id / 稳定内容指纹合并，空或不完整响应不能清空既有评论。
+- 本地删除书籍时清理该书文档、缓存与索引，独立全局评论收藏继续保存；安全禁止误删收藏数据库。
+- 删除前的“先同步”仅处理可上传的新增个人批注；排除本地云端删除标记，防止误删云端记录。
+- 保护未同步及 held_local 批注：批注状态无法读取时不静默当作零条，要求用户明确选择。
+- 本批不改变评论下载触发、EPUB 版本选项、主页顶栏或墨水屏弹窗刷新；这些属于 B2–B6。
+
+## 6.1.0-beta.12 - Beta Update
+
+- 修复 Lua 5.1/LuaJIT 发布回归测试的模块搜索路径
+- 已准备版本允许在发布前更新 CHANGELOG 说明
+- 统一发布测试配置并保留 Beta 手动与 Tag 两种入口
+- 正式版改为测试通过后创建不可变 Tag，不再强制移动已有 Tag
+- 保留现有阅读同步、阅读时间和下载业务逻辑，Schema 136 不变
+
+## 6.1.0-beta.11 - Beta Update
+
+- 修复新增内存验证脚本与旧发布验证器冲突，并在 CI 中运行两套验证
+- 下载自动恢复统一为单一调度入口，修复内存不足被误判成重启熔断
+- 增强 EPUB 打包边界内存检测，验证失败时清理临时文件
+- 保留阅读进度与阅读时间上报规则、断点缓存和 Schema 136
+
+## 6.1.0-beta.9 — PR #156 follow-up: fresh open-sync and time-report recovery
+
+- Keep PR #156 verified-sequence callback fix and twelve transaction regression scenarios.
+- Remove the cached exact-alignment shortcut on new book opens; fetch fresh Web progress asynchronously.
+- Parse isolated reading-time Web progress consistently, validate chapter UID/index before committing the anchor, and retain safe unsent time on context/authentication failure.
+- Distinguish accepted-but-unconfirmed progress from actual write failure, including subsequent cloud changes; never replay old writes blindly.
+- Preserve end-of-reading-only network uploads and Schema 136; leave downloads, annotations and account transport unchanged.
+
+## 6.1.0-beta.8 — Progress lifecycle regression repairs
+
+- Revert beta.6 low-level ReaderUI upload vetoes; retain the established end-of-reading upload lifecycle and the removed one-shot upload on book open.
+- Anchor-aware latest-wins decision: prefer independently verified common chapter/co over server write timestamps; no 30-second ambiguous conflict UI.
+- When the server is newer, keep an UNSENT local transaction until cloud position is verified on the device; never erase it after merely fetching cloud progress.
+- Preserve Web-only verification of uploaded chapter/co, pending progress on failure, and account/sequence isolation.
+- Revert global menu greying/truncation changes; use opt-in readable readonly rows and a full-text reason dialog for progress details.
+- Keep reading-time and legacy migration data protections; add regression coverage for cloud adoption and retained pending rows.
+- Retain automatic tag releases and changelog normalization. No database schema bump.
+
+## 6.1.0-beta.7 — Beta Tag CI 元数据修复版
+
+- 修正 beta.6 版本日志标题及位置，使 CHANGELOG.md 符合发布工作流既有格式。
+- Tag 发布在校验前自动确保当前版本的 CHANGELOG 条目存在；缺失时从 Tag 提交说明生成，不再要求用户手动补标题。
+- 保留现有 Beta Tag 自动发布和手动发布两条路径；不移动旧 Tag、不修改下载和同步业务逻辑，数据库 Schema 仍为 136。
+- 进度同步改动与 beta.6 保持一致；仍需在真实 Kindle 和微信读书服务端验证双向精确同步。
+
+## 6.1.0-beta.6 — automatic end-of-reading sync repair (candidate)
+
+- Resolve local/cloud positions using reading-event timestamps; remove the 30-second ambiguous-clock conflict gate and prefer the latest cloud observation even within 30 seconds.
+- Allow legacy fenced UNSENT progress to re-enter automatic upload after cloud freshness comparison; preserve superseded local snapshots and choose newest Web/Agent observation without user conflict dialogs.
+- Keep progress uploads only on reading-end events (including on-open local-newer branch); remove periodic reading-time HTTP writes while an active reader is open.
+- Interpret a nil KOReader text-search result as no match, with short UTF-8 anchor fallbacks; exact chapter/co still requires Kindle verification.
+- Prevent retry-budget drops of provably unsent reading time, retain verified safe carry and its journal through restarts, and improve fixed-height status-row contrast.
+- Preserve schema 136, Web-only post-write verification, existing download paths and Tag-triggered beta CI.
+- Kindle and live WeRead verification still required.
+
+## 6.1.0-beta.5 — 修复整合与功能回归候选版
+
+- 以 beta.2 为基线，选择性移植进度恢复锚点、E-Ink ZIP、HTTP 暂停与 KOReader 退出修复。
+- Web 上传只由 Web 回读确认；普通云端进度仍使用 Web/Agent 综合读取，保留原坐标字段优先级及原持久化写入。
+- 阅读时间兼容写入采用 Web 进度；缺失章节索引时只允许同章节 UID 的目录信息补齐。缺少可信上下文时保持既有失败补报路径。
+- 下载等待队列在延迟启动前重查队列身份和运行条件；历史无账号标记的等待任务需要手动确认后才能自动运行。
+- 同一笔进度上传的重复校验共享回调；扩充功能等价和异常恢复测试。
+- 本版未更改 SQLite Schema、下载协议、登录协议、原有 Tag 自动发布触发条件。
+- 尚未通过真实微信读书服务端与 Kindle 实机验证；历史 `co=368 → co=0` 的服务器侧原因仍待确认。
+
+
+## 6.1.0-beta.2 - Beta Update
+
+- 修复低内存下载启动时任务被直接拒绝的问题，复用原有持久化队列自动等待和重试
+- 统一休眠恢复与新建下载子进程的内存安全检查，避免 72 MiB 与 96 MiB 冲突
+- 增加后台工作租约存活校验，防止超时误释放导致进程重叠
+- 增加下载资源诊断、重试退避和恢复后的唤醒，并保留账号及同步逻辑
+
 ## 6.0.0 - Stable Release
 
 - 正式版基于 6.0.0-beta.1 收口，继承 5.9.1-beta.4 的功能与修复；Schema 保持 136，不把 Beta 发布通道变成正式版通道。
@@ -157,8 +328,6 @@
 - 主页快捷“同步”、主页控制面板“同步”和进度失败页“全部重新同步”统一进入同一 recovery pipeline；用户主动点击时优先处理 durable progress，不再先等待同步摘要缓存。
 - 开书同步增加明确终态反馈：冲突、云端检查失败、云端精确坐标缺失和较新云端结果返回过晚都会明确提示；正常 aligned 仍保持轻量。
 - 保留 beta.6 的 session-scoped fence、UNSENT/SUBMITTED_UNVERIFIED 区分、remote scalarization、`local_read_event_at`、raw-percent 隔离和 StoreRepair；Schema 仍为 136。
-
-# Changelog
 
 ## 5.9.0-beta.6 — Sync Regression Recovery & Minimal Reconciliation
 
@@ -739,8 +908,6 @@
 - 普通本地书不再显示微信读书划线开关；插件设置中的名称改为“显示微信读书划线”。
 - 成功的 catalog 登录恢复改记 INFO；阅读时间 worker 的 stale 登录状态日志补充 revision / vid 等真实不一致原因，减少误导性 WARN。
 - 保持 PR #67 的撤回结果，不重新引入 CSS 背景分部图修复；下载核心、精确进度、阅读时间协议、锁屏和本地书扫描逻辑不变。
-
-# Changelog
 
 ## 5.4.0-beta.5 - 2026-08-28
 

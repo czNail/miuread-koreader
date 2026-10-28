@@ -101,6 +101,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tools -p 'test_prepare_beta_release.py'
+          python3 -m unittest discover -s tools -p 'test_beta_release_workflow.py'
+          python3 -m unittest discover -s tools -p 'test_beta11_release_guard.py' 
+          python3 -m unittest discover -s tools -p 'test_beta12_release_regression.py'
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
@@ -134,8 +137,13 @@ jobs:
               echo "::warning::Tag 中的源码版本 $SOURCE_VERSION 与目标版本 $VERSION 不同；仅在打包工作区修正元数据，绝不移动 Tag。"
               python3 tools/prepare_beta_release.py --version "$VERSION" --notes "$RELEASE_NOTES_INPUT"
             else
-              echo "Tag 源码已包含目标版本，直接校验元数据和 CHANGELOG。"
+              echo "Tag 源码已包含目标版本。"
             fi
+            # Source may have the target version without a canonical CHANGELOG
+            # header. Repair only this build workspace, never move the Git tag.
+            python3 -m unittest discover -s tools -p 'test_ensure_beta_tag_changelog.py'
+            python3 tools/ensure_beta_tag_changelog.py \
+              --version "$VERSION" --notes "$(git log -1 --format=%s)"
           fi
 
       - name: Read and validate beta identity
@@ -306,12 +314,21 @@ jobs:
 
       - name: Run Lua syntax checks and release regression verifier
         shell: bash
+        env:
+          LUA_PATH: "./miuread.koplugin/?.lua;./miuread.koplugin/?/init.lua;;"
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y lua5.1 luajit
           find miuread.koplugin -type f -name '*.lua' -print0 | xargs -0 -n1 luac5.1 -p
           lua5.1 tools/test_api_transports.lua
+          # Beta.17 contracts must run in the publishing gate as well as locally.
+          lua5.1 tools/test_beta17_transport_cooldown.lua
+          lua5.1 tools/test_beta17_sync_contract.lua
+          lua5.1 tools/test_beta17_worker_and_comments.lua
+          lua5.1 tools/test_beta18_comment_refresh.lua
+          lua5.1 tools/test_beta19_comment_and_abandon.lua
+          lua5.1 tools/test_beta15_comment_response.lua
           lua5.1 tools/test_diagnostic_log.lua
           lua5.1 tools/test_bookstore.lua
           lua5.1 tools/test_bookstore_ui.lua
@@ -326,8 +343,15 @@ jobs:
           luajit tools/test_finished_status.lua
           luajit tools/test_shelf_progress.lua
           lua5.1 tools/test_position_resolution.lua
+          lua5.1 tools/test_beta8_sync_behavior.lua
+          luajit tools/test_beta8_sync_behavior.lua
+          lua5.1 tools/test_progress_confirmation.lua
+          luajit tools/test_progress_confirmation.lua
+          lua5.1 tools/test_beta9_sync_readtime.lua
+          luajit tools/test_beta9_sync_readtime.lua
           lua5.1 tools/test_position_state_hotfix.lua
           lua5.1 tools/test_open_sync_contract.lua
+          lua5.1 tools/test_beta6_end_reading_latest_wins.lua
           lua5.1 tools/test_beta6_sync_contract.lua
           lua5.1 tools/test_beta7_sync_contract.lua
           lua5.1 tools/test_beta8_home_translation_contract.lua
@@ -337,9 +361,16 @@ jobs:
           lua5.1 tools/test_long_book_anchor.lua
           lua5.1 tools/test_terminal_progress_guard.lua
           lua5.1 tools/test_finished_resolution.lua
+          lua5.1 tools/test_download_resource_admission.lua
+          luajit tools/test_download_resource_admission.lua
+          lua5.1 tools/test_beta5_reintegration.lua
+          luajit tools/test_beta5_reintegration.lua
+          luajit tools/test_beta6_end_reading_latest_wins.lua
           lua5.1 tools/test_store_repair.lua
           lua5.1 tools/test_cloud_freshness_contract.lua
           lua5.1 tools/test_beta10_translation_dependency_contract.lua
+          lua5.1 tools/test_memory_profile.lua
+          lua5.1 tools/test_download_safety.lua
           luajit tools/test_translation.lua
           luajit tools/test_translation_generation.lua
           luajit tools/test_translation_fetch.lua
@@ -347,6 +378,12 @@ jobs:
           luajit tools/test_internal_links.lua
           python3 tools/test_extension_center_ux.py
           python3 tools/verify_600_beta1.py
+          python3 tools/verify_memory_profile.py
+          python3 tools/test_beta11_download_resume.py
+          lua5.1 tools/test_beta11_download_resume_policy.lua
+          lua5.1 tools/test_beta11_resume_coordinator.lua
+          luajit tools/test_beta11_download_resume_policy.lua
+          luajit tools/test_beta11_resume_coordinator.lua
 
       - name: Verify E-Ink archives, annotations and translations offline
         shell: bash

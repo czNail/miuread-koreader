@@ -74,26 +74,16 @@ jobs:
             --version "$VERSION" \
             --tag "$RELEASE_TAG"
 
-          if ! git diff --quiet -- \
+          # For tag-triggered releases, the tagged source must already have
+          # correct metadata. Never rewrite a published tag or its source.
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && ! git diff --quiet -- \
               miuread.koplugin/miuread/config.lua \
               miuread.koplugin/_meta.lua CHANGELOG.md; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add \
-              miuread.koplugin/miuread/config.lua \
-              miuread.koplugin/_meta.lua CHANGELOG.md
-            git commit -m "同步正式版本至 $VERSION" \
-              -m "根据 $RELEASE_TAG 自动同步源码版本、发布通道与版本记录。"
-            git push origin "HEAD:main"
+            echo "::error::Tag 源码版本/CHANGELOG 不一致；请先在 main 准备版本后创建新 Tag。"
+            exit 1
           fi
 
           RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
-          CURRENT_TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}" 2>/dev/null || true)"
-          if [ "$CURRENT_TAG_SHA" != "$RELEASE_SOURCE_SHA" ]; then
-            git tag -f "$RELEASE_TAG" "$RELEASE_SOURCE_SHA"
-            git push --force origin "refs/tags/$RELEASE_TAG"
-          fi
-
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "RELEASE_SOURCE_SHA=$RELEASE_SOURCE_SHA" >> "$GITHUB_ENV"
@@ -410,6 +400,52 @@ jobs:
               sys.exit(1)
           print(f"正式版安装包检查通过，共 {len(names)} 个条目。")
           PY
+
+      - name: Commit stable identity and ensure immutable tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          git fetch origin main --quiet
+          REMOTE_MAIN_SHA="$(git rev-parse origin/main)"
+          if [ "$SOURCE_SHA" != "$REMOTE_MAIN_SHA" ]; then
+            echo "::error::main 在本次发布测试期间发生变化；请重新运行。"
+            exit 1
+          fi
+
+          # Avoid modifying a tag even when the release retry uses an old name.
+          TAG_SHA="$(git rev-parse -q --verify "refs/tags/$RELEASE_TAG^{commit}" 2>/dev/null || true)"
+          if [ -n "$TAG_SHA" ]; then
+            if ! git diff --quiet -- \
+                miuread.koplugin/miuread/config.lua \
+                miuread.koplugin/_meta.lua CHANGELOG.md; then
+              echo "::error::$RELEASE_TAG 已存在，不允许修改它的版本文件。"
+              exit 1
+            fi
+            if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
+              echo "::error::$RELEASE_TAG 已存在于不同提交，禁止移动 Tag；请使用新版本号。"
+              exit 1
+            fi
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            git add -- miuread.koplugin/miuread/config.lua miuread.koplugin/_meta.lua CHANGELOG.md
+            if ! git diff --cached --quiet; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -m "chore(release): prepare $RELEASE_TAG"
+              git push origin HEAD:main
+            fi
+          fi
+
+          RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
+          if [ -z "$TAG_SHA" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$RELEASE_TAG" "$RELEASE_SOURCE_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+          echo "RELEASE_SOURCE_SHA=$RELEASE_SOURCE_SHA" >> "$GITHUB_ENV"
 
       - name: Create or update stable release
         shell: bash

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Prepare a MiuRead beta release from one version and one set of notes.
 
-Called only for workflow_dispatch. The release workflow commits version
-metadata first and then creates the immutable release tag; direct tag pushes
-do not initiate beta releases.
+Called for workflow_dispatch. The release workflow prepares version files,
+runs tests, commits metadata and creates an immutable tag. Direct tag pushes
+are supported by the workflow and use a separate workspace-only preparation path.
 """
 
 import argparse
 import re
 from pathlib import Path
+from changelog_integrity import normalize_changelog
 
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$")
 CONFIG_RE = re.compile(r'(?m)^(\s*VERSION\s*=\s*["\'])([^"\']+)(["\'],?\s*)$')
@@ -82,7 +83,8 @@ def prepare(root, version, notes):
     changelog_path = root / "CHANGELOG.md"
     config = config_path.read_text(encoding="utf-8")
     meta = meta_path.read_text(encoding="utf-8")
-    changelog = changelog_path.read_text(encoding="utf-8")
+    original_changelog = changelog_path.read_text(encoding="utf-8")
+    changelog = normalize_changelog(original_changelog)
 
     config_version = find_version(config, CONFIG_RE, "config.lua")
     meta_version = find_version(meta, META_RE, "_meta.lua")
@@ -93,10 +95,30 @@ def prepare(root, version, notes):
 
     previous_notes = extract_existing_notes(changelog, version)
     if version == config_version:
-        if previous_notes != bullets:
-            raise ValueError("版本已存在，但本次说明与已提交 CHANGELOG 不一致；不能悄悄改写历史")
-        print(f"Already prepared: {version} (no changes)")
-        return False
+        if previous_notes is None:
+            raise ValueError(f"源码已经是 {version}，但 CHANGELOG 缺少对应版本条目")
+        if previous_notes == bullets:
+            if changelog != original_changelog:
+                changelog_path.write_text(changelog, encoding="utf-8")
+                print(f"Normalized duplicate release notes for {version}")
+                return True
+            print(f"Already prepared: {version} (no changes)")
+            return False
+        # The workflow independently forbids changing an existing immutable tag.
+        # Before tagging, the user may edit the prepared release notes explicitly.
+        lines = changelog.splitlines(keepends=True)
+        start = next((i for i, line in enumerate(lines)
+                      if line.rstrip("\r\n") == f"## {version}"
+                      or line.rstrip("\r\n").startswith((f"## {version} - ", f"## {version} — "))), None)
+        if start is None:
+            raise ValueError(f"CHANGELOG.md 中找不到 {version} 版本标题")
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].startswith("## ")), len(lines))
+        entry = f"## {version} - Beta Update\n\n" + "\n".join(f"- {item}" for item in bullets) + "\n\n"
+        updated = "".join(lines[:start]) + entry + "".join(lines[end:])
+        changelog_path.write_text(updated, encoding="utf-8")
+        print(f"Updated prepared release notes for {version} (version metadata unchanged)")
+        return True
     if previous_notes is not None:
         raise ValueError(f"CHANGELOG.md 已存在 {version} 的条目，但源码仍为旧版本；请人工检查")
 

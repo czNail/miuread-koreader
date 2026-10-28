@@ -39,10 +39,11 @@ show_end=main.index('\nfunction Plugin:', show_start+20)
 show=main[show_start:show_end]
 for label in ('下载扩展','更新扩展','插件下载任务'):
     ok(label in show, f'download center includes first-page {label}')
-first_book=show.index('text="书籍下载"')
-for label in ('text="下载扩展"','text="更新扩展"','text="插件下载任务"'):
-    ok(show.index(label) < first_book, f'{label} appears before book-download section')
-
+# beta.14 intentionally defaults to book transfers, while retaining an explicit
+# plugin filter with all previous extension actions (approved L06).
+ok('filter~="book"' in show, 'extension actions remain behind an explicit download filter')
+ok('text="任务类型"' in show, 'download types can be switched without deleting extension actions')
+ok('text="已下载书籍"' in show, 'completed books remain accessible in a dedicated submenu')
 ok('center.maybe_auto_check,self,"startup_idle"' in main, 'startup idle schedules extension discovery')
 ok('center.maybe_auto_check,self,"network_restored"' in main, 'network recovery can refresh stale extension state')
 ok('if self:_active_reader_ui() then return end' in main, 'startup discovery avoids active reading')

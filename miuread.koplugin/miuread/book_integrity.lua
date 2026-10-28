@@ -237,7 +237,8 @@ local function load_settled(store)
         if type(root)=="string" and type(entry)=="table" and type(entry.signature)=="string"
             and settled_partials[root]==nil then
             settled_partials[root]={signature=entry.signature,option_key=entry.option_key,
-                options=type(entry.options)=="table" and entry.options or nil}
+                options=type(entry.options)=="table" and entry.options or nil,
+                legacy_ignored=entry.legacy_ignored==true}
         end
     end
 end
@@ -279,7 +280,8 @@ function M.partial_repairs(store,book_id)
     for _,root in ipairs(store:partial_cache_paths(book_id)) do
         local signature,newest=partial_signature(root)
         local settled=signature and settled_partials[root]
-        if settled and (settled.signature~=signature or not has_generated_record(book,settled,settled.options)) then
+        if settled and (settled.signature~=signature
+            or (settled.legacy_ignored~=true and not has_generated_record(book,settled,settled.options))) then
             settled=nil
         end
         if settled_partials[root] and not settled then settled_dirty=true end
@@ -290,7 +292,17 @@ function M.partial_repairs(store,book_id)
             local kind=key:match("^notes%-") and "notes" or "clean"
             local options,option_error=partial_options(manifest)
             local has_record=has_generated_record(book,manifest,options)
-            if not partial_manifest_pending(manifest,has_record) then
+            -- A historical notes partial is intentionally not a clean download
+            -- checkpoint; it remains untouched but is not offered for new repair.
+            if kind=="notes" then
+                -- Preserve legacy cache but do not offer it as a repair of clean
+                -- XHTML; cache this verdict so shelf refreshes stay lightweight.
+                if signature and os.time()-newest>=SETTLED_SECONDS then
+                    settled_partials[root]={signature=signature,option_key=manifest.option_key,
+                        options=options,legacy_ignored=true}
+                    settled_dirty=true
+                end
+            elseif not partial_manifest_pending(manifest,has_record) then
                 if signature and os.time()-newest>=SETTLED_SECONDS then
                     settled_partials[root]={signature=signature,option_key=manifest.option_key,options=options}
                     settled_dirty=true
@@ -366,9 +378,9 @@ function M.inspect(store,book_id,record)
     out.core_map_valid=hash~="" and #local_map>0 and #full_map>0
     out.annotation_pending=out.annotation_pending or DownloadResult.annotation_pending(meta)
     out.annotation_unresolved=out.annotation_unresolved or DownloadResult.annotation_unresolved(meta)
-    if out.annotation_pending then
-        out.repair_kind="annotations"
-    elseif not out.core_map_valid then
+    -- Public comments are downloaded independently of EPUB content.
+    -- Retain legacy flags as metadata but never make them a book repair task.
+    if not out.core_map_valid then
         out.repair_kind="content"
         out.error="章节映射不完整"
     else
@@ -381,9 +393,8 @@ function M.repair_options(record)
     record=type(record)=="table" and record or {}
     local variant=tostring(record.variant or "")
     local base=tostring(record.base_variant or "")
-    local annotations=base=="notes" or variant=="notes" or variant=="range_notes"
     local opt={
-        annotations=annotations,
+        annotations=false,
         repair_only=true,
         repair_source="book_integrity",
         range_start_index=record.range_start_index,

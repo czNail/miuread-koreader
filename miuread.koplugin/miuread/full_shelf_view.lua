@@ -75,7 +75,7 @@ local function fixed_frame(width, height, options, content)
     }
 end
 
-local TapBox = InputContainer:extend{dimen = nil, callback = nil, hold_callback = nil}
+local TapBox = InputContainer:extend{dimen = nil, callback = nil, hold_callback = nil, _hold_handled=false}
 function TapBox:init()
     self.dimen = self.dimen or Geom:new{w = 1, h = 1}
     self.ges_events = {
@@ -89,12 +89,25 @@ function TapBox:paintTo(bb, x, y)
     if self[1] then self[1]:paintTo(bb, x, y) end
 end
 function TapBox:onTapSelect()
+    if self._hold_handled then
+        self._hold_handled=false
+        return true
+    end
     if self.callback then self.callback(self.dimen and self.dimen:copy() or nil) end
     return true
 end
 function TapBox:onHoldSelect()
-    if self.hold_callback then self.hold_callback(self.dimen and self.dimen:copy() or nil) end
+    if type(self.hold_callback)~="function" then return false end
+    self._hold_handled=true
+    self.hold_callback(self.dimen and self.dimen:copy() or nil)
     return true
+end
+function TapBox:onHoldReleaseSelect()
+    if self._hold_handled then
+        self._hold_handled=false
+        return true
+    end
+    return false
 end
 
 local function tappable(width, height, child, callback, hold_callback)
@@ -232,7 +245,7 @@ local function book_card(book, width, height, on_select, on_hold)
     }
     return tappable(width, height, body,
         function(anchor) if on_select then on_select(book, anchor) end end,
-        function(anchor) if on_hold then on_hold(book, anchor) end end)
+        on_hold and function(anchor) on_hold(book, anchor) end or nil)
 end
 
 local GridShelfWidget = InputContainer:extend{

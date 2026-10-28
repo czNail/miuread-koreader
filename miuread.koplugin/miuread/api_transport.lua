@@ -3,6 +3,13 @@
 local Http=require("miuread.http")
 local Log=require("miuread.diagnostic_log")
 local M={}; M.__index=M
+-- Session-scoped authentication cooldown. This does not change the persisted
+-- transport preference and is cleared by auth revision/login change or expiry.
+local eink_auth_cooldowns=setmetatable({},{__mode="k"})
+local function auth_identity(store)
+    local auth=store and type(store.auth)=="function" and store:auth() or {}
+    return tostring(auth.login_session_id or "")..":"..tostring(auth.auth_revision or 0)
+end
 
 function M.control_error(value)
     local text=tostring(value or "")
@@ -23,6 +30,14 @@ function M.new(store,options)
         and require("miuread.shelf_client").credentials(store:auth() or {})
     local reason=mode=="web" and "manual_web" or options.fresh_context and "coordinate_source"
         or not authorized and "authorization_required" or "eink_preferred"
+    local cooldown=type(store)=="table" and eink_auth_cooldowns[store] or nil
+    if reason=="eink_preferred" and cooldown then
+        if cooldown.identity==auth_identity(store) and os.time()<cooldown.until_at then
+            reason="eink_auth_cooldown"
+        else
+            eink_auth_cooldowns[store]=nil
+        end
+    end
     return setmetatable({store=store,mode=mode,selected=reason=="eink_preferred" and "eink" or "web",reason=reason,
         api_counts={eink={},web={}}},M)
 end
@@ -73,6 +88,13 @@ function M:invoke(name,native,web,options)
         local ok,a,b,c,d=call(native,"eink")
         if ok then return a,b,c,d end
         if M.control_error(a) then error(a,0) end
+        local message=tostring(a or "")
+        if type(self.store)=="table" and ((type(Http.is_auth_error)=="function" and Http.is_auth_error(a))
+            or message:find("HTTP 401",1,true) or message:find("status=401",1,true)) then
+            eink_auth_cooldowns[self.store]={identity=auth_identity(self.store),until_at=os.time()+600}
+            Log.record(self.store,{operation=name,phase=phase,channel="eink",outcome="cooldown",
+                reason="authorization",wait_seconds=600})
+        end
         if options.native_only then error(a,0) end
         -- Only a failure before sending a mutation can safely fall back.
         if options.write and not tostring(a):find("[MiuReadBeforeWrite]",1,true) then error(a,0) end

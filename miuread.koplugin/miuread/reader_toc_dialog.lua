@@ -49,7 +49,8 @@ local Dialog = InputContainer:extend{
     name = "miuread_reader_toc_dialog",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Captures full-screen input but paints only a partial frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     page = 1,
@@ -154,8 +155,10 @@ function Dialog:_build_content()
     local footer_h = Skin.dp(40, 34, 52)
     local handle_h = Skin.dp(18, 15, 25)
     local max_h = sh - top_inset - math.max(28, math.floor(sh * .052))
-    local max_rows = math.max(5, math.floor((max_h - pad * 2 - header_h - footer_h - handle_h - gap * 2) / row_h))
-    max_rows = math.min(10, max_rows)
+    local row_budget = max_h - pad * 2 - header_h - footer_h - handle_h - gap * 2
+    local max_rows = math.max(1, math.min(10, math.floor(math.max(1, row_budget) / row_h)))
+    -- On very short viewports one row still has to fit inside the frame.
+    if max_rows == 1 then row_h = math.min(row_h, math.max(1, row_budget)) end
     local items = self:_items()
     -- Follow the current reading chapter once whenever the directory is opened.
     -- After that, manual directory paging is respected until the dialog closes.

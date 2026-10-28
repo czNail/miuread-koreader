@@ -41,7 +41,12 @@ assert(sync:find('lightweight service exited after requested stop',1,true),"requ
 assert(sync:find('if was_active then',1,true),"ReadReport restart not gated by active state")
 
 -- Existing cloud-integrity hard rules remain present.
-assert(worker:find('local refreshed=refresh_remote_anchor(client, book_id, book)',1,true),"ReadReport fresh GET guard lost")
+assert(worker:find('local local_position,local_error=estimate_position(book,progress_ratio)',1,true),
+ "reading-time report no longer builds a valid Kindle coordinate")
+assert(worker:find('local valid,why=validate_terminal_progress(book,local_position)',1,true),
+ "reading-time report lost the terminal-position integrity guard")
+assert(worker:find('position_override.source="kindle_native_time_guard"',1,true),
+ "reading-time report lost its authoritative position selection")
 assert(main:find('pending_send',1,true),"pending_send recovery contract lost")
 assert(main:find('freshness',1,true),"freshness resolver integration lost")
 

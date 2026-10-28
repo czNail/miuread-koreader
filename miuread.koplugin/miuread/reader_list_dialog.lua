@@ -225,6 +225,8 @@ end
 
 function Dialog:_row_widget(item, width, height, index)
     local enabled = item.enabled ~= false
+    -- Opt-in readonly rows keep readable contrast without making them tappable.
+    local readable = enabled or item.readonly_label == true
     local pad = Skin.dp(7, 6, 10)
     local icon_w = tostring(item.icon or "") ~= "" and Skin.dp(31, 27, 41) or 0
     local value = tostring(item.value or item.post_text or "")
@@ -237,7 +239,7 @@ function Dialog:_row_widget(item, width, height, index)
     local text_w = math.max(1, width - pad * 2 - icon_w - value_w - arrow_w
         - gap * ((icon_w > 0 and 1 or 0) + (value_w > 0 and 1 or 0) + (arrow_w > 0 and 1 or 0)))
     local detail = tostring(item.detail or "")
-    local label_h = detail ~= "" and math.floor(height * .52) or height
+    local label_h = detail ~= "" and math.max(1, math.floor(height * .60)) or height
     local detail_h = math.max(1, height - label_h)
 
     local text_layers = OverlapGroup:new{dimen = Geom:new{w = text_w, h = height}, allow_mirroring = false}
@@ -247,7 +249,7 @@ function Dialog:_row_widget(item, width, height, index)
             Skin.face("cfont", detail ~= "" and 11.1 or 11.6, detail ~= "" and 14.9 or 15.6, detail ~= "" and 9.4 or 9.9), {
                 bold = item.bold == true or item.checked == true,
                 alignment = "left",
-                fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+                fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             }),
     }
     if detail ~= "" then
@@ -255,7 +257,7 @@ function Dialog:_row_widget(item, width, height, index)
             x_off = 0, y_off = label_h,
             Ui.textbox(detail, text_w, detail_h, Skin.face("smallinfofont", 9.0, 11.9, 7.7), {
                 alignment = "left",
-                fgcolor = enabled and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_GRAY,
+                fgcolor = readable and Blitbuffer.COLOR_DARK_GRAY or Blitbuffer.COLOR_GRAY,
             }),
         }
     end
@@ -265,7 +267,7 @@ function Dialog:_row_widget(item, width, height, index)
         row[#row + 1] = Ui.icon(tostring(item.icon), icon_w, height - pad * 2, Skin.dp(19, 16, 25), {
             icon_key = tostring(item.icon),
             face = Skin.face("cfont", 14.5, 19.5, 12.2),
-            fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
         row[#row + 1] = HorizontalSpan:new{width = gap}
     end
@@ -275,14 +277,14 @@ function Dialog:_row_widget(item, width, height, index)
         row[#row + 1] = Ui.textbox(value, value_w, height - pad * 2, Skin.face("cfont", 10.5, 13.9, 8.9), {
             bold = item.value_bold == true or item.checked == true,
             alignment = "right", halign = "right",
-            fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
     end
     if arrow_w > 0 then
         row[#row + 1] = HorizontalSpan:new{width = gap}
         row[#row + 1] = Ui.icon("chevron-right", arrow_w, height - pad * 2, Skin.dp(14, 12, 19), {
             face = Skin.face("cfont", 12.8, 17.2, 10.8),
-            fgcolor = enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            fgcolor = readable and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
         })
     end
 
@@ -396,17 +398,29 @@ function Dialog:_build_content()
     self.selected_key = tostring(selected and selected.key or "all")
     local tab_h = #categories > 1 and math.max(Skin.dp(37, 32, 49), math.floor(sh * .036)) or 0
     local pager_h_default = Skin.dp(34, 29, 45)
-    local row_h = math.max(Skin.dp(61, 52, 82), math.floor(sh * (portrait and .057 or .080)))
+    -- A two-field row needs at least two readable text bands. On small
+    -- screens show fewer rows instead of shrinking a 2-line label into the
+    -- timestamp area.
+    local row_h = math.max(Skin.dp(83, 72, 109), math.floor(sh * (portrait and .078 or .11)))
     local action_h = Skin.dp(40, 35, 52)
     local action_gap = Skin.dp(5, 4, 7)
     local requested_page_size = self:_page_size()
     local max_h = math.floor(sh * (portrait and .76 or .84))
     local fixed_h = pad * 2 + header_h + subtitle_h + tab_h + Skin.dp(8, 6, 12)
-    local possible_slots = math.max(2, math.floor((max_h - fixed_h - pager_h_default) / row_h))
-    local page_size = math.max(2, math.min(requested_page_size, possible_slots))
+    -- Reserve the inline action strip and pager even when they are initially
+    -- hidden: expanding a row must never push the final row under the footer.
+    local available_rows = max_h - fixed_h - pager_h_default - action_h - action_gap
+    if available_rows < row_h then
+        row_h = math.max(1, available_rows)
+    end
+    local possible_slots = math.max(1, math.floor(math.max(1, available_rows) / math.max(1, row_h)))
+    local page_size = math.max(1, math.min(requested_page_size, possible_slots))
     local items = self:_items(selected)
     local pages = math.max(1, math.ceil(#items / page_size))
     self.page = math.max(1, math.min(pages, tonumber(self.page) or 1))
+    if self.opts and type(self.opts.on_page_change)=="function" then
+        self.opts.on_page_change(self.page,self.selected_key)
+    end
     local first = (self.page - 1) * page_size + 1
     local last = math.min(#items, first + page_size - 1)
 
@@ -423,7 +437,11 @@ function Dialog:_build_content()
     end
     local expanded_h = self.expanded_index and (action_gap + action_h) or 0
     local body_h = visible_slots * row_h + expanded_h
-    local requested_h = math.min(max_h, fixed_h + body_h + pager_h)
+    local requested_h = fixed_h + body_h + pager_h
+    if requested_h > max_h then
+        -- Never silently clamp the frame while rendering rows outside it.
+        error("reader list contents exceed available panel height")
+    end
     -- Keep one stable white rectangle while navigating inside the same dialog.
     -- A child page may be shorter than its parent; shrinking a transparent modal
     -- would leave the parent's pixels behind on e-ink until a full refresh.

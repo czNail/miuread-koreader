@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.0.0-beta.1",
+    VERSION = "6.1.0-beta.19",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -101,17 +101,17 @@ local C = {
     BACKGROUND_PARK_LOG_INTERVAL = 20,
 
     READ_INTERVAL = 60,
-    -- First confirmed reading-time report is intentionally earlier than the
-    -- steady 60 s cadence so the user can verify sync without waiting a minute.
-    -- This is an internal strategy, not another user-facing setting.
+    -- Service clock starts early, but all Web reading-time writes are deferred
+    -- until the reading-end flush.  This remains a scheduling/health parameter,
+    -- NOT a permission to write during active reading.
     READ_FIRST_DELAY = 15,
     -- beta.24 never replays historical/suspend reading-time debt. Normal
     -- reports stay on the established one-minute cadence and every request is
     -- independently capped, avoiding burst uploads after reconnect/resume.
     READ_REPORT_MAX_ELAPSED_SECONDS = 60,
-    -- beta.5: reading time is statistics, not durable reading position. One normal
-    -- attempt plus one runtime retry is enough; failures never survive restart.
-    READ_TIME_BEST_EFFORT = true,
+    -- beta.6: report only after reading. Only *provably unsent* seconds may be
+    -- persisted and retried after restart; unknown dispatches are NEVER replayed.
+    READ_TIME_BEST_EFFORT = false,
     READ_TIME_MAX_ATTEMPTS = 2,
     -- beta.13: progress writes have priority over periodic reading-time writes.
     -- The fence is a soft preemption: an already-dispatched time request is
@@ -137,7 +137,6 @@ local C = {
     OPEN_SYNC_SOFT_TIMEOUT_SECONDS = 6.0,
     OPEN_SYNC_HARD_TIMEOUT_SECONDS = 8,
     LATE_REMOTE_APPLY_WINDOW_SECONDS = 15,
-    OPEN_SYNC_READ_DEBOUNCE_SECONDS = 60,
     -- beta.7: 120s was too conservative on real devices. It turned a clearly
     -- newer cloud chapter into an ambiguous conflict and made open-sync look
     -- like it had silently stalled. Keep a small device/server skew guard, but
@@ -183,8 +182,13 @@ local C = {
     -- Automatic home maintenance is serialized on memory-constrained Kindles.
     -- Soft pressure enables temporary lightweight behavior; critical pressure
     -- defers optional heavy work until memory becomes available again.
-    BACKGROUND_MEMORY_SOFT_KB = 64 * 1024,
-    BACKGROUND_MEMORY_CRITICAL_KB = 40 * 1024,
+    -- These floors intentionally keep the historical 64/40 MiB values: on a
+    -- 256 MiB device they hold a near-permanent "low" level, which throttles
+    -- home background maintenance (covers, metadata, scans) away from the UI.
+    -- Download start/resume/hibernate gates do NOT depend on these levels --
+    -- they compare MemAvailable against the scaled HEAVY_* thresholds.
+    BACKGROUND_MEMORY_SOFT_FLOOR_KB = 64 * 1024,
+    BACKGROUND_MEMORY_CRITICAL_FLOOR_KB = 40 * 1024,
     BACKGROUND_MEMORY_SOFT_RATIO = 0.12,
     BACKGROUND_MEMORY_CRITICAL_RATIO = 0.08,
     -- Ratio-based thresholds are capped so high-memory Android devices do not
@@ -324,18 +328,68 @@ local C = {
     -- exhaust old Kindle memory well before the global critical threshold.
     HEAVY_NATIVE_HIBERNATE_KB = 96 * 1024,
     HEAVY_NATIVE_CRITICAL_KB = 64 * 1024,
-    HEAVY_DOWNLOAD_RESUME_MIN_KB = 72 * 1024,
+    -- A hibernated download is restarted by forking a NEW worker.
+    -- Its admission threshold must match a fresh start; the lower RUNNING
+    -- threshold below applies only while an existing child is alive.
+    HEAVY_DOWNLOAD_RESUME_MIN_KB = 96 * 1024,
     -- Ref #91: do not fork a fresh book-download worker when the device is
-    -- already at the low-memory boundary observed on KPW6. Resume remains a
-    -- little more permissive because a checkpointed worker has already paid
-    -- most of its setup cost.
+    -- already at the low-memory boundary observed on KPW6. A resumed worker
+    -- forks afresh and therefore needs the same admission margin.
     HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024,
+    DOWNLOAD_RESOURCE_RETRY_FIRST_SECONDS = 5,
+    DOWNLOAD_RESOURCE_RETRY_MAX_SECONDS = 60,
     -- beta.26 continuously samples memory while a heavy worker stage is active.
     -- Two consecutive low-memory samples are required before checkpointed
     -- hibernation, avoiding task churn on a single transient dip.
     HEAVY_DOWNLOAD_RUNNING_MIN_KB = 72 * 1024,
     HEAVY_DOWNLOAD_RUNNING_LOW_SAMPLES = 2,
     HEAVY_DOWNLOAD_RUNNING_SAMPLE_SECONDS = 5,
+    -- Heavy-guard thresholds above are the CAPS of a MemTotal-scaled profile:
+    -- each is clamp(MemTotal * ratio, floor, cap). Small-RAM devices (for
+    -- example a 256 MiB KPW2) can never present 96 MiB free, so absolute
+    -- values meant "downloads permanently forbidden" there. >=512 MiB devices
+    -- keep the historical absolutes because the caps equal them.
+    MEMORY_SMALL_TIER_TOTAL_KB = 300 * 1024,
+    HEAVY_DOWNLOAD_START_RATIO = 0.20,
+    HEAVY_DOWNLOAD_START_FLOOR_KB = 48 * 1024,
+    HEAVY_DOWNLOAD_RESUME_RATIO = 0.19,
+    HEAVY_DOWNLOAD_RESUME_FLOOR_KB = 44 * 1024,
+    HEAVY_DOWNLOAD_RUNNING_RATIO = 0.16,
+    HEAVY_DOWNLOAD_RUNNING_FLOOR_KB = 36 * 1024,
+    -- Last-resort abort floor for the EPUB package stage. Packaging has no
+    -- checkpoint, so the worker prefers finishing over aborting; on a 256 MiB
+    -- device that pushed free memory to 18 MiB overnight and wedged the whole
+    -- OS right before the install finished. Below this line the package pass
+    -- is discarded (chapters stay checkpointed) and retried in a later window.
+    HEAVY_PACKAGE_ABORT_RATIO = 0.10,
+    HEAVY_PACKAGE_ABORT_FLOOR_KB = 24 * 1024,
+    HEAVY_PACKAGE_ABORT_KB = 36 * 1024,
+    HEAVY_NATIVE_HIBERNATE_RATIO = 0.24,
+    HEAVY_NATIVE_HIBERNATE_FLOOR_KB = 56 * 1024,
+    HEAVY_NATIVE_CRITICAL_RATIO = 0.14,
+    HEAVY_NATIVE_CRITICAL_FLOOR_KB = 36 * 1024,
+    DOWNLOAD_COEXIST_RATIO = 0.25,
+    DOWNLOAD_COEXIST_FLOOR_KB = 48 * 1024,
+    -- When the kernel does run out of memory, prefer killing the checkpointed
+    -- download child (which resumes from its chapter checkpoint) over the
+    -- resident KOReader process. The parent value stays disabled by default;
+    -- the relative child/parent gap already decides the victim.
+    DOWNLOAD_WORKER_OOM_SCORE_ADJ = 500,
+    DOWNLOAD_PARENT_OOM_SCORE_ADJ = 0,
+    -- Idle pump: keep retrying a hibernated download while a memory window is
+    -- open instead of waiting for a UI event to revive it.
+    DOWNLOAD_IDLE_PUMP_SECONDS = 75,
+    -- An exhausted auto-restart budget parks the task as hibernated for this
+    -- long before the idle pump may try again.
+    DOWNLOAD_FUSE_COOLDOWN_SECONDS = 900,
+    -- Minimum park time after a memory-pressure hibernation. Without it, a
+    -- device hovering at the resume line forks a fresh worker roughly every
+    -- 90 seconds; each fork is a short CPU spike the UI feels as stutter.
+    DOWNLOAD_MEMORY_HIBERNATE_MIN_PARK_SECONDS = 90,
+    -- A worker that survived at least this long AND made chapter progress
+    -- resets the auto-restart budget on death, so a healthy long download is
+    -- not punished by the fuse for its first two deaths anymore.
+    DOWNLOAD_RESTART_BUDGET_RESET_SECONDS = 600,
 
     -- beta.4 coalesces repeated typography taps into one KOReader reflow. On a
     -- low-memory/heavy-download overlap, let the downloader checkpoint first
@@ -344,6 +398,13 @@ local C = {
     TYPOGRAPHY_REBUILD_HINT_SECONDS = 12,
     TYPOGRAPHY_HIBERNATE_MEMORY_KB = 72 * 1024,
     TYPOGRAPHY_CRITICAL_MEMORY_KB = 48 * 1024,
+    -- MemTotal-scaled typography guard lines; the absolutes above are the caps
+    -- (see runtime_pressure.compute_thresholds). A fixed 72 MiB hibernate line
+    -- fired on essentially every typography change on a 256 MiB device.
+    TYPOGRAPHY_HIBERNATE_RATIO = 0.20,
+    TYPOGRAPHY_HIBERNATE_FLOOR_KB = 48 * 1024,
+    TYPOGRAPHY_CRITICAL_RATIO = 0.12,
+    TYPOGRAPHY_CRITICAL_FLOOR_KB = 32 * 1024,
     TYPOGRAPHY_HEAVY_WAIT_SECONDS = 8,
     TYPOGRAPHY_DOWNLOAD_RESUME_DELAY_SECONDS = 2.2,
     -- Remote cover fetching may coexist with a healthy download. It yields only

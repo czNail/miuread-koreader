@@ -70,43 +70,38 @@ function M.decide(input)
     local local_seq=number(input.local_seq,0) or 0
     local verified_seq=number(input.verified_seq,0) or 0
     local seq_local_changed=local_seq>verified_seq
-    local anchor=anchor_position(input.verified_anchor)
     local local_anchor_changed=changed_from_anchor(lp,input.verified_anchor)
     local remote_anchor_changed=changed_from_anchor(rp,input.verified_anchor)
     local local_changed=seq_local_changed or local_anchor_changed==true
     local remote_changed=remote_anchor_changed==true
 
-    if local_changed and not remote_changed then
+    -- Verified common anchor is stronger than a server write timestamp.
+    -- A Web report can update the server clock without a human page turn.
+    if local_changed and remote_anchor_changed==false then
         return {winner="local",reason=seq_local_changed and "local_sequence_after_anchor" or "local_changed_after_anchor"}
     end
-    if remote_changed and not local_changed then
+    if remote_changed and local_anchor_changed==false and not seq_local_changed then
         return {winner="remote",reason="remote_changed_after_anchor"}
     end
 
     local lt=number(input.local_updated_at,0) or 0
     local rt=number(input.remote_updated_at,0) or 0
-    local grace=math.max(0,number(input.clock_skew_grace,30) or 30)
-    if lt>0 and rt>0 and math.abs(lt-rt)>grace then
-        if rt>lt then return {winner="remote",reason="remote_newer_timestamp",delta=rt-lt} end
-        return {winner="local",reason="local_newer_timestamp",delta=lt-rt}
+    if lt>0 and rt>0 and lt~=rt then
+        if lt>rt then return {winner="local",reason="local_newer_read_event",delta=lt-rt} end
+        return {winner="remote",reason="remote_newer_read_event",delta=rt-lt}
     end
-    if rt>0 and lt<=0 then return {winner="remote",reason="remote_timestamp_only"} end
     if lt>0 and rt<=0 then return {winner="local",reason="local_timestamp_only"} end
-
-    -- With no shared anchor and no durable unsent local generation, this is the
-    -- first reconciliation. The account cloud is authoritative even when the
-    -- server omitted a modification timestamp; merely opening the local EPUB
-    -- must not make its restored position look newer.
-    if not anchor and not seq_local_changed and lt<=0 and rt<=0 then
-        return {winner="remote",reason="initial_cloud_authority"}
+    if rt>0 and lt<=0 then
+        if seq_local_changed then return {winner="local",reason="durable_unsent_local_event"} end
+        return {winner="remote",reason="remote_timestamp_only"}
     end
+    if seq_local_changed then
+        return {winner="local",reason="local_unsent_sequence_tiebreak"}
+    end
+    -- Identical or unknown times without a new local event: retain cloud
+    -- authority on genuine reopen. No ambiguous-clock conflict dialog.
+    return {winner="remote",reason=(lt>0 and rt>0) and "remote_equal_time_tiebreak" or "initial_cloud_authority"}
 
-    -- beta.5: ambiguous freshness is a real conflict, never an implicit local
-    -- victory. Showing the local page is harmless; writing it back to cloud is
-    -- not. The caller keeps a progress-write fence until a later observation,
-    -- a verified anchor, or an explicit user override resolves the conflict.
-    return {winner="conflict",reason=(local_changed and remote_changed)
-        and "ambiguous_clock_conflict" or "unknown_freshness_conflict"}
 end
 
 
@@ -122,8 +117,7 @@ function M.prefer_nonstale_remote(incoming, stored, clock_skew_grace)
     if M.same_position(incoming,stored) then return incoming,"same_position" end
     local it=number(incoming.updated_at or incoming.updated,0) or 0
     local st=number(stored.updated_at or stored.updated,0) or 0
-    local grace=math.max(0,number(clock_skew_grace,30) or 30)
-    if it>0 and st>0 and st-it>grace then
+    if it>0 and st>0 and st>it then
         return stored,"stored_remote_newer"
     end
     return incoming,"incoming_not_proven_stale"

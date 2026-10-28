@@ -20,6 +20,7 @@ local Widget = require("ui/widget/widget")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local TransientGuard = require("miuread.transient_guard")
+local DialogTransition = require("miuread.dialog_transition")
 local UiScale = require("miuread.ui_scale")
 local Ui = require("miuread.ui_components")
 
@@ -276,7 +277,8 @@ local QuickPanelWidget = InputContainer:extend{
     name = "miuread_quick_panel",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Input captures screen, but opaque drawing occupies only the top panel.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     dimen = nil,
@@ -674,14 +676,11 @@ function QuickPanelWidget:onCloseWidget()
     self.pending_action = nil
     self._closed = true
     if live_panel == self then live_panel = nil end
-    if not self._rotation_close and region then
-        UIManager:setDirty(nil, function() return "ui", region end)
-    end
-    if action then
-        UIManager:scheduleIn(.04, function()
-            local ok, err = pcall(action)
-            if not ok then logger.warn("[MiuRead][QuickPanel] action failed", tostring(err)) end
-        end)
+    if self._rotation_close then
+        -- Rotation owns the full display refresh; never reopen stale panels.
+        DialogTransition.cancel_pending()
+    else
+        DialogTransition.after_close(region, action, "HomeQuickPanel")
     end
 end
 

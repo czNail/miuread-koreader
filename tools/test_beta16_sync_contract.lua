@@ -55,8 +55,8 @@ assert(not cloudsetter:find('self:_write_daemon_control',1,true),"set_cloud_anch
 -- Retain beta.15 hard safety: every compatibility time POST refreshes the
 -- server position first; failure to GET current remote means no POST.
 local compat=slice(worker,'if reading_time_compat then','local accepted, result')
-assert(compat:find('local refreshed=refresh_remote_anchor(client, book_id, book)',1,true),"fresh GET before time POST lost")
-assert(compat:find('fresh cloud reading position unavailable for reading-time report',1,true),"GET failure does not block POST")
+assert(compat:find('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)',1,true),"fresh GET before time POST lost")
+assert(compat:find('fresh Web position unavailable:',1,true),"GET failure does not block POST")
 assert(not compat:find('position_override = normalize_cloud_anchor(job.cloud_anchor, book)',1,true),"worker trusts cached anchor again")
 local report=slice(service,'local report_job = {','local attempted_at = os.time()')
 assert(report:find('control.remote_wire_chapter_uid',1,true),"service wire uid missing")

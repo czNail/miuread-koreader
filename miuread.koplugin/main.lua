@@ -62,6 +62,7 @@ local MemoryMode=require("miuread.memory_mode")
 local PerformanceMode=require("miuread.performance_mode")
 local RuntimePressure=require("miuread.runtime_pressure")
 local BackgroundScheduler=require("miuread.background_scheduler")
+local DownloadAdmission=require("miuread.download_admission")
 local PowerState=require("miuread.power_state")
 local SuspendWorkLease=require("miuread.suspend_work_lease")
 local PseudoLockscreen=require("miuread.pseudo_lockscreen")
@@ -625,6 +626,9 @@ local function install_home_screensaver_patch()
 end
 local source=debug.getinfo(1,"S").source:gsub("^@",""); local ROOT=source:match("^(.*)/main%.lua$") or "."
 local RUNTIME_MODE_KEY="__MIUREAD_RUNTIME_MODE"
+-- The variant menu is declared above the download executor. Forward-declare
+-- its shared options normalizer so Lua does not resolve it as a nil global.
+local b4_content_only_options
 local Plugin=WidgetContainer:extend{name="miuread",is_doc_only=false,version=Config.VERSION}
 
 function Plugin:_reader_session_kind()
@@ -874,11 +878,55 @@ function Plugin:init()
     self.memory_mode=MemoryMode:new(self.store)
     self.performance_mode=PerformanceMode:new(self.store)
     self.background_scheduler=BackgroundScheduler:new()
+    -- The scheduler must never free a live worker lease solely because its
+    -- runtime exceeded a timeout. For known background workers the live Async
+    -- descriptor is the authoritative signal; unknown leases remain protected.
+    self.background_scheduler.liveness_probe=function(key)
+        local map={
+            home_shelf="shelf_async",home_scan="home_async",home_metadata="home_metadata_async",
+            home_progress="home_progress_async",home_cover="home_cover_async",
+            home_cover_render="cover_render_async",sync_summary="sync_summary_async",
+            home_stats="reading_stats_async",
+        }
+        local name=map[tostring(key or "")]
+        if not name then return nil end
+        local worker=self[name]
+        if worker and type(worker.busy)=="function" then return worker:busy() end
+        return false
+    end
     self._reader_interaction_resume_task=nil
     self._reader_interaction_resume_generation=0
     self._performance_prompt_pending=nil
     self._performance_prompt_dialog=nil
     self.book_repair=DataMigration:new(self.store)
+    do
+        -- One-shot dump of the MemTotal-scaled heavy-guard profile so field
+        -- logs from small-memory devices can be calibrated against reality.
+        local total=RuntimePressure.total_kb()
+        local thresholds=RuntimePressure.thresholds()
+        logger.info("[MiuRead][MemoryProfile]",
+            "total_kb=",tostring(total or "unknown"),"tier=",RuntimePressure.tier(),
+            "start=",tostring(thresholds.start_min),"resume=",tostring(thresholds.resume_min),
+            "running=",tostring(thresholds.running_min),
+            "native_hibernate=",tostring(thresholds.native_hibernate),
+            "native_critical=",tostring(thresholds.native_critical),
+            "cover_coexist=",tostring(thresholds.cover_coexist),
+            "typography_hibernate=",tostring(thresholds.typography_hibernate),
+            "typography_critical=",tostring(thresholds.typography_critical),
+            "soft=",tostring(thresholds.soft),"critical=",tostring(thresholds.critical))
+        local parent_adj=tonumber(Config.DOWNLOAD_PARENT_OOM_SCORE_ADJ) or 0
+        if parent_adj~=0 then
+            -- Opt-in extra protection for the resident process; the download
+            -- child already raises its own score in its bootstrap.
+            pcall(function()
+                local file=io.open("/proc/self/oom_score_adj","w")
+                if file then
+                    file:write(tostring(math.max(-1000,math.min(1000,parent_adj))))
+                    file:close()
+                end
+            end)
+        end
+    end
     logger.info("[MiuRead] initialized", "version=", tostring(Config.VERSION),
         "schema=", tostring(Config.SCHEMA), "root=", tostring(ROOT))
     sanitize_saved_auth(self.store)
@@ -888,6 +936,7 @@ function Plugin:init()
     self.api=Api:new(self.http,self.store,self.reader)
     self.mp=MP:new(self.reader,self.http,self.store,self.api)
     self.annotations=Annotations:new(self.api)
+    self.comment_sync=require("miuread.comment_sync"):new(self.api,self.store,self.annotations)
     self.annotation_sync=AnnotationSync:new(self.api,self.reader,self.store)
     do
         self:_annotation_sync_preferences()
@@ -993,6 +1042,10 @@ function Plugin:init()
     self._download_book_menu=nil
     self._cache_cleanup_dialog=nil
     self._download_runtime=nil
+    self._resource_retry_task=nil
+    self._resource_retry_attempt=0
+    self._hibernated_low_memory_retry_count=0
+    self._queued_download_launch_pending=false
     self._chapter_prefetch_task=nil
     self._chapter_prefetch_generation=0
     self._chapter_prefetch_last_key=nil
@@ -2143,13 +2196,11 @@ function Plugin:home_menu()
     return out
 end
 
-function Plugin:_confirm_current_book_rebuild(book,annotations)
-    local label=annotations and "划线与想法版" or "纯净版"
+function Plugin:_confirm_current_book_rebuild(book)
     UIManager:show(ConfirmBox:new{
-        text="重新生成当前书籍的"..label.."？\n\n新文件会在生成完成后替换对应版本。",
-        ok_text="重新生成",
-        cancel_text="取消",
-        ok_callback=function() self:choose_download_mode(book,{annotations=annotations},false) end,
+        text="重新生成《"..tostring(book.title or "本书").."》的正文？\n\n原有评论缓存和收藏不会因重新下载而删除。旧版 EPUB 不会被直接覆盖。",
+        ok_text="重新生成",cancel_text="取消",
+        ok_callback=function() self:choose_download_mode(book,{annotations=false},false) end,
     })
 end
 
@@ -2167,10 +2218,7 @@ function Plugin:current_book_download_menu(book)
 end
 
 function Plugin:current_book_rebuild_menu(book)
-    return {
-        {text="重新生成纯净版",callback=function() self:_confirm_current_book_rebuild(book,false) end},
-        {text="重新生成划线与想法版",callback=function() self:_confirm_current_book_rebuild(book,true) end},
-    }
+    return {{text="重新生成正文",callback=function() self:_confirm_current_book_rebuild(book) end}}
 end
 
 function Plugin:current_book_menu()
@@ -2585,14 +2633,8 @@ function Plugin:_prepare_shelf_rows(rows)
             cover_index_changed=true
             if self._cover_index_pending then self._cover_index_pending[tostring(b.bookId)]=nil end
         end
-        if b.annotation_pending==true or b.annotation_fallback==true then
-            b.download_status=DownloadResult.shelf_status({
-                annotation_pending=b.annotation_pending==true,
-                annotation_fallback=b.annotation_fallback==true,
-            },false)
-        else
-            b.download_status=nil
-        end
+        -- Public comments are no longer part of the EPUB download state.
+        b.download_status=nil
         if tostring(download_state.book_id or "")~="" and tostring(download_state.book_id)==tostring(b.bookId or "") then
             if download_state.status=="active" then
                 b.download_active=true
@@ -2601,7 +2643,7 @@ function Plugin:_prepare_shelf_rows(rows)
             elseif download_state.status=="pending_install" then
                 b.download_status=DownloadResult.shelf_status(download_state,true)
             elseif download_state.status=="failed" or download_state.status=="interrupted" then b.download_status="生成未完成"
-            elseif download_state.status=="annotation_pending" then b.download_status="批注待修复"
+            elseif download_state.status=="annotation_pending" then b.download_status="历史任务 · 正文可用"
             elseif download_state.status=="completed" and download_state.annotation_fallback==true then b.download_status="已生成"
             elseif download_state.status=="completed" and download_state.seen~=true then b.download_status="刚刚生成完成" end
         end
@@ -2779,9 +2821,7 @@ function Plugin:_shelf_status_text(b)
         if b.remote_status_known~=true then state="本地书籍"
         elseif b.in_account_shelf==true then state="账号书架中"
         else state="已移出账号书架 · 本地可读" end
-        if b.hasClean and b.hasNotes then state=state.." · 两个版本"
-        elseif b.hasNotes then state=state.." · 划线与想法版"
-        elseif b.hasClean then state=state.." · 纯净版" end
+        if b.hasClean or b.hasNotes then state=state.." · 已下载" end
     else
         state=b.downloaded and "已生成" or "未生成"
         if b.isTop then state="置顶 · "..state end
@@ -3470,6 +3510,12 @@ function Plugin:_home_preferences()
     local home=preferences.home_ui
     local changed=false
     if home.enabled==nil then home.enabled=true; changed=true end
+    -- B5: preserve the existing appearance for upgrades; every item may be hidden.
+    if home.header_visible==nil then home.header_visible=true; changed=true end
+    if type(home.header_items)~="table" then home.header_items={}; changed=true end
+    for _,key in ipairs({"title","account","wifi","bluetooth","sync","battery","tools"}) do
+        if home.header_items[key]==nil then home.header_items[key]=true; changed=true end
+    end
     if tonumber(home.layout_version)~=24 then home.layout_version=24; changed=true end
     if home.layout_style~="compact" and home.layout_style~="desk" then
         home.layout_style="desk"
@@ -4194,7 +4240,7 @@ function Plugin:_background_claim(key,options,retry)
         and self.download_task and self.download_task:busy() and not self.download_task:is_hibernated()
         and self.download_task:is_heavy_stage() then
         local memory=RuntimePressure.memory_snapshot(false)
-        local minimum=math.max(1,tonumber(Config.DOWNLOAD_COVER_COEXIST_MIN_KB) or 80*1024)
+        local minimum=RuntimePressure.thresholds().cover_coexist
         if memory and tonumber(memory.available_kb or 0)<minimum then
             options.blocked_reason="download_memory_pressure"
         end
@@ -4210,7 +4256,7 @@ function Plugin:_background_claim(key,options,retry)
         and self.download_task:is_heavy_stage() then
         local memory=RuntimePressure.memory_snapshot(false)
         if options.user_requested==true then
-            local critical=math.max(1,tonumber(Config.HEAVY_NATIVE_CRITICAL_KB) or 64*1024)
+            local critical=RuntimePressure.thresholds().native_critical
             if memory and memory.available_kb<critical then
                 local requested=self.download_task:request_hibernate("background:"..key)
                 if requested then
@@ -4279,8 +4325,17 @@ function Plugin:_background_release(key,token,reason)
         self._heavy_background_download_hibernated[key]=nil
         if self.download_task and self.download_task:is_hibernated() then
             UIManager:scheduleIn(math.max(1.0,tonumber(Config.DOWNLOAD_INTERACTION_RESUME_DELAY) or 2.5),function()
-                if self.download_task then self.download_task:resume_hibernated("background task finished") end
+                if self.download_task and self.download_task:is_hibernated() then
+                    self:_schedule_hibernated_download_resume("background task finished")
+                end
             end)
+        end
+    end
+    if released and self.store and self.background_scheduler then
+        local waiting=self.store:download_queue()[1]
+        if waiting and (waiting.wait_reason=="low_memory" or waiting.wait_reason=="background_busy") then
+            self.background_scheduler:set_foreground_barrier(1.5,"waiting download priority")
+            UIManager:scheduleIn(.4,function() self:_start_next_queued_download() end)
         end
     end
     return released
@@ -4386,6 +4441,7 @@ function Plugin:_home_refresh_header_now(force_device,force_sync)
     return HomeView.update_header{
         account_name=self:_home_account_name(),
         wifi_text=self:_home_wifi_text(),
+        wifi_icon=self:_home_wifi_icon(),
         bluetooth_visible=self:_bluetooth_supported(),
         bluetooth_text=self:_home_bluetooth_text(),
         sync_text=force_sync==true and self:_home_sync_status_label(true) or self:_home_sync_status_label_cached(),
@@ -4417,7 +4473,7 @@ function Plugin:_home_schedule_device_state_probe(delay)
             if result and result.ok==true and type(result.value)=="table" then
                 HomeData.set_cached_device_state(result.value)
                 if HomeView.is_shown() and not self:_active_reader_ui() then
-                    HomeView.update_header{wifi_text=self:_home_wifi_text(),battery_text=self:_home_battery_text()}
+                    HomeView.update_header{wifi_text=self:_home_wifi_text(),wifi_icon=self:_home_wifi_icon(),battery_text=self:_home_battery_text()}
                 end
                 logger.info("[MiuRead][WifiProbe]","elapsed_ms=",tostring(elapsed),"async=true","ok=true")
             else
@@ -4713,6 +4769,7 @@ function Plugin:_home_freeze_for_suspend()
     self:_home_unschedule_task("_home_manual_metadata_retry_task")
     self:_home_unschedule_task("_home_stats_refresh_task")
     self:_home_unschedule_task("_home_stats_apply_task")
+    self:_download_idle_pump_stop()
     self._home_pending_network_metadata_key=nil
     self._home_refresh_debounce_generation=(tonumber(self._home_refresh_debounce_generation) or 0)+1
     self._home_render_refresh_generation=(tonumber(self._home_render_refresh_generation) or 0)+1
@@ -5469,8 +5526,8 @@ function Plugin:_home_apply_section(section)
         shelf_pages=total_pages,
         empty_text=selected.empty,
         on_open_book=function(book,anchor,ges) self:_home_open_book(book,anchor,ges) end,
-        -- Home shelf books intentionally have no long-press action. All book
-        -- actions remain discoverable from the normal tap menu.
+        -- beta.17: preserve book-management access when a downloaded book taps straight into Reader.
+        on_hold_book=function(book,anchor) self:_home_hold_book(book,anchor) end,
         home_actions=self:_home_action_entries(),
         on_shelf_filter=right_callback,
         shelf_filter_label=right_label,
@@ -6037,6 +6094,50 @@ function Plugin:_toggle_home_lockscreen()
     self:_refresh_home_view(home.lockscreen_recent and "主页锁屏将显示最近阅读封面" or "已恢复 KOReader 原锁屏设置","header")
 end
 
+local HOME_HEADER_KEYS={"title","account","wifi","bluetooth","sync","battery","tools"}
+local HOME_HEADER_LABELS={title="觅阅标题",account="账号",wifi="Wi-Fi 状态",bluetooth="蓝牙状态",
+    sync="同步状态",battery="电量",tools="工具入口"}
+
+function Plugin:_set_home_header_item(key,visible)
+    if not HOME_HEADER_LABELS[key] then return false end
+    local home,prefs=self:_home_preferences()
+    home.header_items[key]=visible==true
+    local ok=self:_save_home_preferences(home,prefs)
+    if ok then self:_refresh_home_view(nil,"page") end
+    return ok
+end
+
+function Plugin:_set_home_header_visible(visible)
+    local home,prefs=self:_home_preferences()
+    home.header_visible=visible==true
+    local ok=self:_save_home_preferences(home,prefs)
+    if ok then self:_refresh_home_view(nil,"page") end
+    return ok
+end
+
+function Plugin:home_header_settings_menu()
+    local rows={{text="显示主页顶栏",checked_func=function()
+        return self:_home_preferences().header_visible~=false end,keep_menu_open=true,
+        callback=function() self:_set_home_header_visible(self:_home_preferences().header_visible==false) end}}
+    for _,key in ipairs(HOME_HEADER_KEYS) do
+        local item=key
+        if item~="bluetooth" or self:_bluetooth_supported() then
+            rows[#rows+1]={text=HOME_HEADER_LABELS[item],checked_func=function()
+                return self:_home_preferences().header_items[item]~=false end,keep_menu_open=true,
+                callback=function()
+                    self:_set_home_header_item(item,self:_home_preferences().header_items[item]==false)
+                end}
+        end
+    end
+    rows[#rows+1]={text="恢复默认顶栏",callback=function()
+        local home,prefs=self:_home_preferences()
+        home.header_visible=true
+        for _,key in ipairs(HOME_HEADER_KEYS) do home.header_items[key]=true end
+        if self:_save_home_preferences(home,prefs) then self:_refresh_home_view("已恢复默认顶栏","page") end
+    end}
+    return rows
+end
+
 function Plugin:home_layout_settings_menu()
     local home=self:_home_preferences()
     return {
@@ -6269,16 +6370,15 @@ function Plugin:_home_group_settings_menu(group)
     local order_key=is_action and "action_order" or "panel_order"
     local version_key=is_action and "action_layout_version" or "panel_layout_version"
     local rows={}
+    -- Actions first. Selection count is a lightweight summary after them,
+    -- not a disabled first-row obstacle to changing the layout.
+    local selection_summary=""
     if not is_action then
         local selected=self:_home_group_enabled_count("panel")
-        local overflow=math.max(0,selected-HOME_PANEL_MAX_VISIBLE)
-        rows[#rows+1]={
-            text=overflow>0 and ("已选择 "..tostring(selected).." 项 · 请取消 "..tostring(overflow).." 项")
-                or ("已选择 "..tostring(selected).." / "..tostring(HOME_PANEL_MAX_VISIBLE)),
-            post_text=overflow>0 and ("最多 "..tostring(HOME_PANEL_MAX_VISIBLE).." 项") or "单行显示",
-            enabled=false,
-        }
+        selection_summary=tostring(selected).." / "..tostring(HOME_PANEL_MAX_VISIBLE)
     end
+    rows[#rows+1]={text="调整顺序",post_text=selection_summary,
+        sub_item_table_func=function() return self:_home_group_order_menu(group) end}
     for _,key in ipairs(order) do
         local item_key=key
         if is_action or self:_home_panel_item_available(item_key) then
@@ -6290,7 +6390,6 @@ function Plugin:_home_group_settings_menu(group)
             }
         end
     end
-    rows[#rows+1]={text="调整顺序",sub_item_table_func=function() return self:_home_group_order_menu(group) end}
     rows[#rows+1]={text="恢复推荐布局",callback=function()
         local home,preferences=self:_home_preferences()
         home[items_key]={}
@@ -6626,8 +6725,9 @@ function Plugin:_home_close_to_native(show_notice,after_open)
     self._native_heavy_transition_pending=true
     local memory=RuntimePressure.memory_snapshot(true)
     local available=memory and tonumber(memory.available_kb) or nil
-    local hibernate_line=math.max(1,tonumber(Config.HEAVY_NATIVE_HIBERNATE_KB) or 96*1024)
-    local critical_line=math.max(1,tonumber(Config.HEAVY_NATIVE_CRITICAL_KB) or 64*1024)
+    local native_thresholds=RuntimePressure.thresholds()
+    local hibernate_line=native_thresholds.native_hibernate
+    local critical_line=native_thresholds.native_critical
     local download_stage=tostring(task:stage() or "unknown")
     local memory_heavy_stage=download_stage=="transform" or download_stage=="package"
         or download_stage=="annotation_batch" or download_stage=="annotation_apply"
@@ -7324,6 +7424,47 @@ function Plugin:_reader_wifi_settings(back_callback)
     return false
 end
 
+function Plugin:_home_wifi_icon()
+    local state=HomeData.cached_device_state() or {}
+    if state.wifi_on==false or state.network_phase=="off" then return "wifi-off" end
+    if state.connected==false or state.network_phase=="connecting" then return "wifi-low" end
+    if state.connected==true and state.online==false then return "wifi-alert" end
+    if state.network_phase=="unavailable" then return "wifi-alert" end
+    return "wifi"
+end
+
+function Plugin:_home_header_visibility_label()
+    local home=self:_home_preferences()
+    if home.header_visible==false then return "已隐藏" end
+    local fields={"title","account","wifi","bluetooth","sync","battery","tools"}
+    local visible=type(home.header_items)=="table" and home.header_items or {}
+    for _,key in ipairs(fields) do
+        if visible[key]==false then return "部分隐藏" end
+    end
+    return "全部显示"
+end
+
+function Plugin:_home_wifi_details()
+    -- No scanning during Home repaint: explicit user action only.
+    local state=HomeData.cached_device_state() or {}
+    local status=self:_home_wifi_text()
+    local ssid=U.trim(tostring(state.wifi_name or ""))
+    local connected=state.connected==true and state.wifi_on~=false
+    local rows={
+        {text="当前连接详情",post_text=connected and "已连接" or "未连接",callback=function()
+            self:info("Wi-Fi："..status.."\n当前网络："..(ssid~="" and ssid or "未获取到名称")..
+                (state.online==false and "\n互联网连接可能不可用" or ""))
+        end},
+        {text="查看可用网络",post_text="使用 KOReader 网络管理",close_before_action=true,callback=function()
+            return self:_home_wifi_settings()
+        end},
+        {text=state.wifi_on==false and "开启 Wi-Fi" or (state.wifi_on==true and "关闭 Wi-Fi" or "管理 Wi-Fi 开关"),close_before_action=true,callback=function()
+            return self:_home_wifi_toggle()
+        end},
+    }
+    return self:list("Wi-Fi",rows)
+end
+
 function Plugin:_home_wifi_text()
     local state=HomeData.cached_device_state() or {}
     local health=require("miuread.network_health").snapshot()
@@ -7413,7 +7554,7 @@ function Plugin:_home_status_text(book,is_local)
             return ""
         end
         if state.status=="failed" then return "失败" end
-        if state.status=="annotation_pending" then return "批注待修复" end
+        if state.status=="annotation_pending" then return "历史任务 · 正文已完成" end
         if state.status=="interrupted" or state.status=="pending_install" then return "待修复" end
     end
     if id~="" then
@@ -8805,7 +8946,6 @@ end
 
 function Plugin:_home_variant_download_action(target,annotations,context)
     context=context or self:_home_variant_download_context(target and (target.bookId or target.book_id),annotations)
-    local variant_name=annotations==true and "划线与想法版" or "纯净版"
     local book_id=tostring(target and (target.bookId or target.book_id) or "")
     local installed=context.installed~=nil and context.installed.file and U.file_exists(context.installed.file)
     local task=context.task
@@ -8814,30 +8954,29 @@ function Plugin:_home_variant_download_action(target,annotations,context)
 
     if task and task.status=="active" then
         local percent=self:_download_percent(task.state)
-        label=variant_name.."（下载中 "..tostring(percent).."%）"
+        label=(annotations and "带评论版" or "正文").."下载中（"..tostring(percent).."%）"
         detail="点击查看当前下载进度"
         callback=function() self:show_downloads() end
     elseif installed then
         -- A readable local copy stays simply "已下载" even if a previous
         -- re-download left a recoverable checkpoint. The shelf menu describes
         -- what is usable now, not an update lifecycle.
-        label=variant_name.."（已下载）"
-        detail="打开、重新下载或查看本机版本"
-        callback=function() BookLocalFilesDialog.open_variant(self,book_id,annotations==true and "notes" or "clean") end
+        label=annotations and "带评论版已下载" or "正文已下载"
+        detail=annotations and "打开或管理带评论的本机版本" or "打开、重新下载或查看本机正文"
+        callback=function() BookLocalFilesDialog.open_variant(self,book_id,annotations and "notes" or "clean") end
     elseif task or repair then
-        label=variant_name.."（继续下载）"
+        label=annotations and "继续下载带评论版" or "继续下载正文"
         detail="上次任务未完成，点击继续"
-        local options=U.copy((task and task.options) or (repair and repair.options) or {annotations=annotations==true})
-        options.annotations=annotations==true
+        local options=b4_content_only_options((task and task.options) or (repair and repair.options))
         callback=function() self:choose_download_mode(target,options,false) end
     else
-        label=variant_name.."（未下载）"
-        detail=annotations==true and "下载包含微信读书划线与想法的完整版本" or "下载完整纯净版"
+        label=annotations and "下载正文与公开想法" or "下载正文"
+        detail=annotations and "另存带评论 EPUB，本机纯正文版不受影响" or "只下载正文，评论在阅读时按需获取"
         callback=function() self:choose_download_mode(target,{annotations=annotations==true},false) end
     end
 
     return {
-        icon=annotations==true and "highlight" or "⇩",
+        icon="⇩",
         label=label,detail=detail,callback=callback,
     }
 end
@@ -8908,7 +9047,7 @@ function Plugin:_home_open_book(book,anchor,ges,direct_read)
     end
     self:_home_attach_local_record(book)
     local record=id~="" and self:_preferred_record(id) or nil
-    if direct_read==true and record and record.file and U.file_exists(record.file) then
+    if record and record.file and U.file_exists(record.file) then
         local now=monotonic_wall_time()
         local lock=self._home_book_open_lock
         if type(lock)=="table" and now-(tonumber(lock.started_at) or 0)<4 then
@@ -8983,6 +9122,7 @@ function Plugin:_home_show_full_shelf(title,rows,options)
             on_left_action=options.on_left_action,
             on_right_action=options.on_right_action,
             on_select=function(book,anchor) self:_home_open_book(book,anchor) end,
+            on_hold=function(book,anchor) self:_home_hold_book(book,anchor) end,
             on_page_changed=function(page,first,last,current)
                 if show_covers then self:_on_shelf_page(rows,current,page,first,last) end
             end,
@@ -9875,14 +10015,15 @@ function Plugin:_home_hold_book(book,anchor)
         actions[#actions+1]={icon="book",label="阅读",detail="打开最近使用的本地版本",callback=function() self:_home_open_book(target,nil,nil,true) end}
     end
 
-    -- Whole-book variants own their own state. A failed clean download must not
-    -- make an already readable notes version look damaged, and vice versa.
+    -- Main actions follow local availability. Keep an explicit separate
+    -- notes edition within More, never overwrite the clean EPUB silently.
     local download_state=self:_download_state()
     local repairs=id~="" and (BookIntegrity.partial_repairs(self.store,id) or {}) or {}
     local clean_context=self:_home_variant_download_context(id,false,download_state,repairs)
     local notes_context=self:_home_variant_download_context(id,true,download_state,repairs)
-    actions[#actions+1]=self:_home_variant_download_action(target,false,clean_context)
-    actions[#actions+1]=self:_home_variant_download_action(target,true,notes_context)
+    if not available then
+        actions[#actions+1]=self:_home_variant_download_action(target,false,clean_context)
+    end
 
     local same_download=tostring(download_state.book_id or download_state.bookId or "")==id
     local task_options=same_download and self:_home_download_task_options(download_state) or nil
@@ -9898,7 +10039,9 @@ function Plugin:_home_hold_book(book,anchor)
         local downloaded_chapters=tonumber(local_summary.downloaded_chapter_count or local_summary.chapter_count or 0) or 0
         chapter_label="按章节下载（已下载 "..tostring(downloaded_chapters).." 章）"
     end
-    actions[#actions+1]={icon="▤",label=chapter_label,detail=chapter_detail,callback=chapter_callback}
+    if not available then
+        actions[#actions+1]={icon="▤",label=chapter_label,detail=chapter_detail,callback=chapter_callback}
+    end
     if local_summary.has_local==true then
         actions[#actions+1]={icon="▤",label="本机文件",detail="查看或删除已下载内容",callback=function()
             BookLocalFilesDialog.open_generated(self,id)
@@ -9913,9 +10056,20 @@ function Plugin:_home_hold_book(book,anchor)
         end
     end
     local finished_action=self:_finished_status_action(target)
-    if finished_action then
-        actions[#actions+1]={icon="✓",label=finished_action.text,detail=finished_action.post_text,callback=finished_action.callback}
+    -- Less clutter on downloaded books; keep advanced actions available.
+    local more_actions={self:_home_variant_download_action(target,true,notes_context)}
+    if available then
+        more_actions[#more_actions+1]={icon="▤",label=chapter_label,detail=chapter_detail,callback=chapter_callback}
+        more_actions[#more_actions+1]=self:_home_variant_download_action(target,false,clean_context)
     end
+    if finished_action then
+        more_actions[#more_actions+1]={icon="✓",label=finished_action.text,detail=finished_action.post_text,callback=finished_action.callback}
+    end
+    actions[#actions+1]={icon="⚙",label="更多操作",detail="带评论下载、章节管理和阅读状态",callback=function()
+        ActionSheet.show{anchor=anchor,preferred_direction="above",width_ratio=.72,
+            title="更多操作 · "..tostring(target.title or "书籍"),
+            actions=more_actions,wide_last=(#more_actions%2==1)}
+    end}
     ActionSheet.show{
         anchor=anchor,
         preferred_direction="above",
@@ -9939,8 +10093,17 @@ function Plugin:_home_action_entries()
 
     local sync_summary=self:_home_sync_summary()
     local sync_badge=nil
-    if sync_summary.failed>0 then sync_badge="!"
-    elseif sync_summary.total>0 then sync_badge=sync_summary.total>99 and "99+" or tostring(sync_summary.total) end
+    local hide_progress_badge=self.store:preferences().hide_progress_sync_badge==true
+    local shown_failed=math.max(0,tonumber(sync_summary.failed or 0) or 0)
+    local shown_total=math.max(0,tonumber(sync_summary.total or 0) or 0)
+    if hide_progress_badge then
+        -- Hide only the user's abandoned/failed progress alerts. A genuine
+        -- annotation failure must still be visible on the shared Sync icon.
+        shown_failed=math.max(0,shown_failed-(tonumber(sync_summary.progress_failed or 0) or 0))
+        shown_total=math.max(0,shown_total-(tonumber(sync_summary.progress or 0) or 0))
+    end
+    if shown_failed>0 then sync_badge="!"
+    elseif shown_total>0 then sync_badge=shown_total>99 and "99+" or tostring(shown_total) end
 
     local function hold_for(key,label)
         return function(anchor)
@@ -9960,9 +10123,7 @@ function Plugin:_home_action_entries()
         bookstore={icon="library",icon_key="library",label="书城",callback=function() self:show_bookstore() end},
         downloads={icon="⇩",icon_key="download",label="下载",badge=download_badge,callback=function() self:show_downloads() end},
         sync={icon="⇅",icon_key="sync",label="同步",badge=sync_badge,callback=function()
-            -- beta.11: every manual Sync entry reaches the same progress
-            -- recovery pass. The source tag is diagnostic only.
-            self:_sync_home_pending({source="home_quick"})
+            return self:show_sync_status(false)
         end},
         miuread_settings={icon="⚙",icon_key="settings",label="设置",callback=function() self:_show_home_settings_center() end},
         all_books={icon="▦",label="全部书籍",callback=function() self:show_home_all_books() end},
@@ -12647,22 +12808,43 @@ function Plugin:_quiesce_download_for_exit(reason)
         end
     elseif ok~=true and (mode=="forced_stop" or mode=="interrupted") then
         -- The child did not reach a cooperative checkpoint inside the short
-        -- external-exit window. The per-book cache is still intact, but never
-        -- persist its now-dead PID as an active worker.
+        -- external-exit window. The per-book chapter cache is still intact, so
+        -- park the task as hibernated instead of dead-ending into an
+        -- "interrupted" error state; the next launch auto-resumes it through
+        -- the idle pump instead of waiting for a manual tap.
         if passive then
             self.store:clear_download_state()
         else
-            local state=runtime and self:_active_download_payload(runtime,runtime.last_state or {})
-                or U.copy(self.store:download_state() or {})
-            state.task=nil
-            state.stage="interrupted"
-            state.error="KOReader 退出时已停止后台下载；已完成章节和断点均已保留，可继续下载。"
-            state.message=state.error
-            state.updated_at=os.time()
-            state.status="interrupted"
-            self.store:save_download_state(state)
+            local task=runtime and U.copy(runtime.task) or nil
+            if type(task)~="table" then
+                task=U.copy((self.store:download_state() or {}).task or {})
+            end
+            task.pid=nil
+            task.hibernated=true
+            task.hibernate_reason="exit_forced_stop"
+            task.stage=tostring(task.stage or "hibernated")
+            task.updated_at=os.time()
+            if runtime then
+                runtime.task=task
+                runtime.last_state=U.copy(runtime.last_state or {})
+                runtime.last_state.stage="hibernated"
+                runtime.last_state.hibernate_reason="exit_forced_stop"
+                runtime.last_state.message="KOReader 退出时已保存下载断点，重新启动后自动继续"
+                runtime.last_state.updated_at=os.time()
+                self:_write_download_state("active",
+                    self:_active_download_payload(runtime,runtime.last_state),true)
+            else
+                local state=U.copy(self.store:download_state() or {})
+                if state.status=="active" or state.status=="prefetch" then
+                    state.task=task
+                    state.stage="hibernated"
+                    state.hibernate_reason="exit_forced_stop"
+                    state.message="KOReader 退出时已保存下载断点，重新启动后自动继续"
+                    state.updated_at=os.time()
+                    self.store:save_download_state(state)
+                end
+            end
         end
-        if runtime then runtime.task=nil end
     end
     logger.info("[MiuRead][DownloadExit] quiesce complete",
         "reason=",reason,"ok=",tostring(ok==true),"mode=",tostring(mode or "unknown"))
@@ -12715,7 +12897,10 @@ function Plugin:_quit_koreader(confirmed,anchor)
         self:_begin_koreader_exit("quit")
         pcall(function() self:onFlushSettings() end)
         if Device and Device.saveSettings then pcall(Device.saveSettings,Device) end
-        UIManager:nextTick(function() UIManager:broadcastEvent(Event:new("Exit")) end)
+        UIManager:nextTick(function()
+            UIManager:broadcastEvent(Event:new("Exit"))
+            if UIManager._exit_code==nil then UIManager:quit(0) end
+        end)
     end
 
     local function do_exit()
@@ -13199,7 +13384,7 @@ function Plugin:_reader_typography_wait_for_guard(generation,started,mode)
     if elapsed>=wait_limit then
         local memory=RuntimePressure.memory_snapshot(true)
         local available=memory and tonumber(memory.available_kb) or nil
-        local critical=math.max(1,tonumber(Config.TYPOGRAPHY_CRITICAL_MEMORY_KB) or 48*1024)
+        local critical=RuntimePressure.thresholds().typography_critical
         if available and available<critical then
             logger.warn("[MiuRead][Typography] apply deferred for safety",
                 "reason=low_memory","memory_kb=",tostring(available),"stage=",tostring(task:stage() or "unknown"))
@@ -13246,7 +13431,7 @@ function Plugin:_reader_typography_apply(generation)
 
     local memory=RuntimePressure.memory_snapshot(true)
     local available=memory and tonumber(memory.available_kb) or nil
-    local critical=math.max(1,tonumber(Config.TYPOGRAPHY_CRITICAL_MEMORY_KB) or 48*1024)
+    local critical=RuntimePressure.thresholds().typography_critical
     if available and available<critical and (not task or not task:busy()) then
         if collectgarbage then pcall(collectgarbage,"collect") end
         memory=RuntimePressure.memory_snapshot(true)
@@ -13261,7 +13446,7 @@ function Plugin:_reader_typography_apply(generation)
     end
 
     if task and task:busy() and not task:is_hibernated() then
-        local hibernate_line=math.max(1,tonumber(Config.TYPOGRAPHY_HIBERNATE_MEMORY_KB) or 72*1024)
+        local hibernate_line=RuntimePressure.thresholds().typography_hibernate
         local stage=tostring(task:stage() or "unknown")
         if typography_heavy_stage(stage) or (available and available<hibernate_line) then
             local requested=task:request_hibernate((available and available<hibernate_line)
@@ -13597,9 +13782,18 @@ function Plugin:_set_thoughts_enabled(enabled)
     local record=current and current.record or {}
     local variant=tostring(current and (current.variant or record.variant) or "")
     local annotation_book=current and (record.annotation_requested==true or variant:find("notes",1,true))
+    if self._comment_overlay then
+        self._comment_overlay:setEnabled(enabled)
+        if self.ui then UIManager:setDirty(self.ui,"ui") end
+    end
     if enabled then
         if annotation_book then self:_setup_thought_tap() end
-        if changed then self:toast("阅读评论已开启",1.5) end
+        UIManager:scheduleIn(.05,function() self:_refresh_current_comment_overlay(false) end)
+        if changed then
+            self:toast("阅读评论已开启",1.5)
+            -- R02: enabling the comment layer never initiates or offers a
+            -- network request. Fetch/update are explicit actions in Comments.
+        end
     else
         self:_close_active_thought_popup("comments disabled")
         -- Keep the MiuRead internal-link guard installed. Hiding comments must
@@ -14245,8 +14439,126 @@ function Plugin:_show_reader_comment_settings(back_callback)
     return true
 end
 
+-- B2: comment acquisition is always a deliberate reader action. Never
+-- invoke this from ReaderReady, page turns, download completion or resume.
+function Plugin:_reader_comment_status_label(scope)
+    scope=scope or self:_current_thought_favorite_scope()
+    if scope.book_id=="" or scope.chapter_uid=="" then return "无法识别当前章节" end
+    local status=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+    if not status.has_cache then
+        return status.status=="error" and "上次获取失败 · 尚无缓存" or "尚未获取"
+    end
+    if status.status=="error" and status.has_cache then return "本地评论可用" end
+    if status.status=="partial" then return "已有本地评论，可继续更新" end
+    if status.status=="empty" then return "暂无公开评论" end
+    return "本地评论可用"
+end
+
+function Plugin:_show_current_chapter_comments(scope,back_callback)
+    scope=scope or self:_current_thought_favorite_scope()
+    if scope.book_id=="" or scope.chapter_uid=="" then
+        self:info("当前章节无法识别，不能读取对应评论缓存。")
+        return false
+    end
+    local groups,err=self.comment_sync:load(scope.book_id,scope.chapter_uid)
+    if type(groups)~="table" then
+        logger.warn("[MiuRead][Comments] cached read unavailable", "book=",scope.book_id,
+            "chapter=",scope.chapter_uid,"reason=",U.first_line(tostring(err or "cache_missing"),90))
+        self:info("本章评论暂时无法读取，请稍后重试。")
+        return false
+    end
+    local items={}
+    for _,group in ipairs(groups) do
+        for _,comment in ipairs(group.texts or {}) do
+            local item=comment
+            local source=tostring(comment.abstract or "")
+            local content=tostring(comment.content or "")
+            local author=tostring(comment.author or "")
+            local preview=U.utf8_truncate(content:gsub("%s+"," "),48,"…")
+            items[#items+1]={
+                icon="comment",label=preview~="" and preview or "评论",
+                detail=source~="" and ("原文："..U.utf8_truncate(source:gsub("%s+"," "),50,"…")) or "",
+                value=author~="" and author or "微信读书用户",
+                callback=function()
+                    -- Use the same native comment popup as an in-text tap.
+                    -- This preserves favorite/like/copy actions for B3 offline rows.
+                    self._opening_cached_comment=true
+                    local ok,err=pcall(function()
+                        self:_show_thought_href(Thoughts.href(scope.book_id,scope.chapter_uid,group.range))
+                    end)
+                    self._opening_cached_comment=nil
+                    if not ok then self:info("打开本地评论失败："..U.first_line(err,120)) end
+                end,
+            }
+        end
+    end
+    if #items==0 then
+        self:toast("本章暂无可显示的评论",2)
+        return true
+    end
+    return ReaderListDialog.show{
+        title="本章评论",subtitle="本地已保存的公开想法",
+        items=items,page_size=6,
+        on_back=back_callback or function() self:_show_reader_comment_center() end,
+        on_home=function() return self:_reader_home_action("comment cache") end,
+    }
+end
+
+function Plugin:_fetch_current_chapter_comments(force,return_to_comments)
+    local scope=self:_current_thought_favorite_scope()
+    if scope.book_id=="" or scope.chapter_uid=="" then
+        self:info("请先打开觅阅下载的微信读书章节，确认章节信息可识别后再获取评论。")
+        return false
+    end
+    local old=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+    if old.has_cache and not force and old.status~="partial" and old.status~="error" then
+        return self:_show_current_chapter_comments(scope,return_to_comments)
+    end
+    -- Read-only request; no document write, no download job or cloud mutation.
+    self:online("获取本章公开评论",function()
+        local result,err=self.comment_sync:fetch(scope.book_id,scope.chapter_uid,{force=force==true})
+        if not result then
+            local saved=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+            if saved.has_cache and (tonumber(saved.comments) or 0)>0 then
+                UIManager:scheduleIn(.12,function() self:_show_current_chapter_comments(scope,return_to_comments) end)
+            else
+                self:toast("评论暂时无法获取，请检查网络或登录",3)
+            end
+            return
+        end
+        -- Public thoughts are opportunistic; a partial batch does not merit
+        -- a warning dialog and must not hide successfully saved comments.
+        local latest=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+        if latest.has_cache and (tonumber(latest.comments) or 0)>0 then
+            UIManager:scheduleIn(.12,function()
+                self:_show_current_chapter_comments(scope,return_to_comments)
+            end)
+        elseif latest.status=="error" or (not result.cached and result.error_kind=="authentication") then
+            self:toast("评论暂时无法获取，请检查登录和网络",3)
+        end
+        -- Cached rows are now projected onto the open EPUB without rewriting it.
+        UIManager:scheduleIn(.16,function() self:_refresh_current_comment_overlay(true) end)
+    end)
+    return true
+end
+
+function Plugin:_offer_current_chapter_comments()
+    local scope=self:_current_thought_favorite_scope()
+    if scope.book_id=="" or scope.chapter_uid=="" then return false end
+    local status=self.comment_sync:status(scope.book_id,scope.chapter_uid)
+    if status.has_cache then return false end
+    UIManager:show(ConfirmBox:new{
+        text="本章尚未保存公开评论。\n\n是否现在联网获取并永久保存到本机？\n以后可以离线查看，更新评论需要再次主动操作。",
+        ok_text="获取本章",cancel_text="暂不获取",
+        ok_callback=function() self:_fetch_current_chapter_comments(false) end,
+    })
+    return true
+end
+
 function Plugin:_show_reader_comment_center(back_callback)
     local function reopen() self:_show_reader_comment_center(back_callback) end
+    -- Display available offline anchors. Never initiate network access here.
+    UIManager:scheduleIn(.03,function() self:_refresh_current_comment_overlay(false) end)
     ReaderSettingsDialog.show{
         title="评论",
         subtitle=function()
@@ -14263,29 +14575,32 @@ function Plugin:_show_reader_comment_center(back_callback)
             local book_count=scope.book_id~="" and self:_thought_favorite_count({book_id=scope.book_id}) or 0
             local chapter_count=(scope.book_id~="" and scope.chapter_uid~="")
                 and self:_thought_favorite_count({book_id=scope.book_id,chapter_uid=scope.chapter_uid}) or 0
+            local cache=scope.book_id~="" and scope.chapter_uid~=""
+                and self.comment_sync:status(scope.book_id,scope.chapter_uid)
+                or {has_cache=false,status="not_fetched",comments=0}
+            local can_fetch=scope.book_id~="" and scope.chapter_uid~=""
+            local main_label
+            if (cache.status=="partial" or cache.status=="error") and can_fetch then
+                main_label=cache.has_cache and "继续获取本章评论" or "重试获取本章评论"
+            elseif not cache.has_cache then main_label="获取本章评论"
+            else main_label="查看本章评论" end
             local content_rows={
-                {icon="bookmark",label="本章评论收藏",value=scope.chapter_uid~="" and (tostring(chapter_count).." 条") or "当前章节不可识别",
-                    enabled=scope.book_id~="" and scope.chapter_uid~="",arrow=true,callback=function()
-                        self:show_thought_favorites{
-                            book_id=scope.book_id,chapter_uid=scope.chapter_uid,scope_label="本章评论收藏",
-                            reader_context=true,back_callback=reopen,
-                        }
-                    end},
-                {icon="current-book",label="本书评论收藏",value=scope.book_id~="" and (tostring(book_count).." 条") or "当前书籍不可识别",
-                    enabled=scope.book_id~="",arrow=true,callback=function()
-                        self:show_thought_favorites{
-                            book_id=scope.book_id,scope_label="本书评论收藏",
-                            reader_context=true,back_callback=reopen,
-                        }
-                    end},
-                {icon="bookmark",label="全部评论收藏",value=tostring(total).." 条",enabled=total>0,arrow=true,callback=function()
-                    self:show_thought_favorites{reader_context=true,scope_label="全部评论收藏",back_callback=reopen}
-                end},
-                {icon="search",label="搜索收藏评论",value=total>0 and "评论、原文、作者、书名" or "暂无收藏",
-                    enabled=total>0,arrow=true,callback=function()
-                        self:_search_thought_favorites{reader_context=true,back_callback=reopen}
+                {icon=cache.has_cache and "comment" or "download",label=main_label,
+                    value=self:_reader_comment_status_label(scope),enabled=can_fetch,arrow=true,
+                    callback=function()
+                        if cache.status=="partial" or cache.status=="error" or not cache.has_cache then
+                            self:_fetch_current_chapter_comments(false,reopen)
+                        else self:_show_current_chapter_comments(scope,reopen) end
                     end},
             }
+            if can_fetch and cache.has_cache then
+                content_rows[#content_rows+1]={icon="sync",label="更新本章评论",
+                    value="",arrow=true,callback=function() self:_fetch_current_chapter_comments(true,reopen) end}
+            end
+            content_rows[#content_rows+1]={icon="bookmark",label="我的评论收藏",
+                value=tostring(total).." 条",arrow=true,callback=function()
+                    self:show_thought_favorites{reader_context=true,scope_label="我的评论收藏",back_callback=reopen}
+                end}
             local display_rows={
                 {icon="comment",label="阅读评论",value=self:_thoughts_enabled_label(),value_bold=true,keep_open=true,callback=function()
                     self:_toggle_thoughts_enabled()
@@ -15158,12 +15473,16 @@ function Plugin:_show_reader_annotation_panel(back_callback)
             }}
             if not weread then return sections end
             sections[#sections+1]={title="微信读书同步",rows={
-                {icon="upload",label="立即同步本书批注",value="上传 删除 云端对账",value_bold=true,callback=function()
-                    self:sync_local_annotations_now()
+                {icon="upload",label="同步本书个人批注",value="可能修改云端记录",value_bold=true,callback=function()
+                    local message="同步本书个人批注可能上传新划线、书签或想法，"..
+                        "并执行此前由你标记为待云端删除的操作。\n\n"..
+                        "当前待删除："..tostring(pending_delete).." 条。是否继续？"
+                    UIManager:show(ConfirmBox:new{text=message,ok_text="确认同步",cancel_text="取消",
+                        ok_callback=function() self:sync_local_annotations_now() end})
                 end},
-                {icon="sync",label="待处理",value=pending_work>0
-                    and string.format("共 %d · 可重试 %d · 需处理 %d",pending_work,pending_upload+pending_delete,action_required)
-                    or "0 · 仍可手动对账",enabled=false},
+                {icon="sync",label="同步状态",value=pending_work>0 and ("待处理 "..tostring(pending_work).." 条")
+                    or (failed>0 and ("失败 "..tostring(failed).." 条") or "无待处理记录"),
+                    callback=function() self:show_local_annotation_sync_status() end},
                 {label="同步详情",value=legacy_synced>0
                     and string.format("已同步 %d · 旧坐标 %d",tonumber(summary.synced or 0) or 0,legacy_synced)
                     or string.format("已同步 %d · 失败 %d",tonumber(summary.synced or 0) or 0,failed),
@@ -15171,9 +15490,7 @@ function Plugin:_show_reader_annotation_panel(back_callback)
                 {icon="warning",label="需要处理",value=action_required>0 and (tostring(action_required).." 条") or "0",
                     value_bold=action_required>0,enabled=action_required>0,callback=function() self:show_annotation_sync_issues(book_id) end},
                 {label="结束阅读时上传",value=self:_annotation_close_upload_enabled() and "已开启" or "已关闭",value_bold=true,keep_open=true,callback=function() self:toggle_annotation_close_upload() end},
-                {icon="diagnostics",label="坐标诊断",value="导出 raw / coord / range",callback=function()
-                    self:sync_local_annotations_now(true)
-                end},
+
                 {label="新想法可见范围",value=self:annotation_sync_visibility_label(),callback=function()
                     self:_show_reader_menu_table("新想法可见范围",self:annotation_sync_visibility_menu(),return_to_panel)
                 end},
@@ -15416,7 +15733,7 @@ function Plugin:_show_reader_sync_settings_panel(back_callback)
             local sync=self.store:preferences().sync or {}
             return {
                 {title="自动同步",rows={
-                    {label="阅读时间",value=sync.time_enabled==true and "已开启 · 首次约15秒，之后每60秒" or "已关闭",value_bold=true,keep_open=true,callback=function() self:toggle_time_sync() end},
+                    {label="阅读时间",value=sync.time_enabled==true and "已开启 · 结束阅读后上报" or "已关闭",value_bold=true,keep_open=true,callback=function() self:toggle_time_sync() end},
                     {label="阅读进度",value=self:progress_upload_mode()=="manual" and "仅手动" or "结束阅读时同步",value_bold=true,callback=function() self:_show_reader_menu_table("阅读进度",self:progress_upload_mode_menu(),return_here) end},
                     {label="批注",value=self:_annotation_close_upload_enabled() and "结束阅读时同步" or "仅手动",value_bold=true,keep_open=true,callback=function() self:toggle_annotation_close_upload() end},
                     {label="自动同步最新阅读位置",value=(sync.auto_latest_position~=false and sync.pull_on_open~=false) and "已开启" or "已关闭",value_bold=true,keep_open=true,callback=function() self:toggle_pull_on_open() end},
@@ -15442,18 +15759,19 @@ function Plugin:_show_reader_sync_panel(back_callback)
             summary=type(summary)=="table" and summary or {}
             local pending=(tonumber(summary.pending or 0) or 0)+(tonumber(summary.delete_pending or 0) or 0)
             local action=tonumber(summary.action_required or 0) or 0
-            local annotation_state=(action+pending)>0 and ("同步失败 "..tostring(action+pending)) or "已同步"
+            local annotation_state=action>0 and ("需处理 "..tostring(action))
+                or (pending>0 and ("待同步 "..tostring(pending)) or "已同步")
             return {
-                {title="当前状态",rows={
-                    {label="当前书籍",value=self:_sync_current_book_label(),arrow=false},
+                {title="操作",rows={
+                    {icon="sync",label="手动同步",callback=function() self:_show_reader_menu_table("手动同步",self:sync_now_menu(),return_to_sync) end},
+                    {icon="warning",label="失败与待处理",value=annotation_state,
+                        callback=function() self:_show_reader_sync_diagnostics_panel(return_to_sync) end},
+                    {icon="settings",label="自动同步设置",callback=function() self:_show_reader_sync_settings_panel(return_to_sync) end},
+                }},
+                {title="状态摘要",rows={
                     {label="阅读时间",value=self:_reading_time_status_label(),arrow=false},
                     {label="阅读进度",value=self:_progress_status_label(),arrow=false},
-                    {label="批注",value=annotation_state,arrow=false},
-                }},
-                {title="操作",rows={
-                    {icon="settings",label="自动同步设置",value="时间、进度、批注",callback=function() self:_show_reader_sync_settings_panel(return_to_sync) end},
-                    {icon="sync",label="手动同步",value="进度与批注",callback=function() self:_show_reader_menu_table("手动同步",self:sync_now_menu(),return_to_sync) end},
-                    {icon="diagnostics",label="诊断与修复",value="状态与高级工具",callback=function() self:_show_reader_sync_diagnostics_panel(return_to_sync) end},
+                    {label="个人批注",value=annotation_state,arrow=false},
                 }},
             }
         end,
@@ -16233,6 +16551,9 @@ function Plugin:_show_reader_device_compat_panel(back_callback)
                 {label="觅阅阅读界面设置",value="评论与控制中心",callback=function()
                     self:_show_reader_menu_table("阅读界面",self:reader_quick_panel_settings_menu(),function() self:_show_reader_device_compat_panel(back_callback) end)
                 end},
+                {label="批注坐标诊断",value="高级维护 · 导出 raw / coord / range",callback=function()
+                    self:sync_local_annotations_now(true)
+                end},
                 {label="手势与按键",value="阅读手势说明",callback=function()
                     self:_show_reader_gesture_panel(function() self:_show_reader_device_compat_panel(back_callback) end)
                 end},
@@ -16380,8 +16701,7 @@ function Plugin:_reader_quick_definitions()
         comments={key="comments",icon="comment",label="评论",active=self:_thoughts_enabled(),callback=function()
             self:_show_reader_comment_center(function() self:show_reader_quick_panel() end)
         end,hold_callback=function()
-            self:_toggle_thoughts_enabled()
-            UIManager:scheduleIn(.05,function() self:show_reader_quick_panel() end)
+            self:_show_reader_comment_center(function() self:show_reader_quick_panel() end)
         end},
         annotations={key="annotations",icon="highlight",label="批注",callback=function() self:_show_reader_annotation_panel(function() self:show_reader_quick_panel() end) end},
         edge_guard={key="edge_guard",icon=edge_enabled and "edge-guard" or "edge-guard-off",label="防误触",active=edge_enabled,callback=function()
@@ -17066,45 +17386,95 @@ function Plugin:_navigation_token_valid(token,allowed_states)
     return false
 end
 
+-- One resume coordinator owns the timer. UI events and the idle check both
+-- call this entry point; neither is permitted to create a second recovery
+-- attempt. The download task itself retains the fork/owner and checkpoint
+-- guards and returns machine-readable reasons.
 function Plugin:_schedule_hibernated_download_resume(reason)
-    if self._hibernated_download_resume_task then
-        UIManager:unschedule(self._hibernated_download_resume_task)
-        self._hibernated_download_resume_task=nil
-    end
     if not self.download_task or not self.download_task:is_hibernated() then return false end
-    local generation=tonumber(NAVIGATION.generation) or 0
+    if self._hibernated_download_resume_task then return true end
+    local retry_count=math.min(5,math.max(0,tonumber(self._hibernated_low_memory_retry_count) or 0))
+    local hibernate_reason=self.download_task:hibernated_reason()
+    local hibernation=self.download_task.hibernated
+    local policy=require("miuread.download_resume_policy")
+    local delay=policy.next_delay(hibernate_reason,retry_count,
+        self.download_task:hibernated_cooldown_remaining(),Config)
     local task
     task=function()
         if self._hibernated_download_resume_task~=task then return end
         self._hibernated_download_resume_task=nil
+        if not self.download_task or not self.download_task:is_hibernated() then return end
+        -- A canceled task may already have been replaced before this timer
+        -- fires. An old callback must never revive a different book.
+        if self.download_task.hibernated~=hibernation then
+            self:_schedule_hibernated_download_resume("hibernation identity changed")
+            return
+        end
         local state=self:_navigation_state()
-        if generation~=(tonumber(NAVIGATION.generation) or 0) or state=="native" or state=="native_menu"
-            or state=="suspended" or state=="opening_reader" or state=="closing_reader" then
+        if state=="exiting" or state=="suspended" or state=="native" or state=="native_menu" then
+            -- Wake / foreground change explicitly rearms the coordinator.
             return
         end
-        local hibernate_reason=type(self.download_task.hibernated_reason)=="function"
-            and self.download_task:hibernated_reason() or nil
-        if hibernate_reason=="network_offline" and self:_network_radio_hint()==false then
-            logger.info("[MiuRead][DownloadTask] network-hibernated task remains parked",
-                "reason=offline","navigation=",state)
-            self:_schedule_hibernated_download_resume("network restored")
+        if state=="opening_reader" or state=="closing_reader" then
+            self:_schedule_hibernated_download_resume("navigation blocked")
             return
         end
-        local ok,err=self.download_task:resume_hibernated(reason or "foreground stable")
-        if not ok and err=="low_memory" then
-            self:_schedule_hibernated_download_resume(reason or "foreground stable")
-        elseif not ok then
+        local current_reason=self.download_task:hibernated_reason()
+        if current_reason=="network_offline" and self:_network_radio_hint()==false then
+            self:_schedule_hibernated_download_resume("network offline")
+            return
+        end
+        -- No duplicate memory sampler: admission and the cooldown both live
+        -- inside resume_hibernated and are evaluated just before the fork.
+        local ok,err=self.download_task:resume_hibernated(reason or "idle memory window")
+        if ok then
+            self._hibernated_low_memory_retry_count=0
+            local runtime=self._download_runtime
+            if runtime then
+                local resumed=U.copy(runtime.last_state or {})
+                resumed.stage="resume"
+                resumed.hibernated=nil
+                resumed.message="正在从断点继续下载"
+                resumed.updated_at=os.time()
+                self:_on_download_progress(runtime,resumed)
+            end
+            return
+        end
+        if err=="low_memory" then
+            self._hibernated_low_memory_retry_count=math.min(5,
+                (tonumber(self._hibernated_low_memory_retry_count) or 0)+1)
+        elseif err~="cooldown_active" then
+            -- Bounded retries remain visible in diagnostics; keep the
+            -- checkpoint and do not change an uncertain failure into success.
+            self._hibernated_low_memory_retry_count=math.min(5,
+                (tonumber(self._hibernated_low_memory_retry_count) or 0)+1)
             logger.warn("[MiuRead][DownloadTask] hibernated resume failed",
-                "reason=",tostring(hibernate_reason or "unknown"),"error=",tostring(err or "unknown"))
+                "reason=",tostring(current_reason or "unknown"),"error=",tostring(err or "unknown"))
         end
+        self:_schedule_hibernated_download_resume("resume retry")
     end
     self._hibernated_download_resume_task=task
-    local hibernate_reason=type(self.download_task.hibernated_reason)=="function"
-        and self.download_task:hibernated_reason() or nil
-    local delay=hibernate_reason=="network_offline" and 8
-        or math.max(2.0,tonumber(Config.DOWNLOAD_INTERACTION_RESUME_DELAY) or 2.5)
     UIManager:scheduleIn(delay,task)
     return true
+end
+
+function Plugin:_download_idle_pump_stop()
+    -- The idle pump is now an alias of the single coordinator, not an
+    -- independent timer that may race a foreground retry.
+    if self._download_idle_pump_task then
+        UIManager:unschedule(self._download_idle_pump_task)
+        self._download_idle_pump_task=nil
+    end
+    if self._hibernated_download_resume_task then
+        UIManager:unschedule(self._hibernated_download_resume_task)
+        self._hibernated_download_resume_task=nil
+    end
+    return true
+end
+
+function Plugin:_download_idle_pump_ensure(reason)
+    -- idle memory window: this entry remains for existing callers and tests.
+    return self:_schedule_hibernated_download_resume(reason or "idle memory window")
 end
 
 function Plugin:_set_foreground(owner)
@@ -17123,11 +17493,13 @@ function Plugin:_set_foreground(owner)
             UIManager:unschedule(self._hibernated_download_resume_task)
             self._hibernated_download_resume_task=nil
         end
+        self:_download_idle_pump_stop()
     elseif (value=="home" or value=="reader") and (previous=="native" or previous=="native_menu") then
         if self.download_task and self.download_task:busy() and not self.download_task:is_hibernated() then
             self.download_task:resume("heavy_resource")
         end
         self:_schedule_hibernated_download_resume("return from native to "..value)
+        self:_download_idle_pump_ensure("return from native")
     end
     return HOME_SESSION.foreground
 end
@@ -17474,11 +17846,8 @@ function Plugin:_home_prepare_hero_book(book)
         if extension then hero.format=extension:upper() end
     end
     local variant=tostring(hero.variant or "")
-    if hero.annotation_requested==true or variant:find("notes",1,true) then
-        hero.edition_text="含评论"
-    elseif variant:find("clean",1,true) then
-        hero.edition_text="纯净版"
-    end
+    -- Avoid displaying a redundant edition badge on the recent-reading card.
+    hero.edition_text=nil
     hero.on_tap=function(anchor,ges) self:_home_open_book(hero,anchor,ges,true) end
     hero.on_history=function() self:show_home_reading_history() end
     return hero
@@ -17701,6 +18070,7 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
     local view,err=HomeView.show({
         title="觅阅",
         wifi_text=self:_home_wifi_text(),
+        wifi_icon=self:_home_wifi_icon(),
         bluetooth_visible=self:_bluetooth_supported(),
         bluetooth_text=self:_home_bluetooth_text(),
         sync_text=self:_home_sync_status_label_cached(),
@@ -17730,9 +18100,13 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
         screensaver_sources=screensaver_sources,
         screensaver_file=screensaver_file,
         screensaver_book_file=normalized_reader_file(hero and hero.file or nil),
+        header_visible=home.header_visible~=false,
+        header_items=home.header_items,
         on_quick_panel=function() self:show_home_quick_panel() end,
+        on_wifi=function() self:_home_wifi_details() end,
+        on_battery=nil,
         on_sync=function() self:_home_open_sync_status() end,
-        on_bluetooth=function() self:_bluetooth_toggle() end,
+        on_bluetooth=function() self:_bluetooth_show_devices() end,
         on_interaction=function(first,kind) self:_home_note_interaction(first,kind) end,
         on_account=function() self:_home_leave_and_run("account status",function() self:show_account_status() end) end,
         on_weread_stats=function() self:_show_home_weread_stats() end,
@@ -17741,8 +18115,8 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
         on_back=function() return self:_home_handle_back() end,
         on_empty_account=function() self:_home_open_section(active) end,
         on_open_book=function(book,anchor,ges) self:_home_open_book(book,anchor,ges) end,
-        -- Home shelf books intentionally have no long-press action. All book
-        -- actions remain discoverable from the normal tap menu.
+        -- beta.17: preserve book-management access when a downloaded book taps straight into Reader.
+        on_hold_book=function(book,anchor) self:_home_hold_book(book,anchor) end,
         home_actions=self:_home_action_entries(),
         on_shelf_filter=active_right_callback,
         shelf_filter_label=active_right_label,
@@ -18547,11 +18921,11 @@ function Plugin:_preferred_record(book_id)
         if tostring(record.file)==last or tostring(record.original_file or "")==last then fallback=record; return true end
         if not fallback then fallback=record end
     end
-    for _,kind in ipairs({"notes","clean","range_notes","range_clean","preview_notes","preview_clean"}) do
+    for _,kind in ipairs({"clean","range_clean","preview_clean","notes","range_notes","preview_notes"}) do
         if consider(b.variants and b.variants[kind]) then return fallback end
     end
     for _,row in pairs(b.chapters or {}) do
-        for _,kind in ipairs({"notes","clean","range_notes","range_clean","preview_notes","preview_clean"}) do
+        for _,kind in ipairs({"clean","range_clean","preview_clean","notes","range_notes","preview_notes"}) do
             if consider(row and row[kind]) then return fallback end
         end
     end
@@ -18854,32 +19228,31 @@ function Plugin:book_menu(b,back_callback)
     b=U.merge(original,normalize(original))
     if Protocol.is_mp_account(b.bookId) then self:mp_account(b); return end
     local items={}
+    local preferred=self:_preferred_record(b.bookId)
+    if preferred and preferred.file and U.file_exists(preferred.file) then
+        items[#items+1]={text="阅读已下载书籍",callback=function() self:open_file(preferred.file) end}
+    end
+    items[#items+1]={text=(preferred and preferred.file and U.file_exists(preferred.file)) and "更新正文" or "下载书籍",
+        callback=function() self:choose_download(b,nil,false) end}
+    items[#items+1]={text="按章节下载",callback=function() self:chapters(b) end}
+    if self:_has_range_variant(b.bookId) then
+        items[#items+1]={text="扩展已有章节",sub_item_table_func=function() return self:range_extend_menu(b) end}
+    end
+    local local_summary=self.book_delete_service:summary(tostring(b.bookId))
+    if local_summary.has_local==true then
+        items[#items+1]={text="本机文件与高级管理",callback=function() BookLocalFilesDialog.open_generated(self,tostring(b.bookId)) end}
+    end
+    items[#items+1]={text="书籍详情",callback=function() self:book_details(b) end}
     if not Protocol.is_mp(b.bookId) then
         local action=require("miuread.bookstore").shelf_action(self,b)
-        if action then items[#items+1]=action end
+        if action then
+            action.text="微信书架 · "..tostring(action.text or "加入 / 移除")
+            items[#items+1]=action
+        end
         items[#items+1]={text="相似推荐",callback=function()
             require("miuread.bookstore").similar(self,b,function() self:book_menu(b,back_callback) end)
         end}
     end
-    local records={{kind="clean",label="纯净版"},{kind="notes",label="划线与想法版"},
-        {kind="range_clean",label="章节版 · 纯净版"},{kind="range_notes",label="章节版 · 划线与想法版"},
-        {kind="preview_clean",label="试读版 · 纯净版"},{kind="preview_notes",label="试读版 · 划线与想法版"}}
-    for _,entry in ipairs(records) do
-        local record=self:_variant_exists(b.bookId,entry.kind)
-        if record then
-            items[#items+1]={text="打开"..entry.label,callback=function() self:open_file(record.file) end}
-        end
-    end
-    items[#items+1]={text="生成／更新书籍",callback=function() self:choose_download(b,nil,false) end}
-    items[#items+1]={text="按章节下载",callback=function() self:chapters(b) end}
-    if self:_has_range_variant(b.bookId) then
-        items[#items+1]={text="扩展已有章节版",sub_item_table_func=function() return self:range_extend_menu(b) end}
-    end
-    local local_summary=self.book_delete_service:summary(tostring(b.bookId))
-    if local_summary.has_local==true then
-        items[#items+1]={text="本机文件",callback=function() BookLocalFilesDialog.open_generated(self,tostring(b.bookId)) end}
-    end
-    items[#items+1]={text="书籍详情",callback=function() self:book_details(b) end}
     local finished_action=self:_finished_status_action(b)
     if finished_action then items[#items+1]=finished_action end
     if back_callback then items[#items+1]={text="返回列表",callback=back_callback} end
@@ -18890,6 +19263,25 @@ function Plugin:book_details(b)
     b=U.copy(b or {})
     local id=tostring(b.bookId or b.book_id or "")
     if id=="" then self:info("当前书籍缺少可查询的图书编号。") return false end
+    local stored=self.store:book(id) or {}
+    local title=U.trim(tostring(b.title or stored.title or ""))
+    local author=U.trim(tostring(b.author or stored.author or ""))
+    local intro=U.trim(tostring(b.intro or b.description or stored.intro or stored.description or ""))
+    local function fetch_online() return self:_fetch_book_details_online(b) end
+    local rows={
+        {text="阅读与本机文件",callback=function() self:book_menu(b) end},
+        {text="刷新在线信息",callback=fetch_online},
+        {text="查看已缓存简介",callback=function()
+            self:info((title~="" and title or "书籍详情").."\n"..author.."\n\n"..(intro~="" and intro or "暂无缓存简介，可主动刷新在线信息"))
+        end},
+    }
+    return self:list(title~="" and title or "书籍详情",rows)
+end
+
+function Plugin:_fetch_book_details_online(b)
+    b=U.copy(b or {})
+    local id=tostring(b.bookId or b.book_id or "")
+    if id=="" then return false end
     local auth=U.copy(self.store:auth())
     local api_mode=require("miuread.api_transport").preference(self.store)
     local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
@@ -18956,7 +19348,23 @@ function Plugin:_download_preflight(callback)
     return check_battery()
 end
 
+-- Preserve explicit edition choice. Clean EPUB is still the default, while
+-- the existing notes downloader remains available as a separate edition.
+-- Historical queued/repaired jobs keep their selected annotations setting.
+b4_content_only_options=function(options)
+    local result=U.copy(type(options)=="table" and options or {})
+    result.annotations=result.annotations==true
+    if not result.annotations then
+        result.annotation_requested=nil
+        result.annotation_pending=nil
+        result.annotation_fallback=nil
+        result.annotation_only=nil
+    end
+    return result
+end
+
 function Plugin:choose_download_mode(b,opt,open_after)
+    opt=b4_content_only_options(opt)
     local dialog
     local function launch(background,defer_until_reader_closed)
         if defer_until_reader_closed==true then
@@ -19010,20 +19418,8 @@ function Plugin:choose_download_mode(b,opt,open_after)
     UIManager:show(dialog)
 end
 function Plugin:choose_download(b,limit,open_after,uid)
-    local dialog
-    local function choose_version(annotations)
-        UIManager:close(dialog)
-        self:choose_download_mode(b,{annotations=annotations,limit=limit,chapter_uid=uid},open_after)
-    end
-    dialog=ButtonDialog:new{
-        title="下载《"..tostring(b.title or "未命名").."》",title_align="center",
-        buttons={
-            {{text="纯净版",callback=function() choose_version(false) end}},
-            {{text="划线与想法版",callback=function() choose_version(true) end}},
-            {{text="取消",callback=function() UIManager:close(dialog) end}},
-        },
-    }
-    UIManager:show(dialog)
+    -- The next decision is *how* to download, not a content edition selector.
+    return self:choose_download_mode(b,{annotations=false,limit=limit,chapter_uid=uid},open_after)
 end
 function Plugin:_download_summary(rec,opt)
     local preview=tostring(rec and rec.access_scope or "")=="preview" and not (opt and opt.chapter_uid)
@@ -19113,14 +19509,23 @@ function Plugin:_on_download_progress(runtime,state)
                 wait>0 and ("请求受限 · "..tostring(wait).."秒") or "请求受限 · 等待恢复")
         elseif state and state.stage=="restart" then
             self:_update_open_shelf_download_status(runtime.book.bookId,"从断点自动恢复")
+        elseif state and state.stage=="resume" then
+            self:_update_open_shelf_download_status(runtime.book.bookId,"正在继续下载")
         elseif state and state.stage=="hibernated" then
             if state.hibernate_reason=="network_offline" then
                 self:_update_open_shelf_download_status(runtime.book.bookId,"网络暂停 · 联网后继续")
                 if HOME_SESSION.suspended~=true and self._miuread_suspended~=true then
                     self:_schedule_hibernated_download_resume("network restored")
                 end
+            elseif state.hibernate_reason=="restart_fuse" then
+                self:_update_open_shelf_download_status(runtime.book.bookId,"多次中断 · 冷却后自动继续")
+                self:_download_idle_pump_ensure("task parked by restart fuse")
+            elseif state.hibernate_reason=="memory_pressure" then
+                self:_update_open_shelf_download_status(runtime.book.bookId,"内存不足 · 等待自动恢复")
+                self:_download_idle_pump_ensure("task parked by memory")
             else
                 self:_update_open_shelf_download_status(runtime.book.bookId,"已安全释放资源 · 稍后继续")
+                self:_download_idle_pump_ensure("task hibernated")
             end
         elseif state and (state.waiting_network==true or state.stage=="waiting_network") then
             self:_update_open_shelf_download_status(runtime.book.bookId,"等待网络 · 已保存进度")
@@ -19367,6 +19772,7 @@ function Plugin:_recover_download_state()
                 "hibernated=",tostring(self.download_task:is_hibernated()))
             if self.download_task:is_hibernated() then
                 self:_schedule_hibernated_download_resume("recovered hibernated task")
+                self:_download_idle_pump_ensure("recovered hibernated task")
             end
             return true
         end
@@ -19431,8 +19837,16 @@ function Plugin:_download_status_label()
             return wait>0 and ("后台下载 · 请求受限，"..tostring(wait).."秒后继续") or "后台下载 · 请求受限，等待恢复"
         end
         if state.stage=="restart" then return "后台下载 · 正在从断点恢复" end
-        if state.stage=="hibernated" and state.hibernate_reason=="network_offline" then
-            return "后台下载 · 网络暂停，联网后继续"
+        if state.stage=="resume" then return "后台下载 · 正在继续下载" end
+        if state.stage=="hibernated" then
+            if state.hibernate_reason=="network_offline" then
+                return "后台下载 · 网络暂停，联网后继续"
+            elseif state.hibernate_reason=="restart_fuse" then
+                return "后台下载 · 多次中断，稍后自动继续"
+            elseif state.hibernate_reason=="memory_pressure" then
+                return "后台下载 · 内存紧张，稍后自动继续"
+            end
+            return "后台下载 · 已休眠，稍后自动继续"
         end
         if state.waiting_network==true or state.stage=="waiting_network" then return "后台下载 · 等待网络，已保存进度" end
         local title=U.utf8_truncate(state.title or "未命名",9)
@@ -19441,7 +19855,7 @@ function Plugin:_download_status_label()
     if state.status=="pending_install" then
         return "后台下载 · 等待更新"
     end
-    if state.status=="annotation_pending" then return "后台下载 · 正文已完成，批注待修复" end
+    if state.status=="annotation_pending" then return "后台下载 · 历史任务待处理" end
     if state.status=="completed" then return "后台下载 · 已完成" end
     if state.status=="failed" and state.auth_required==true then return "后台下载 · 等待登录恢复" end
     if state.status=="failed" and state.error_kind=="network" then return "后台下载 · 等待网络，可继续" end
@@ -19723,11 +20137,11 @@ function Plugin:show_download_status()
             title_align="center",
             buttons={
                 {first_action},
-                {{text="停止下载",callback=function()
+                {{text="停止下载（保留断点）",callback=function()
                     UIManager:close(dialog)
                     self:_force_stop_download_for_cleanup("user_stop_download",function() self:show_download_status() end)
                 end}},
-                {{text="停止并删除断点",callback=function()
+                {{text="停止并清除本次断点",callback=function()
                     UIManager:close(dialog)
                     self:_force_stop_download_for_cleanup("user_delete_partial",function()
                         local book_id=tostring(state.book_id or (state.book and state.book.bookId) or "")
@@ -19760,7 +20174,7 @@ function Plugin:show_download_status()
                     self:download(book,options,false)
                 end
             end}},
-            {{text="停止并删除断点",callback=function()
+            {{text="停止并清除本次断点",callback=function()
                 UIManager:close(dialog)
                 self:_force_stop_download_for_cleanup("user_delete_partial",function()
                     local book_id=tostring(state.book_id or (book and book.bookId) or "")
@@ -19783,7 +20197,7 @@ function Plugin:show_download_status()
     local translation_update=state.status=="pending_install" and state.options and state.options.generate_translation_uid~=nil
     local lines={}
     if state.status=="completed" then lines[#lines+1]="下载完成"
-    elseif state.status=="annotation_pending" then lines[#lines+1]="正文已生成，划线与想法待补全"
+    elseif state.status=="annotation_pending" then lines[#lines+1]="历史版本正文已完成；公开评论现在单独获取"
     elseif state.status=="pending_install" then
         if translation_update then lines[#lines+1]="译文已就绪"
         elseif state.annotation_pending==true then lines[#lines+1]="新版本已下载完成"
@@ -19826,7 +20240,7 @@ function Plugin:show_download_status()
         end}}
     end
     if state.status=="annotation_pending" and type(state.book)=="table" then
-        buttons[#buttons+1]={{text="重新生成",callback=function()
+        buttons[#buttons+1]={{text="下载新版正文",callback=function()
             UIManager:close(dialog)
             self:choose_download(state.book,nil,false)
         end}}
@@ -20040,7 +20454,7 @@ end
 
 function Plugin:_download_job_key(book,opt)
     opt=opt or {}
-    local kind=opt.annotations and "notes" or "clean"
+    local kind=opt.annotations==true and "notes" or "clean"
     return table.concat({
         tostring(book and book.bookId or ""),kind,tostring(opt.chapter_uid or "full"),
         tostring(opt.limit or "all"),tostring(opt.range_start_index or ""),
@@ -20048,6 +20462,7 @@ function Plugin:_download_job_key(book,opt)
     },":")
 end
 function Plugin:_queue_download(book,opt,open_after,extra)
+    opt=b4_content_only_options(opt)
     extra=type(extra)=="table" and extra or {}
     local key=self:_download_job_key(book,opt)
     local book_id=tostring(book and (book.bookId or book.book_id) or "")
@@ -20068,7 +20483,10 @@ function Plugin:_queue_download(book,opt,open_after,extra)
         end
     end
     local job={key=key,book=U.copy(book or {}),options=U.copy(opt or {}),open_after=open_after==true,
-        queued_at=os.time(),defer_until_reader_closed=extra.defer_until_reader_closed==true or nil,
+        queued_at=os.time(),
+        queue_nonce=tostring(os.time())..":"..tostring(math.random(100000,999999)),
+        account_vid=tostring(((self.store:auth() or {}).account or {}).vid or ""),
+        defer_until_reader_closed=extra.defer_until_reader_closed==true or nil,
         wait_reason=extra.reason}
     local position,reason=self.store:enqueue_download(job)
     if not position then
@@ -20080,7 +20498,11 @@ function Plugin:_queue_download(book,opt,open_after,extra)
             dialog=ButtonDialog:new{title="等待位置中已有《"..waiting_title.."》。\n\n最多只能有一本正在下载、一本等待。",title_align="center",buttons={
                 {{text="替换为《"..U.utf8_truncate(new_title,12).."》",callback=function()
                     UIManager:close(dialog)
-                    self.store:save_download_queue({job})
+                    local saved=self.store:save_download_queue({job})
+                    if saved~=true then
+                        self:info("替换等待任务失败，请检查存储空间后重试。")
+                        return
+                    end
                     self:status_toast("下载队列","等待任务已替换",3)
                     self:_notify_home_data_changed("content")
                 end}},
@@ -20098,22 +20520,134 @@ function Plugin:_queue_download(book,opt,open_after,extra)
     self:_notify_home_data_changed("content")
     return true
 end
+-- Memory-constrained Kindle: a waiting download remains in Store's durable
+-- one-slot queue. Avoid a second queue or multiple independently scheduled
+-- retry loops. No retry callback survives a removed/replaced queue item.
+function Plugin:_schedule_resource_download_retry(reason)
+    if self._resource_retry_task then return false end
+    local queue=self.store:download_queue()
+    if not queue[1] then return false end
+    local count=math.min(5,math.max(0,tonumber(self._resource_retry_attempt) or 0))
+    local first=math.max(2,tonumber(Config.DOWNLOAD_RESOURCE_RETRY_FIRST_SECONDS) or 5)
+    local maximum=math.max(first,tonumber(Config.DOWNLOAD_RESOURCE_RETRY_MAX_SECONDS) or 60)
+    local delay=math.min(maximum,first*(2^count))
+    self._resource_retry_attempt=count+1
+    local callback
+    callback=function()
+        if self._resource_retry_task~=callback then return end
+        self._resource_retry_task=nil
+        -- This method only attempts work if the existing queue and lifecycle
+        -- gates are still valid; cancellation while waiting is respected.
+        self:_start_next_queued_download()
+    end
+    self._resource_retry_task=callback
+    UIManager:scheduleIn(delay,callback)
+    logger.info("[MiuRead][DownloadAdmission] retry scheduled",
+        "reason=",tostring(reason or "resource_wait"),"seconds=",tostring(delay),
+        "attempt=",tostring(count+1))
+    return true
+end
+
+function Plugin:_download_resources_ready(reason)
+    if self.background_scheduler then
+        self.background_scheduler:set_foreground_barrier(7,"download admission")
+    end
+    -- Do not spawn the heavy worker alongside an active background lease;
+    -- let an existing task complete instead of force-releasing its ownership.
+    local active=self.background_scheduler and self.background_scheduler.active
+    if active then
+        logger.info("[MiuRead][DownloadAdmission] waiting for background worker",
+            "worker=",tostring(active.key),"reason=",tostring(reason))
+        return false,"background_busy"
+    end
+    collectgarbage("collect")
+    local memory=RuntimePressure.memory_snapshot(true)
+    local ok,why,minimum,available=DownloadAdmission.check(memory,Config)
+    if not ok then
+        logger.warn("[MiuRead][DownloadAdmission] waiting for memory",
+            "reason=",tostring(reason),"memory_kb=",tostring(available),
+            "minimum_kb=",tostring(minimum),
+            "total_kb=",tostring(memory and memory.total_kb or "unknown"))
+    end
+    return ok,why,available,minimum
+end
+
 function Plugin:_start_next_queued_download()
+    if self._queued_download_launch_pending then return false end
     if self.download_task and self.download_task:busy() then return false end
     if self._download_runtime then return false end
+    local queue=self.store:download_queue()
+    local next_job=queue[1]
+    if not next_job then
+        self._resource_retry_attempt=0
+        return false
+    end
     local state=self.store:download_state()
     if state.status=="active" or state.status=="prefetch" or state.status=="failed" or state.status=="interrupted" then
         return false
     end
     if not self:logged_in() or self:_network_radio_hint()==false then return false end
-    local queue=self.store:download_queue()
-    local next_job=queue[1]
-    if not next_job then return false end
+    -- Tasks written by pre-beta.3 versions have no VID. Keep them visible,
+    -- require a deliberate one-time confirmation rather than guessing identity.
+    if tostring(next_job.account_vid or "")=="" then return false end
+    if tostring(next_job.account_vid)~=tostring(((self.store:auth() or {}).account or {}).vid or "") then return false end
     if next_job.defer_until_reader_closed==true and self:_active_reader_ui() then return false end
-    local job=self.store:dequeue_download()
-    if not job then return false end
+    if HOME_EXITING or UIManager._exit_code~=nil or PowerState.state()~="NORMAL"
+        or self._miuread_suspended==true or HOME_SESSION.suspended==true then
+        return false
+    end
+    -- Only preflight resource-wait jobs; existing queued work keeps its usual
+    -- priority/compatibility behaviour, while all downloads are still guarded
+    -- again inside DownloadTask:start immediately before forking.
+    if next_job.wait_reason=="low_memory" or next_job.wait_reason=="background_busy" then
+        local ready,reason=self:_download_resources_ready("queued")
+        if not ready then
+            next_job.wait_reason=reason
+            self.store:save_download_queue(queue)
+            self:_schedule_resource_download_retry(reason)
+            return false
+        end
+    end
+    local expected_key=tostring(next_job.key or "")
+    local expected_nonce=tostring(next_job.queue_nonce or "")
+    local expected_queued_at=tonumber(next_job.queued_at or 0) or 0
+    self._queued_download_launch_pending=true
     UIManager:scheduleIn(.15,function()
+        self._queued_download_launch_pending=false
+        local waiting=(self.store:download_queue() or {})[1]
+        -- Stop-all, removal and replacement invalidate a delayed launch.
+        if not waiting or tostring(waiting.key or "")~=expected_key
+            or tostring(waiting.queue_nonce or "")~=expected_nonce
+            or (tonumber(waiting.queued_at or 0) or 0)~=expected_queued_at then
+            logger.info("[MiuRead][DownloadAdmission] cancelled stale launch", "key=",expected_key)
+            return
+        end
+        local current_vid=tostring(((self.store:auth() or {}).account or {}).vid or "")
+        if current_vid=="" or not waiting.account_vid or waiting.account_vid=="" then
+            logger.warn("[MiuRead][DownloadAdmission] legacy queued job needs account confirmation")
+            return
+        end
+        if current_vid~=waiting.account_vid then
+            logger.warn("[MiuRead][DownloadAdmission] queued account changed; launch blocked")
+            return
+        end
+        if HOME_EXITING or UIManager._exit_code~=nil or (self.download_task and self.download_task:busy())
+            or self._download_runtime or PowerState.state()~="NORMAL"
+            or self._miuread_suspended==true or HOME_SESSION.suspended==true
+            or not self:logged_in() or self:_network_radio_hint()==false then
+            self:_schedule_resource_download_retry("launch_deferred")
+            return
+        end
+        local job=self.store:dequeue_download()
+        if not job then return end
         self:download(job.book or {},job.options or {},job.open_after==true,nil,true,true)
+        if not self._download_runtime and not (self.download_task and self.download_task:busy())
+            and #(self.store:download_queue() or {})==0 then
+            -- No worker owns the job and download() did not requeue it.
+            -- Restore the durable record instead of silently losing it.
+            local saved=self.store:enqueue_download(job)
+            if saved then self:_schedule_resource_download_retry("launch_not_accepted") end
+        end
     end)
     return true
 end
@@ -20122,21 +20656,52 @@ function Plugin:show_waiting_downloads()
     if #queue==0 then self:info("当前没有等待下载的任务。") return end
     local job=queue[1]
     local title=tostring(job.book and job.book.title or "未命名")
-    local variant=(job.options and job.options.annotations) and "划线与想法版" or "纯净版"
+    local variant="正文"
     if job.options and job.options.range_start_index then variant="章节版 · "..variant end
+    if job.options and job.options.annotations==true then variant=variant.."（旧任务将转为正文下载）" end
     if job.defer_until_reader_closed==true then variant=variant.." · 退出阅读后开始" end
+    if job.wait_reason=="low_memory" then variant=variant.." · 等待设备内存" end
+    if job.wait_reason=="background_busy" then variant=variant.." · 等待后台资源" end
+    local current_vid=tostring(((self.store:auth() or {}).account or {}).vid or "")
+    local unbound=tostring(job.account_vid or "")==""
     local items={
         {text=title,post_text=variant,callback=function()
             UIManager:show(ConfirmBox:new{text="从等待队列移除《"..title.."》？",ok_text="移除",cancel_text="保留",ok_callback=function()
-                self.store:remove_queued_download(1); self:toast("已移出等待队列")
+                local removed=self.store:remove_queued_download(1)
+                self:toast(removed and "已移出等待队列" or "移除失败，请重试")
             end})
         end},
     }
+    if unbound then
+        items[#items+1]={text="确认在当前账号下载此旧任务",callback=function()
+            if not self:logged_in() or current_vid=="" then
+                self:info("请先登录账号再确认等待任务。")
+                return
+            end
+            local fresh=self.store:download_queue()
+            if not fresh[1] or tostring(fresh[1].key or "")~=tostring(job.key or "")
+                or tostring(fresh[1].queued_at or "")~=tostring(job.queued_at or "") then
+                self:info("等待任务已发生变化，请重新打开列表。")
+                return
+            end
+            fresh[1].account_vid=current_vid
+            fresh[1].queue_nonce=tostring(os.time())..":"..tostring(math.random(100000,999999))
+            local saved=self.store:save_download_queue(fresh)
+            if saved==true then
+                self:toast("已确认当前账号，等待资源就绪")
+                self:_schedule_resource_download_retry("legacy_account_confirmed")
+            else
+                self:info("保存账号确认失败，请重试。")
+            end
+        end}
+    end
     self:list("等待下载 · 最多一本",items)
 end
 
 function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
-    opt=U.copy(opt or {})
+    -- Normalize the edition flag at the executor boundary. Existing queued
+    -- notes jobs are allowed, while unspecified jobs default to clean.
+    opt=b4_content_only_options(opt)
     local is_prefetch=opt.prefetch==true
     if is_prefetch then
         if not self:logged_in() or self:_network_radio_hint()==false then return false end
@@ -20206,6 +20771,20 @@ function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
     if opt.images==nil then opt.images=prefs.images end
     opt.network_mode=tostring(prefs.download_network_mode or "auto")=="ipv4" and "ipv4" or "auto"
     opt.active_document_path=self:_current_document_path()
+    -- Prefetch never occupies the sole durable waiting slot. An explicit
+    -- download waits safely rather than being lost when memory is below the
+    -- fork margin or an existing background worker still owns the lease.
+    local admitted,wait_reason=self:_download_resources_ready("download")
+    if not admitted then
+        if is_prefetch then return false end
+        local queued=self:_queue_download(b,opt,open_after,{reason=wait_reason})
+        if queued then
+            self:_update_open_shelf_download_status(b.bookId,
+                wait_reason=="low_memory" and "等待内存恢复" or "等待后台任务结束")
+            self:_schedule_resource_download_retry(wait_reason)
+        end
+        return queued
+    end
     local runtime={book=U.copy(b),options=U.copy(opt),last_state={stage="prepare",current=0,total=1,percent=0,chapter=b.title or ""},background=start_in_background==true,dialog=nil,started_at=os.time(),open_after=open_after==true,done=done,notified_milestones={}}
     self._download_runtime=runtime
     if not is_prefetch then
@@ -20219,6 +20798,13 @@ function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
         self._download_runtime=nil
         self.store:clear_download_state()
         self:_notify_home_data_changed("content")
+        if err=="low_memory" then
+            if not is_prefetch then
+                local queued=self:_queue_download(b,opt,open_after,{reason="low_memory"})
+                if queued then self:_schedule_resource_download_retry("fork_memory_race") end
+            end
+            return false
+        end
         if from_queue then self:_queue_download(b,opt,open_after) end
         if is_prefetch then
             logger.warn("[MiuRead][Prefetch] unable to start",tostring(err))
@@ -20227,6 +20813,9 @@ function Plugin:download(b,opt,open_after,done,start_in_background,from_queue)
         end
         return false
     end
+    -- Only an accepted fork clears retry backoff. A failed admission keeps
+    -- its prior attempts so intermittent pressure cannot create a hot loop.
+    self._resource_retry_attempt=0
     runtime.task=self.download_task:descriptor()
     self:_write_download_state(is_prefetch and "prefetch" or "active",
         self:_active_download_payload(runtime,runtime.last_state),true)
@@ -20250,18 +20839,19 @@ function Plugin:_range_variant(book_id,kind)
     if record and record.file and U.file_exists(record.file) and record.partial_range==true then return record end
 end
 function Plugin:_has_range_variant(book_id)
-    return self:_range_variant(book_id,"range_notes")~=nil or self:_range_variant(book_id,"range_clean")~=nil
+    return self:_range_variant(book_id,"range_clean")~=nil
+        or self:_range_variant(book_id,"range_notes")~=nil
 end
 function Plugin:range_extend_menu(b)
-    local items={}
     local clean=self:_range_variant(b.bookId,"range_clean")
-    local notes=self:_range_variant(b.bookId,"range_notes")
-    if clean then items[#items+1]={text="扩展章节版 · 纯净版",callback=function() self:show_range_extend_options(b,false,clean) end} end
-    if notes then items[#items+1]={text="扩展章节版 · 划线与想法版",callback=function() self:show_range_extend_options(b,true,notes) end} end
-    if #items==0 then return {{text="当前没有可扩展的章节版",enabled=false}} end
-    return items
+    if clean then
+        return {{text="扩展已有正文范围",callback=function() self:show_range_extend_options(b,false,clean) end}}
+    end
+    -- Old notes XHTML cannot safely be reused as the clean chapter source.
+    return {{text="选择新的正文范围",callback=function() self:chapters(b) end}}
 end
 function Plugin:show_range_extend_options(b,annotations,record)
+    annotations=false -- B4: only clean content is generated
     local context=self:_interactive_network_context()
     self:_request_catalog(b,"range-extend",function(rows)
         rows=rows or {}
@@ -20325,12 +20915,11 @@ end
 
 function Plugin:_chapter_state_text(book_id,chapter)
     local uid=tostring(chapter.chapterUid or chapter.uid or "")
-    local states={}
-    for _,entry in ipairs({{"clean","纯净版"},{"notes","划线与想法版"}}) do
-        local record=self.store:chapter_variant(book_id,uid,entry[1])
-        if record and record.file and U.file_exists(record.file) then states[#states+1]=entry[2] end
-    end
-    return #states>0 and table.concat(states," · ") or tostring(chapter.wordCount or "")
+    local clean=self.store:chapter_variant(book_id,uid,"clean")
+    if clean and clean.file and U.file_exists(clean.file) then return "已下载" end
+    local legacy=self.store:chapter_variant(book_id,uid,"notes")
+    if legacy and legacy.file and U.file_exists(legacy.file) then return "已有旧版文件" end
+    return tostring(chapter.wordCount or "")
 end
 function Plugin:_chapter_list_menu(b,rows,title,callback,start_index)
     local items={}
@@ -20352,25 +20941,11 @@ function Plugin:_choose_range_version(b,rows,first,last,open_after)
     if last<first then first,last=last,first end
     local first_ch,last_ch=rows[first],rows[last]
     local count=last-first+1
-    local dialog
-    local function choose(annotations)
-        UIManager:close(dialog)
-        self:choose_download_mode(b,{
-            annotations=annotations,range_start_index=first,range_end_index=last,
-            range_start_title=first_ch and first_ch.title,range_end_title=last_ch and last_ch.title,
-        },open_after==true)
-    end
-    dialog=ButtonDialog:new{
-        title="下载章节版\n"..tostring(first_ch and first_ch.title or ("第 "..first.." 章"))
-            .." 至 "..tostring(last_ch and last_ch.title or ("第 "..last.." 章"))
-            .."\n共 "..tostring(count).." 章",
-        title_align="center",buttons={
-            {{text="纯净版",callback=function() choose(false) end}},
-            {{text="划线与想法版",callback=function() choose(true) end}},
-            {{text="取消",callback=function() UIManager:close(dialog) end}},
-        },
-    }
-    UIManager:show(dialog)
+    -- Range is already chosen; proceed directly to the existing download-method menu.
+    return self:choose_download_mode(b,{
+        annotations=false,range_start_index=first,range_end_index=last,
+        range_start_title=first_ch and first_ch.title,range_end_title=last_ch and last_ch.title,
+    },open_after==true)
 end
 function Plugin:_range_count_menu(b,rows,first)
     local start_ch=rows[first]
@@ -20412,7 +20987,7 @@ function Plugin:chapter_menu(b,ch,local_manage)
     if not (clean and clean.file and U.file_exists(clean.file)) then clean=nil end
     if not (notes and notes.file and U.file_exists(notes.file)) then notes=nil end
     local items={}
-    for _,entry in ipairs({{record=clean,label="纯净版"},{record=notes,label="划线与想法版"}}) do
+    for _,entry in ipairs({{record=clean,label="正文"},{record=notes,label="旧版划线与想法"}}) do
         local record=entry.record
         if record then
             local label=DownloadResult.variant_label(entry.label,record)
@@ -20583,8 +21158,15 @@ function Plugin:_schedule_chapter_navigation_context(session,delay)
 end
 
 function Plugin:_chapter_prefetch_context()
-    local ctx,reason,detail=self:_chapter_navigation_context(false)
-    if not ctx then return nil,reason,detail end
+    local source_ctx,reason,detail=self:_chapter_navigation_context(false)
+    if not source_ctx then return nil,reason,detail end
+    -- A reader may be inside an old notes EPUB. Its source edition remains
+    -- readable, but *new* next-chapter downloads/prefetches are always clean.
+    -- Do not mutate the cached navigation context used by the current reader.
+    local ctx={}
+    for key,value in pairs(source_ctx) do ctx[key]=value end
+    ctx.source_kind=source_ctx.kind
+    ctx.kind="clean"
     local existing=self.store:chapter_variant(ctx.book_id,ctx.next_uid,ctx.kind)
     if not (existing and existing.file and U.file_exists(existing.file)) then existing=nil end
     local prefetched=type(self.store.hidden_prefetch_record)=="function"
@@ -20808,7 +21390,7 @@ function Plugin:_schedule_chapter_prefetch(session,delay)
             "current=",ctx.current_uid,"next=",ctx.next_uid,"variant=",ctx.kind,
             "chapters=",tostring(ctx.catalog_count or 0),"source=",tostring(ctx.catalog_source or "unknown"))
         self:download(ctx.book,{
-            annotations=ctx.kind=="notes",chapter_uid=ctx.next_uid,prefetch=true,prefetch_hidden=true,
+            annotations=false,chapter_uid=ctx.next_uid,prefetch=true,prefetch_hidden=true,
             prefetch_source_uid=ctx.current_uid,prefetch_target_title=ctx.next_title,
         },false,function(rec)
             if rec and rec.file then
@@ -20949,7 +21531,7 @@ function Plugin:_open_next_single_chapter(options)
     self._chapter_advance_waiting=true
     self._chapter_advance_target_uid=ctx.next_uid
     local started=self:download(ctx.book,{
-        annotations=ctx.kind=="notes",chapter_uid=ctx.next_uid,
+        annotations=false,chapter_uid=ctx.next_uid,
         chapter_continuous_open=true,chapter_continuous_target_uid=ctx.next_uid,
         chapter_continuous_book_id=ctx.book_id,chapter_continuous_title=ctx.next_title,
     },true,nil,true)
@@ -21132,7 +21714,7 @@ function Plugin:_variant_label(kind)
     local preview=kind:sub(1,8)=="preview_"
     local range=kind:sub(1,6)=="range_"
     local base=preview and kind:sub(9) or (range and kind:sub(7) or kind)
-    local label=base=="notes" and "划线与想法版" or "纯净版"
+    local label=base=="notes" and "旧版划线与想法" or "正文"
     if preview then return "试读版 · "..label end
     if range then return "章节版 · "..label end
     return label
@@ -21469,7 +22051,7 @@ end
 
 function Plugin:_book_delete_pending_summary(book_id)
     book_id=tostring(book_id or "")
-    local out={progress=0,annotations=0,total=0,progress_item=nil,annotation_summary=nil}
+    local out={progress=0,annotations=0,remote_deletions=0,total=0,progress_item=nil,annotation_summary=nil}
     if book_id=="" then return out end
     for _,item in ipairs(self:_progress_sync_issue_items()) do
         if tostring(item.book_id or "")==book_id then
@@ -21478,12 +22060,19 @@ function Plugin:_book_delete_pending_summary(book_id)
             break
         end
     end
-    local summary=LocalAnnotationDatabase.summary_fast(self.store,book_id)
-    if type(summary)=="table" then
+    local summary,summary_error=LocalAnnotationDatabase.summary_fast(self.store,book_id)
+    if type(summary)~="table" then
+        -- A busy/corrupt database must not be interpreted as zero pending data.
+        out.annotations=1
+        out.annotation_error=tostring(summary_error or "本地批注状态无法读取")
+    else
         out.annotation_summary=summary
+        -- A delete_pending tombstone is NOT an unsent personal addition.
+        -- Deleting the book locally must not delete the remote review/bookmark.
         out.annotations=(tonumber(summary.pending or 0) or 0)
-            +(tonumber(summary.delete_pending or 0) or 0)
             +(tonumber(summary.action_required or 0) or 0)
+            +(tonumber(summary.held_local or 0) or 0)
+        out.remote_deletions=tonumber(summary.delete_pending or 0) or 0
     end
     out.total=out.progress+out.annotations
     return out
@@ -21536,9 +22125,14 @@ end
 
 function Plugin:_sync_annotations_before_book_delete(book_id,on_done)
     on_done=type(on_done)=="function" and on_done or function() end
-    local summary=LocalAnnotationDatabase.summary_fast(self.store,book_id)
+    local summary,summary_err=LocalAnnotationDatabase.summary_fast(self.store,book_id)
+    if type(summary)~="table" then
+        on_done(false,"本地批注状态无法读取："..tostring(summary_err or "unknown"))
+        return false
+    end
     local pending=type(summary)=="table" and ((tonumber(summary.pending or 0) or 0)
-        +(tonumber(summary.delete_pending or 0) or 0)+(tonumber(summary.action_required or 0) or 0)) or 0
+        +(tonumber(summary.action_required or 0) or 0)
+        +(tonumber(summary.held_local or 0) or 0)) or 0
     if pending<=0 then on_done(true); return true end
     if not self.annotation_async or self.annotation_async:busy() then on_done(false,"本地批注同步任务正在运行") return false end
     local book=self.store:book(book_id)
@@ -21551,7 +22145,9 @@ function Plugin:_sync_annotations_before_book_delete(book_id,on_done)
     local service=self.annotation_sync
     local priority_started=self:_critical_transfer_begin("annotation_delete")~=false
     local started,err=self.annotation_async:run("annotation-sync-before-delete",function()
-        return service:sync_book(U.copy(book),U.copy(record),{preferences=prefs,limit=200})
+        return service:sync_book(U.copy(book),U.copy(record),{
+            preferences=prefs,limit=200,upload_only=true,
+        })
     end,function(worker_result)
         if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_delete") end
         if not worker_result or worker_result.ok~=true then
@@ -21562,7 +22158,8 @@ function Plugin:_sync_annotations_before_book_delete(book_id,on_done)
         if result.ok==false then on_done(false,result.error or "批注同步失败"); return end
         local latest=LocalAnnotationDatabase.summary_fast(self.store,book_id)
         local remains=type(latest)=="table" and ((tonumber(latest.pending or 0) or 0)
-            +(tonumber(latest.delete_pending or 0) or 0)+(tonumber(latest.action_required or 0) or 0)) or 0
+            +(tonumber(latest.action_required or 0) or 0)
+            +(tonumber(latest.held_local or 0) or 0)) or 0
         if remains>0 then on_done(false,"仍有 "..tostring(remains).." 条批注需要处理") else on_done(true) end
     end)
     if not started then
@@ -21593,13 +22190,17 @@ function Plugin:_book_delete_preflight(book_id,on_continue)
     if pending.total<=0 then on_continue(); return true end
     local parts={}
     if pending.progress>0 then parts[#parts+1]="阅读进度 1 项" end
-    if pending.annotations>0 then parts[#parts+1]="批注/想法 "..tostring(pending.annotations).." 项" end
+    if pending.annotation_error then
+        parts[#parts+1]="批注数据库暂不可读"
+    elseif pending.annotations>0 then
+        parts[#parts+1]="未上传的批注/想法 "..tostring(pending.annotations).." 项"
+    end
     local dialog
     dialog=ButtonDialog:new{
         title="本书还有未同步内容\n"..table.concat(parts," · "),title_align="center",buttons={
             {{text="先同步",callback=function()
                 UIManager:close(dialog)
-                self:status_toast("删除本机内容","正在先同步未完成内容…",3)
+                self:status_toast("删除本机内容","仅同步新增批注，不会执行云端删除…",3)
                 self:_sync_book_before_delete(book_id,function(ok,err)
                     if not ok then
                         self:info("同步尚未完成，本次没有删除任何内容。\n\n"..tostring(err or "请稍后重试"))
@@ -21609,7 +22210,11 @@ function Plugin:_book_delete_preflight(book_id,on_continue)
                     UIManager:scheduleIn(.10,on_continue)
                 end)
             end}},
-            {{text="仍然删除",callback=function() UIManager:close(dialog); on_continue() end}},
+            {{text="放弃未同步数据并继续",callback=function()
+                UIManager:close(dialog)
+                -- The final confirmation below repeats the irreversible effects.
+                on_continue()
+            end}},
             {{text="取消",callback=function() UIManager:close(dialog) end}},
         },
     }
@@ -21621,6 +22226,11 @@ function Plugin:_execute_book_delete_plan(plan,done_text)
     plan=type(plan)=="table" and plan or {}
     local service=self.book_delete_service
     if not service then self:info("删除服务尚未初始化，请重启 KOReader。") return false end
+    if tostring(plan.scope or "")=="book" and self.finished_status then
+        -- Prevent a previously queued cloud-finished write from escaping after
+        -- the local store entry has been removed.
+        pcall(self.finished_status.cancel,self.finished_status,"local book removed")
+    end
     local allowed=U.copy(plan.paths or {})
     local total_freed=0
     local function finish_final(check,second_result)
@@ -21777,7 +22387,12 @@ function Plugin:_confirm_delete_book_downloads(book_id,title)
         lines[#lines+1]=""
         lines[#lines+1]="预计释放约 "..human_size(plan.estimated_bytes or summary.total_bytes)
         lines[#lines+1]=""
-        lines[#lines+1]="不会影响微信读书云端书架、云端进度、云端划线和想法。"
+        lines[#lines+1]="独立保存的评论收藏不会删除。"
+        lines[#lines+1]="不会请求删除微信读书云端书架、进度、划线和想法。"
+        local pending=self:_book_delete_pending_summary(book_id)
+        if pending.remote_deletions>0 then
+            lines[#lines+1]="本机待云端删除的标记将丢弃，云端原内容仍保留。"
+        end
         UIManager:show(ConfirmBox:new{
             text=table.concat(lines,"\n"),ok_text="删除",cancel_text="取消",
             ok_callback=function() self:_execute_book_delete_plan(plan,"本机内容已删除") end,
@@ -21788,7 +22403,7 @@ end
 
 function Plugin:_annotation_retry_options(kind,record,chapter_uid)
     record=type(record)=="table" and record or {}
-    local opt={annotations=true}
+    local opt={annotations=false} -- new repair creates a clean EPUB, never notes
     if chapter_uid then
         opt.chapter_uid=tostring(chapter_uid)
     elseif tostring(kind or ""):sub(1,6)=="range_" or record.partial_range==true then
@@ -21967,11 +22582,11 @@ function Plugin:show_downloads(back_callback)
         self._downloads_menu=nil
     end
     local items={}
-    local filter=tostring(self._download_center_filter or "all")
+    local filter=tostring(self._download_center_filter or "book")
     if filter~="all" and filter~="book" and filter~="extension" then filter="all" end
     local filter_labels={all="全部",book="书籍",extension="插件"}
     items[#items+1]={
-        text="筛选",post_text=filter_labels[filter] or "全部",
+        text="任务类型",post_text=filter_labels[filter] or "书籍",
         sub_item_table_func=function()
             local function row(key,label)
                 return {text=label,post_text=self._download_center_filter==key and "当前" or "",callback=function()
@@ -22005,27 +22620,30 @@ function Plugin:show_downloads(back_callback)
     end
 
     if filter~="extension" then
-        items[#items+1]={text="书籍下载",enabled=false}
         if self:_has_download_status() then items[#items+1]={text=self:_download_status_label(),callback=function() self:show_download_status() end} end
-        items[#items+1]={text="下载设置",post_text="策略 目录与提醒",sub_item_table_func=function() return self:download_settings_menu() end}
         local queue=self.store:download_queue()
         items[#items+1]={text="等待下载",post_text=tostring(#queue).." 项",callback=function() self:show_waiting_downloads() end}
+        items[#items+1]={text="下载设置",sub_item_table_func=function() return self:download_settings_menu() end}
     end
 
 
-    items[#items+1]={text="存储",separator=true,enabled=false}
     items[#items+1]={text="存储占用",callback=function() self:show_storage_usage() end}
     items[#items+1]={text="存储与清理",callback=function() self:show_download_cleanup_dialog() end}
 
     if filter~="extension" then
-        items[#items+1]={text="已完成书籍",enabled=false}
-        for _,b in ipairs(self.store:all_books()) do
-            local labels=self:_download_book_labels(b)
-            if #labels>0 then
-                local book_id=tostring(b.book_id)
-                items[#items+1]={text=b.title or book_id,post_text=table.concat(labels," · "),callback=function() self:downloaded_book_menu(book_id) end}
+        items[#items+1]={text="已下载书籍",sub_item_table_func=function()
+            local rows={}
+            for _,b in ipairs(self.store:all_books()) do
+                local labels=self:_download_book_labels(b)
+                if #labels>0 then
+                    local book_id=tostring(b.book_id)
+                    rows[#rows+1]={text=b.title or book_id,post_text=table.concat(labels," · "),
+                        callback=function() self:downloaded_book_menu(book_id) end}
+                end
             end
-        end
+            if #rows==0 then return {{text="还没有已下载书籍",enabled=false}} end
+            return rows
+        end}
     end
     if HomeView.is_shown() and not self:_active_reader_ui() then
         self._downloads_menu=nil
@@ -22129,7 +22747,7 @@ function Plugin:progress_sync_label()
         if kind=="context" or kind=="position" then return "需要修复" end
     end
     local state=session and session.progress_sync_state or nil
-    local labels={checking="正在检查",retrying="同步中",mapping_pending="同步中",mapping_preparing="同步中",mapping_failed="同步失败",position_locating="同步中",aligned="已同步",local_selected="同步中",local_uploaded="已同步",uploading="同步中",verifying_upload="同步中",upload_failed="同步失败",upload_unconfirmed="同步失败",source_conflict="同步失败",remote_selected="已同步",different="同步失败",deferred="同步失败",remote_unavailable="同步失败",remote_jump_unconfirmed="同步失败",waiting_network="同步失败"}
+    local labels={checking="正在检查",retrying="同步中",mapping_pending="同步中",mapping_preparing="同步中",mapping_failed="同步失败",position_locating="同步中",aligned="已同步",local_selected="结束阅读后上传",local_uploaded="已同步",uploading="同步中",verifying_upload="同步中",upload_failed="同步失败",upload_unconfirmed="待云端确认",source_conflict="同步失败",remote_selected="已同步",different="同步失败",deferred="同步失败",remote_unavailable="同步失败",remote_jump_unconfirmed="同步失败",waiting_network="同步失败"}
     return labels[state] or "阅读中自动"
 end
 
@@ -22309,9 +22927,15 @@ end
 
 function Plugin:sync_now_menu()
     return {
-        {text="上传当前进度",callback=function() self:upload_local_progress(true) end},
-        {text="读取云端进度",callback=function() self:manual_sync() end},
-        {text="同步本书批注",callback=function() self:sync_local_annotations_now(false) end},
+        {text="上传本机阅读进度",callback=function() self:upload_local_progress(true) end},
+        {text="读取微信读书进度",callback=function() self:manual_sync() end},
+        {text="同步本书个人批注",callback=function()
+            UIManager:show(ConfirmBox:new{
+                text="同步个人批注会上传本地变更，也可能执行此前标记的云端删除操作。是否继续？",
+                ok_text="确认同步",cancel_text="取消",
+                ok_callback=function() self:sync_local_annotations_now(false) end,
+            })
+        end},
     }
 end
 
@@ -22321,7 +22945,7 @@ function Plugin:sync_diagnostics_status_menu()
     local summary=id~="" and (LocalAnnotationDatabase.summary(self.store,id) or {}) or {}
     local pending=(tonumber(summary.pending or 0) or 0)+(tonumber(summary.delete_pending or 0) or 0)
     local action=tonumber(summary.action_required or 0) or 0
-    local annotation=(action+pending)>0 and ("同步失败 "..tostring(action+pending)) or "已同步"
+    local annotation=action>0 and ("需处理 "..tostring(action)) or (pending>0 and ("待同步 "..tostring(pending)) or "已同步")
     return {
         {text="当前书籍",post_text=self:_sync_current_book_label(),enabled=false},
         {text="登录状态",post_text=self:logged_in() and "正常" or "需要检查",callback=function() self:show_account_status() end},
@@ -22801,6 +23425,10 @@ function Plugin:_home_sync_status_label_from_summary(summary)
     local active=tonumber(summary.progress_active or 0) or 0
     if self.annotation_async and self.annotation_async:busy() then active=active+1 end
     local failed=tonumber(summary.failed_total or 0) or 0
+    if self.store:preferences().hide_progress_sync_badge==true then
+        active=math.max(0,active-(tonumber(summary.progress_active or 0) or 0))
+        failed=math.max(0,failed-(tonumber(summary.progress or 0) or 0))
+    end
     if active>0 then return "同步中 "..tostring(active) end
     if failed>0 then return "同步失败 "..tostring(failed) end
     if summary.checking==true then return "同步检查中" end
@@ -22833,7 +23461,7 @@ function Plugin:_progress_sync_issue_items()
     local library=self:_persisted_library()
     local items={}
     local labels={
-        upload_unconfirmed="同步失败",verifying_upload="同步中",submitted="同步失败",settling="同步失败",
+        upload_unconfirmed="待云端确认",verifying_upload="同步中",submitted="待云端确认",settling="待云端确认",
         waiting_network="同步失败",upload_failed="同步失败",
         remote_jump_unconfirmed="同步失败",verification_required="同步失败",
         uploading="同步中",retrying="同步中",finalizing="同步中",deferred="同步失败",mapping_preparing="同步失败",
@@ -22841,6 +23469,7 @@ function Plugin:_progress_sync_issue_items()
     }
     local pending_states={
         upload_unconfirmed=true,verifying_upload=true,waiting_network=true,upload_failed=true,
+        remote_newer_pending=true,
         remote_jump_unconfirmed=true,verification_required=true,uploading=true,retrying=true,finalizing=true,deferred=true,
         submitted=true,settling=true,mapping_preparing=true,local_coordinate_unresolved=true,
     }
@@ -22887,16 +23516,16 @@ function Plugin:_progress_sync_issue_items()
                     or (pending_unresolved and pending_unresolved.reason)
                     or session.progress_last_verify_reason or "")
                 local legacy_unsent=upload_state=="fenced" or pending_reason:find("^write_fenced:")~=nil
-                local authority_conflict=pending_reason:find("^write_fenced:conflict:")~=nil
-                    or pending_reason=="freshness_conflict"
+                -- beta.6: legacy `ambiguous_clock_conflict` is an UNSENT
+                -- observation, not proof of simultaneous independent edits.
+                local authority_conflict=false
+                local old_conflict=pending_reason=="freshness_conflict"
+                    or pending_reason:find("^write_fenced:conflict:")~=nil
                     or tostring(reason):find("ambiguous_clock_conflict",1,true)~=nil
-                    or tostring(reason):find("无法安全判断",1,true)~=nil
-                -- beta.17: an authority conflict is not a retryable transport
-                -- failure. Automatic/Home retry must never decide which side
-                -- wins; the user explicitly chooses local or cloud instead.
-                local can_send=can_replay and not authority_conflict
-                    and (upload_state=="pending_send" or legacy_unsent)
-                local can_verify=can_replay and not can_send and not authority_conflict
+                local can_send=can_replay
+                    and (upload_state=="pending_send" or upload_state=="remote_newer_pending" or legacy_unsent
+                    or (old_conflict and (upload_state=="" or upload_state=="false")))
+                local can_verify=can_replay and not can_send
                 local explicit_mismatch=pending_reason=="chapter_offset_mismatch" or pending_reason=="chapter_mismatch"
                     or pending_reason=="position_mismatch" or pending_reason=="remote_position_mismatch"
                 local can_resubmit=not authority_conflict and replayable==true and (session.progress_resubmit_allowed==true
@@ -22908,10 +23537,13 @@ function Plugin:_progress_sync_issue_items()
                     and tonumber(pending_progress.canonical_offset or pending_progress.chapter_offset or pending_progress.offset)~=nil
                 items[#items+1]={
                     book_id=tostring(id),title=title,state=state,
+                    progress_epoch=tonumber(session.progress_epoch or 1) or 1,
+                    pending_sequence=tonumber((pending_progress or pending_coordinate or pending_unresolved or {}).progress_sequence or 0) or 0,
                     state_label=coordinate_only and "正在换算整书位置"
                         or (anchor_only and (saved_anchor and "正在恢复精确位置" or "需要重新打开本书确认")
                         or (authority_conflict and "需要选择本机或云端"
-                        or (can_send and "等待上传" or (replayable and (labels[state] or "待处理") or "需要打开本书确认")))),
+                        or (can_send and "等待上传 Kindle 进度"
+                        or (replayable and (labels[state] or "待处理") or "需要打开本书确认")))),
                     reason=coordinate_only and "精确章节位置已保存，等待补全整书目录"
                         or (anchor_only and (saved_anchor and "退出前的文本锚点已保存，可在主页后台恢复微信精确坐标"
                             or "旧记录没有保存足够的定位锚点，需要重新打开本书建立上下文")
@@ -22919,7 +23551,7 @@ function Plugin:_progress_sync_issue_items()
                         or (can_send and "精确位置已保存，但请求尚未发送"
                         or (replayable and reason or "本地只剩不完整的位置记录，无法安全重传")))),
                     local_percent=localp,
-                    requires_choice=authority_conflict,
+                    requires_choice=false,
                     can_adopt_remote=(pending_progress~=nil or pending_coordinate~=nil or pending_unresolved~=nil),
                     can_force_local=authority_conflict and replayable==true and exact_native,
                     can_clear_stale=replayable~=true and not (anchor_only and saved_anchor~=nil),
@@ -23246,7 +23878,7 @@ function Plugin:_submit_saved_pending_progress(item,callback)
     local upload_state=tostring(session.progress_upload_state or "")
     local pending_reason=tostring(current.pending_reason or "")
     local legacy_unsent=upload_state=="fenced" or pending_reason:find("^write_fenced:")~=nil
-    if upload_state~="pending_send" and not legacy_unsent then
+    if upload_state~="pending_send" and upload_state~="remote_newer_pending" and not legacy_unsent then
         callback(true,"already_dispatched")
         return true
     end
@@ -23261,98 +23893,28 @@ function Plugin:_submit_saved_pending_progress(item,callback)
 
     local position=self:_prepare_progress_snapshot(book_id,current) or current
     local localp=tonumber(position.progress)
-    local PR=_G.__MIUREAD_POSITION_RESOLUTION
-    if not (PR and type(PR.decide)=="function") then callback(false,"position_resolver_missing"); return false end
-
-    -- beta.6: UNSENT recovery always obtains a fresh cloud observation first.
-    -- A snapshot blocked by a previous reconciliation was never submitted and
-    -- must never jump directly into readback verification or blind resubmission.
-    self:_save_progress_state(book_id,"checking","重新读取云端位置后再决定是否上传本机进度",
+    if not self:_progress_snapshot_current(book_id,position) then
+        callback(false,"superseded")
+        return false
+    end
+    -- beta.17: the user explicitly selected Kindle-authoritative uploads.
+    -- An UNSENT precise local coordinate does not need a preliminary remote
+    -- freshness vote. The full upload still verifies its eventual cloud readback.
+    self:_clear_progress_write_fence(book_id,"kindle_pending_send_authoritative")
+    self:_save_progress_state(book_id,"uploading","正在上传 Kindle 本机保存的精确位置",
         localp,nil,position.progress_sequence)
-    local started,remote_start_error=self.sync:remote(book_id,function(remote,remote_err)
-        if not self:_progress_snapshot_current(book_id,position) then
-            callback(false,"superseded",remote)
-            return
-        end
-        if not remote then
-            self:_save_progress_state(book_id,"waiting_network","暂时无法确认云端位置；本机精确位置继续保留",
-                localp,nil,position.progress_sequence)
-            callback(false,remote_err or "remote_unavailable")
-            return
-        end
-        if remote.conflict then
-            self:_save_progress_state(book_id,"deferred","云端来源暂时不一致；本机精确位置继续保留",
-                localp,nil,position.progress_sequence)
-            callback(false,"remote_source_conflict",remote)
-            return
-        end
-        local latest_session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or session
-        local state=type(latest_session.position_state)=="table" and latest_session.position_state or {}
-        local decision=PR.decide{
-            local_position=position,
-            remote_position=remote,
-            verified_anchor=PR.trusted_verified_anchor(latest_session,state),
-            local_seq=tonumber(position.progress_sequence or latest_session.progress_latest_sequence or 0) or 0,
-            verified_seq=tonumber(latest_session.progress_verified_sequence or 0) or 0,
-            local_updated_at=math.max(
-                tonumber(latest_session.local_read_event_at or 0) or 0,
-                tonumber(position.updated_at or 0) or 0
-            ),
-            remote_updated_at=tonumber(remote.updated_at or remote.updated or 0) or 0,
-            clock_skew_grace=tonumber(Config.POSITION_CLOCK_SKEW_GRACE_SECONDS) or 30,
-        }
-        local winner=tostring(decision and decision.winner or "conflict")
-        local reason=tostring(decision and decision.reason or "unknown")
-        logger.info("[MiuRead][ProgressRecovery] freshness checked",
-            "book=",book_id,"winner=",winner,"reason=",reason,
-            "local_event=",tostring(latest_session.local_read_event_at or 0),
-            "remote_updated=",tostring(remote.updated_at or 0))
-
-        if winner=="aligned" then
-            self.sync:set_cloud_anchor(book_id,position,"pending_send_already_aligned",true)
-            self.sync:mark_verified(book_id,"pending_send_already_aligned",localp,localp,position,
-                {detached=true,record_snapshot=record_snapshot})
-            self:_commit_progress_verified(book_id,position,remote,"此前保留的本机位置已与云端一致")
-            callback(true,"already_aligned",remote)
-            return
-        end
-        if winner=="remote" then
-            -- The cloud is newer: discard the stale UNSENT write request. The
-            -- next book open will apply/offer the newer cloud position normally.
-            self:_clear_pending_progress(book_id,position.progress_sequence)
-            self.store:save_session(book_id,{
-                progress_sync_state="remote_newer_pending",
-                progress_sync_message="云端位置更新；已取消旧的本机待上传位置",
-                progress_upload_state=false,progress_submission_phase=false,
-                progress_decided_at=os.time(),
-            })
-            callback(true,"remote_newer_local_unsent_dropped",remote)
-            return
-        end
-        if winner~="local" then
-            self:_save_progress_state(book_id,"deferred","本机与云端新旧暂时无法安全判断；稍后重新确认",
-                localp,tonumber(remote.percent),position.progress_sequence)
-            callback(false,"freshness_conflict",remote)
-            return
-        end
-
-        self:_clear_progress_write_fence(book_id,"recovery_local_newer:"..reason)
-        self:_save_progress_state(book_id,"uploading","已确认本机阅读事件更新，正在继续上传",
-            localp,tonumber(remote.percent),position.progress_sequence)
-        local upload_started=self:_submit_progress_snapshot(book_id,position,{
-            detached=true,reason="pending_send_recovered",pending_reason="upload_queued",
-            pending_already_saved=true,record_override=record_snapshot,record_snapshot=record_snapshot,
-            uploading_message="此前未发送的精确位置正在继续上传",
-            verifying_message="阅读进度已提交，等待微信确认",
-            unconfirmed_message="阅读进度已提交，仍等待微信确认",
-            failed_message="精确位置已保存，稍后继续上传",
-            verify_delays={3,10,24},force_write=true,
-        },function(ok,verified_remote,err)
-            callback(ok,err,verified_remote)
-        end)
-        if not upload_started then callback(false,"progress_worker_busy") end
-    end,{raw_coordinate=true,update_cloud_anchor=false,detached=true,record_snapshot=record_snapshot})
-    if started==false then callback(false,remote_start_error or "remote_check_busy") end
+    local started=self:_submit_progress_snapshot(book_id,position,{
+        detached=true,reason="kindle_pending_send",pending_reason="upload_queued",
+        pending_already_saved=true,record_override=record_snapshot,record_snapshot=record_snapshot,
+        uploading_message="正在上传 Kindle 本机进度",
+        verifying_message="阅读进度已提交，等待微信确认",
+        unconfirmed_message="阅读进度已提交，仍等待微信确认",
+        failed_message="Kindle 精确位置已保存，稍后继续上传",
+        verify_delays={3,10,24},force_write=true,
+    },function(ok,verified_remote,err)
+        callback(ok,err,verified_remote)
+    end)
+    if not started then callback(false,"progress_worker_busy") end
     return started~=false
 end
 
@@ -23771,6 +24333,31 @@ function Plugin:_force_local_progress_issue(item,callback)
     return started~=false
 end
 
+function Plugin:_abandon_progress_issue(item)
+    local id=tostring(item and item.book_id or "")
+    if id=="" then return false end
+    local session=(self:_persisted_sessions()[id]) or self.store:session(id) or {}
+    if item.progress_epoch and tonumber(item.progress_epoch)~=(tonumber(session.progress_epoch or 1) or 1) then
+        return false,"task_superseded"
+    end
+    local pending=type(session.pending_progress)=="table" and session.pending_progress
+        or type(session.pending_progress_coordinate)=="table" and session.pending_progress_coordinate
+        or type(session.pending_unresolved_position)=="table" and session.pending_unresolved_position
+    if not pending then return false,"already_resolved" end
+    if item.pending_sequence and tonumber(item.pending_sequence)~=(tonumber(pending.progress_sequence or 0) or 0) then
+        return false,"task_superseded"
+    end
+    local ok,err=self.store:abandon_pending_progress(id,
+        tonumber(session.progress_epoch or 1) or 1,
+        tonumber(pending.progress_sequence or 0) or 0)
+    if ok then
+        self:_clear_progress_write_fence(id,"manual_progress_abandon")
+        self:_refresh_progress_issue_surfaces()
+        self:_invalidate_home_sync_status()
+    end
+    return ok,err
+end
+
 function Plugin:_show_progress_sync_issue_detail(item)
     item=type(item)=="table" and item or {}
     local latest
@@ -23783,15 +24370,20 @@ function Plugin:_show_progress_sync_issue_detail(item)
     local chapter=tostring(pending.chapter_uid or pending.chapter_index or "—")
     local co=tostring(pending.canonical_offset or pending.chapter_offset or pending.offset or "—")
     local percent=tonumber(item.local_percent or pending.progress)
-    local rows={
-        {text="书籍",post_text=U.utf8_truncate(item.title,28,"…"),enabled=false},
-        {text="本机位置",post_text=percent and string.format("%.1f%%",percent) or "—",enabled=false},
-        {text="章节坐标",post_text="第"..chapter.."章 · co "..co,enabled=false},
-        {text="状态",post_text=tostring(item.state_label or "同步失败"),enabled=false},
-        {text="提交时间",post_text=(tonumber(pending.submitted_at or pending.captured_at or item.decided_at or 0) or 0)>0
-            and U.now_text(tonumber(pending.submitted_at or pending.captured_at or item.decided_at)) or "—",enabled=false},
-        {text="原因",post_text=U.utf8_truncate(tostring(item.reason or "等待云端确认"),42,"…"),enabled=false},
+    local readable={enabled=false,readonly_label=true,arrow=false}
+    local function info_row(title,value)
+        return {text=title,post_text=tostring(value or "—"),enabled=false,readonly_label=true,arrow=false}
+    end
+    local full_reason=tostring(item.reason or "等待云端确认")
+    local metadata={
+        info_row("书籍",U.utf8_truncate(item.title,16,"…")),
+        info_row("本机位置",percent and string.format("%.1f%%",percent) or "—"),
+        info_row("章节坐标","第"..chapter.."章 · co "..co),
+        info_row("状态",tostring(item.state_label or "待同步")),
+        info_row("提交时间",(tonumber(pending.submitted_at or pending.captured_at or item.decided_at or 0) or 0)>0
+            and U.now_text(tonumber(pending.submitted_at or pending.captured_at or item.decided_at)) or "—"),
     }
+    local rows={{text="查看完整原因",callback=function() self:info(full_reason) end}}
     if item.requires_choice then
         rows[#rows+1]={text="以云端为准",post_text="放弃这次本机待上传；先读取微信当前位置",callback=function()
             UIManager:show(ConfirmBox:new{text="以微信读书云端位置为准？\n\n这会放弃本次本机待上传的阅读位置，并使旧 pending/retry 永久失效。不会删除书籍、批注或本机实际阅读页。",ok_callback=function()
@@ -23862,32 +24454,27 @@ function Plugin:_show_progress_sync_issue_detail(item)
             end)
         end}
     end
-    if item.can_adopt_remote and not item.requires_choice then
-        rows[#rows+1]={text="放弃本机待上传",post_text="读取云端后删除这条本机失败事务",callback=function()
-            UIManager:show(ConfirmBox:new{text="放弃这次本机待上传，并以当前微信云端位置为新基准？\n\n只有成功读取云端位置后才会删除失败事务。",ok_callback=function()
-                self:_adopt_remote_progress_issue(item,function(ok,err)
-                    if ok then self:status_toast("阅读进度","失败事务已删除；以云端为新基准",4)
-                    else self:status_toast("阅读进度未改变",U.first_line(tostring(err or "无法读取云端位置"),60),4) end
-                end)
+    rows[#rows+1]={text="放弃此条上传记录",post_text="仅清除上传任务，不删除本机阅读进度与阅读时间",callback=function()
+        UIManager:show(ConfirmBox:new{text="放弃这条阅读进度上传任务？\n\n只清除这次待上传记录，保留 Kindle 阅读位置、阅读时长、批注与评论。已发出的云端请求可能仍在处理。继续阅读后会生成新任务。",
+            ok_callback=function()
+                local ok,err=self:_abandon_progress_issue(item)
+                if ok then self:toast("已放弃这条上传记录",2)
+                else self:toast(err=="task_superseded" and "记录已更新，请重新打开列表" or "记录已处理或暂时无法清除",3) end
             end})
-        end}
-    elseif item.can_clear_stale then
-        rows[#rows+1]={text="清除失效记录",post_text="这条记录已没有可安全重传的精确位置",callback=function()
-            UIManager:show(ConfirmBox:new{text="清除这条失效的进度同步记录？\n\n不会修改微信云端，也不会删除本机实际阅读页或批注。",ok_callback=function()
-                local ok,err=self:_discard_stale_progress_issue(item)
-                if ok then self:status_toast("阅读进度","失效记录已清除",3)
-                else self:status_toast("阅读进度",U.first_line(tostring(err or "无法清除"),60),3) end
-            end})
-        end}
+    end}
+    if item.can_clear_stale then
+        rows[#rows+1]={text="位置记录尚不完整",post_text="重新打开本书后自动尝试恢复",enabled=false,readonly_label=true}
     end
+    rows[#rows+1]={text="详细状态与坐标",sub_item_table_func=function() return metadata end}
     return self:_show_miuread_menu("进度同步失败",rows,{page_size=10})
 end
 
 function Plugin:show_progress_sync_issues()
     self:_clear_verified_progress_ghosts()
     local items=self:_progress_sync_issue_items()
-    if #items==0 then self:toast("当前没有进度同步失败",2); return true end
     local rows={}
+    -- Keep reminder preferences accessible even when all failed tasks have
+    -- been dismissed; otherwise the "hide" switch could never be undone.
     rows[#rows+1]={text="全部重新同步",post_text=tostring(#items).." 本 · 与主页同步使用同一恢复流程",
         callback=function() self:_sync_home_pending({source="progress_issues"}) end}
     local verify_count=0
@@ -23896,6 +24483,26 @@ function Plugin:show_progress_sync_issues()
         rows[#rows+1]={text="重新处理进度同步失败",post_text=tostring(verify_count).." 本 · 只读取云端，不重复上传",
             callback=function() self:_retry_all_saved_progress_verifications(items) end}
     end
+    local is_hidden=self.store:preferences().hide_progress_sync_badge==true
+    rows[#rows+1]={text=is_hidden and "显示首页同步提醒" or "隐藏首页同步提醒",
+        post_text="只影响首页数字和感叹号，不清除任务",callback=function()
+            local prefs=self.store:preferences()
+            prefs.hide_progress_sync_badge=not (prefs.hide_progress_sync_badge==true)
+            self.store:save_preferences(prefs)
+            self:_invalidate_home_sync_status()
+            self:toast(prefs.hide_progress_sync_badge and "已隐藏同步提醒" or "已恢复同步提醒",2)
+        end}
+    rows[#rows+1]={text="清除全部待上传进度记录",post_text="仅清理进度上传任务，保留本机阅读位置和阅读时间",callback=function()
+        UIManager:show(ConfirmBox:new{text="放弃全部待上传的阅读进度记录？\n\n这不会删除本机书籍、当前阅读位置、阅读时间、批注或评论。已发出的云端请求可能仍在处理。",
+            ok_callback=function()
+                local count=0
+                for _,entry in ipairs(items) do
+                    local ok=self:_abandon_progress_issue(entry)
+                    if ok then count=count+1 end
+                end
+                self:toast(count>0 and "旧进度上传任务已清除" or "没有需要清除的旧任务",3)
+            end})
+    end}
     for _,item in ipairs(items) do
         local suffix=item.local_percent and (string.format("%.1f%%",item.local_percent).." · ") or ""
         rows[#rows+1]={
@@ -23903,6 +24510,9 @@ function Plugin:show_progress_sync_issues()
             post_text=suffix..item.state_label.." · "..U.utf8_truncate(item.reason,34,"…"),
             callback=function() self:_show_progress_sync_issue_detail(item) end,
         }
+    end
+    if #items==0 then
+        rows[#rows+1]={text="当前没有进度同步失败",enabled=false,readonly_label=true}
     end
     return self:list("进度同步失败",rows,"当前没有进度同步失败")
 end
@@ -24085,6 +24695,16 @@ function Plugin:_sync_progress_full_recovery(source,silent,on_done)
     return started~=false or completed
 end
 
+function Plugin:_confirm_sync_retry()
+    UIManager:show(ConfirmBox:new{
+        text="尝试恢复失败的阅读进度、可安全重试的阅读时间和本地个人批注。\n\n"..
+            "个人批注同步可能执行此前明确标记的云端删除；请确认后继续。",
+        ok_text="确认重试",cancel_text="取消",
+        ok_callback=function() self:_sync_home_pending({source="confirmed_retry"}) end,
+    })
+    return true
+end
+
 function Plugin:_sync_home_pending(options)
     options=type(options)=="table" and options or {silent=options==true}
     local silent=options.silent==true
@@ -24133,7 +24753,8 @@ function Plugin:_sync_home_pending(options)
                 UIManager:scheduleIn(.5,settle)
                 return
             end
-            local remaining=tonumber(summary.failed_total or 0) or 0
+            local remaining=(tonumber(summary.failed_total or 0) or 0)
+                +#self:_reading_time_sync_issue_items()
             local progress_items=self:_progress_sync_issue_items()
             local result="failed"
             local result_reason="remaining_items"
@@ -24212,7 +24833,7 @@ function Plugin:_sync_home_pending(options)
 
     local function proceed(summary)
         summary=summary or self:_home_sync_summary(false)
-        local failed=tonumber(summary.failed_total or 0) or 0
+        local failed=(tonumber(summary.failed_total or 0) or 0)+#self:_reading_time_sync_issue_items()
         if failed<=0 and summary.checking~=true then
             logger.info("[MiuRead][SyncAction] finish",
                 "source=",source,"result=already_synced","reason=no_failed_items")
@@ -24298,7 +24919,7 @@ function Plugin:sync_settings_menu()
     local prefs=self.store:preferences()
     local sync=prefs.sync or {}
     return {
-        {text="阅读时间",post_text=sync.time_enabled==true and "已开启 · 首次约15秒，之后每60秒" or "已关闭",checked_func=function() return (self.store:preferences().sync or {}).time_enabled==true end,keep_menu_open=true,callback=function() self:toggle_time_sync() end},
+        {text="阅读时间",post_text=sync.time_enabled==true and "已开启 · 结束阅读后上报" or "已关闭",checked_func=function() return (self.store:preferences().sync or {}).time_enabled==true end,keep_menu_open=true,callback=function() self:toggle_time_sync() end},
         {text="阅读进度",post_text=self:progress_upload_mode_label(),sub_item_table_func=function() return self:progress_upload_mode_menu() end},
         {text="批注",post_text=self:_annotation_close_upload_enabled() and "结束阅读时同步" or "仅手动",checked_func=function() return self:_annotation_close_upload_enabled() end,keep_menu_open=true,callback=function() self:toggle_annotation_close_upload() end},
         {text="自动同步最新阅读位置",post_text=(sync.auto_latest_position~=false and sync.pull_on_open~=false) and "已开启" or "已关闭",checked_func=function() local s=(self.store:preferences().sync or {}); return s.auto_latest_position~=false and s.pull_on_open~=false end,keep_menu_open=true,callback=function() self:toggle_pull_on_open() end},
@@ -24311,7 +24932,7 @@ function Plugin:sync_menu()
     local summary=self:_home_sync_summary(false)
     local rows={
         {text="同步状态",post_text=self:_home_sync_status_label(),callback=function() self:show_sync_status(false) end},
-        {text="重新同步失败内容",post_text="进度 批注",callback=function() self:_sync_home_pending() end},
+        {text="重试失败项目",callback=function() self:_confirm_sync_retry() end},
     }
     if (tonumber(summary.annotation_action_required or 0) or 0)>0 then
         rows[#rows+1]={text="批注同步失败",post_text=tostring(summary.annotation_action_required).." 条",callback=function() self:show_annotation_sync_issues() end}
@@ -24336,7 +24957,7 @@ function Plugin:toggle_time_sync(confirmed)
     if p.sync.time_enabled then
         self.sync:start("enabled")
         if self:_original_weread_plugin_present() then
-            self:info("阅读时间同步已开启。首次约 15 秒确认，之后每 60 秒上传。\n\n检测到原作者 WeRead 插件目录（weread.koplugin）。若两边都开启阅读时间同步，可能重复上报；建议只保留一边。")
+            self:info("阅读时间同步已开启。阅读期间仅记录时长，在结束阅读后后台上报。\n\n检测到原作者 WeRead 插件目录（weread.koplugin）。若两边都开启阅读时间同步，可能重复上报；建议只保留一边。")
         else
             self:status_toast("自动上传阅读时间","已开启 · 60 秒",3)
         end
@@ -24687,12 +25308,37 @@ function Plugin:_clear_progress_write_fence(book_id,reason)
     return true
 end
 
-function Plugin:_progress_write_fence(book_id)
+function Plugin:_progress_write_fence(book_id,position)
     book_id=tostring(book_id or "")
     self._progress_write_fences=type(self._progress_write_fences)=="table" and self._progress_write_fences or {}
     local fence=self._progress_write_fences[book_id]
     if type(fence)~="table" then return false,"" end
-    return true,tostring(fence.reason or "reconciliation_unresolved")
+    local reason=tostring(fence.reason or "")
+    -- A failed cloud jump and a fuzzy timestamp disagreement are not evidence
+    -- that a new, separately captured reading-end snapshot is unsafe to send.
+    -- Keep all OTHER fences until their existing transaction checks resolve.
+    if (reason:find("^remote_newer:") or reason:find("^conflict:")
+        or reason=="remote_exact_unresolved") and type(position)=="table"
+        and position.safe==true and tostring(position.chapter_uid or "")~=""
+        and tonumber(position.canonical_offset or position.chapter_offset or position.offset)~=nil then
+        return false,"kindle_exact_position_authoritative"
+    end
+    if reason:find("^remote_newer:") and type(position)=="table" then
+        local session=self.store:session(book_id) or {}
+        local current_event=tonumber(session.local_read_event_at or 0) or 0
+        local previous_event=tonumber(fence.local_event_at or 0) or 0
+        if current_event>previous_event and current_event>tonumber(fence.blocked_at or 0) then
+            return false,"new_read_event_after_remote_observation"
+        end
+    end
+    if reason=="remote_exact_unresolved"
+        or reason=="unknown_freshness_conflict"
+        or reason=="ambiguous_clock_conflict"
+        or reason:find("^conflict:ambiguous_clock_conflict")
+        or reason:find("^conflict:unknown_freshness_conflict") then
+        return false,reason
+    end
+    return true,reason
 end
 
 function Plugin:_save_position_resolution(book_id,winner,reason,local_position,remote)
@@ -24833,7 +25479,7 @@ function Plugin:ensure_read_report_progress(reason,automatic)
     if automatic~=true and not self:is_online() then
         self:_save_progress_state(id,"waiting_network","等待 Wi-Fi 恢复后读取云端位置",nil,nil)
         self.sync:end_progress_sync("等待网络恢复")
-        self:info("Wi-Fi 尚未恢复。\n\n本地阅读位置已保留。阅读时间失败部分不会补传，联网后会重新确认当前进度。")
+        self:info("Wi-Fi 尚未恢复。\n\n本地阅读位置已保留。待报阅读时间会保留；联网后可继续确认进度。")
         return false
     end
     if self._progress_check_running then
@@ -24882,20 +25528,10 @@ function Plugin:ensure_read_report_progress(reason,automatic)
     local frozen_co=tonumber(frozen_local and (frozen_local.canonical_offset or frozen_local.chapter_offset or frozen_local.offset))
     if automatic==true and frozen_uid~="" and frozen_co~=nil then
         local localp=math.floor((tonumber(frozen_local.progress) or chapter_percent)+.5)
-        local cached_state=type((self.store:session(id) or {}).position_state)=="table"
-            and (self.store:session(id) or {}).position_state or {}
-        local cached_remote=type(cached_state.remote_position)=="table" and U.copy(cached_state.remote_position) or nil
-        local cached_age=cached_remote and (os.time()-(tonumber(cached_remote.fetched_at or 0) or 0)) or math.huge
-        local debounce=tonumber(Config.OPEN_SYNC_READ_DEBOUNCE_SECONDS) or 60
-        if cached_remote and cached_age>=0 and cached_age<=debounce and self:_remote_matches(cached_remote,frozen_local)==true then
-            -- Debounce is only used for an already-aligned exact coordinate. A
-            -- stale cache is never allowed to authorize a local overwrite.
-            self._progress_check_running=false
-            self:on_remote_progress(id,localp,cached_remote,true,frozen_local)
-            logger.info("[MiuRead][Sync] remote metadata fetch debounced",
-                "book=",id,"age=",tostring(cached_age),"reason=exact_cached_alignment")
-            return true
-        end
+        -- beta.9: a previous Web observation is useful for initial rendering,
+        -- but can never prove that the cloud is STILL aligned on a new open.
+        -- Always make a fresh asynchronous Web read for this opening session.
+        -- _progress_check_running already coalesces duplicate requests.
         self:_save_progress_state(id,"checking","正在后台确认云端位置",localp,nil)
         local remote_started,remote_start_error=self.sync:remote(id,function(remote,remote_err)
             self._progress_check_running=false
@@ -25030,7 +25666,7 @@ function Plugin:manual_sync()
     return self:ensure_read_report_progress("manual_progress_sync",false)
 end
 
-function Plugin:_remote_matches(remote,target)
+function Plugin:_remote_matches(remote,target,web_post_verification)
     local threshold=tonumber(self.store:preferences().sync.threshold) or 2
     if not remote then return false,nil,nil end
     local target_position=type(target)=="table" and target or nil
@@ -25078,10 +25714,19 @@ function Plugin:_remote_matches(remote,target)
         return percent and math.abs(percent-target_percent)<=threshold,
             percent,candidate.source,{reason="percent_fallback",basis=target_basis}
     end
+    if web_post_verification==true then
+        -- Only the Web side can confirm a Web POST. Ordinary cross-device
+        -- comparisons still use the unmodified beta.2 source policy below.
+        local web=remote.web or (remote.source=="web_cookie" and remote or nil)
+        if not web then return false,nil,"web_cookie",{reason="web_readback_unavailable"} end
+        return match(web)
+    end
     if remote.conflict then
-        local ok,pct,source,meta=match(remote.web); if ok then return true,pct,source,meta end
-        ok,pct,source,meta=match(remote.agent); if ok then return true,pct,source,meta end
-        return false,nil,nil,meta
+        local ok,pct,source,meta=match(remote.web)
+        if ok then return true,pct,source,meta end
+        ok,pct,source,meta=match(remote.agent)
+        if ok then return true,pct,source,meta end
+        return false,pct,source,meta
     end
     return match(remote)
 end
@@ -25117,7 +25762,7 @@ function Plugin:_prepare_progress_snapshot(book_id,position,persist_sequence)
     return snapshot
 end
 
-function Plugin:_progress_snapshot_current(book_id,position)
+function Plugin:_progress_snapshot_current(book_id,position,allow_verified)
     book_id=tostring(book_id or "")
     if book_id=="" or type(position)~="table" then return false end
     local seq=tonumber(position.progress_sequence or 0) or 0
@@ -25128,7 +25773,13 @@ function Plugin:_progress_snapshot_current(book_id,position)
     if snapshot_epoch~=current_epoch then return false end
     local latest=tonumber(session.progress_latest_sequence or 0) or 0
     local verified=tonumber(session.progress_verified_sequence or 0) or 0
-    if verified>=seq then return false end
+    if verified>=seq then
+        -- Verification commits before its submit callback runs. That callback
+        -- may accept the same verified generation, while all send/replay gates
+        -- must continue to reject an already verified snapshot.
+        return allow_verified==true and verified==seq and latest==seq
+            and tonumber(session.progress_verified_epoch)==snapshot_epoch
+    end
     return seq>=latest
 end
 
@@ -25316,6 +25967,32 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
     end
     local submitted_seq=tonumber(submitted_position.progress_sequence or 0) or 0
     local submitted_at=tonumber(submitted_position.submitted_at or submitted_position.captured_at) or os.time()
+    self._progress_verify_inflight=self._progress_verify_inflight or {}
+    local auth_for_verify=self.store:auth() or {}
+    local account_for_verify=type(auth_for_verify.account)=="table" and auth_for_verify.account or {}
+    local verify_key=table.concat({tostring(account_for_verify.vid or ""),
+        tostring(auth_for_verify.login_session_id or ""),book_id,
+        tostring(submitted_position.progress_epoch or "-"),tostring(submitted_seq),
+        tostring(submitted_position.chapter_uid or "-"),
+        tostring(submitted_position.canonical_offset or submitted_position.chapter_offset or submitted_position.offset or "-")},":")
+    local pending_verify=self._progress_verify_inflight[verify_key]
+    if pending_verify then
+        pending_verify.callbacks[#pending_verify.callbacks+1]=callback
+        logger.info("[MiuRead][ProgressVerify] joined existing transaction",
+            "book=",book_id,"seq=",tostring(submitted_seq))
+        return true
+    end
+    local verify_group={callbacks={callback}}
+    self._progress_verify_inflight[verify_key]=verify_group
+    local function notify_waiters(...)
+        if self._progress_verify_inflight[verify_key]==verify_group then
+            self._progress_verify_inflight[verify_key]=nil
+        end
+        for _,listener in ipairs(verify_group.callbacks) do
+            local ok,err=pcall(listener,...)
+            if not ok then logger.warn("[MiuRead][ProgressVerify] listener error",tostring(err)) end
+        end
+    end
     local delays=type(options.verify_delays)=="table" and options.verify_delays or {5,12,24}
     if #delays<1 then delays={5,12,24} end
     local attempt,done=0,false
@@ -25330,11 +26007,21 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
     end
     local function finish(ok,remote,reason,meta)
         if done then return end
+        -- An old account's verification may arrive after a login change.
+        -- Never write its pending/verified status into the current account.
+        local current_auth=self.store:auth() or {}
+        local current_account=type(current_auth.account)=="table" and current_auth.account or {}
+        if tostring(current_account.vid or "")~=tostring(account_for_verify.vid or "")
+            or tostring(current_auth.login_session_id or "")~=tostring(auth_for_verify.login_session_id or "") then
+            done=true
+            notify_waiters(false,remote,"account_changed",{stale_account=true})
+            return
+        end
         if submitted_seq>0 and not self:_progress_snapshot_current(book_id,submitted_position) then
             done=true
             logger.info("[MiuRead][ProgressTransaction] stale verification ignored",
                 "book=",book_id,"seq=",tostring(submitted_seq),"epoch=",tostring(submitted_position.progress_epoch or "-"))
-            callback(false,remote,"superseded",meta); return
+            notify_waiters(false,remote,"superseded",meta); return
         end
         done=true
         if ok then
@@ -25351,7 +26038,7 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
         else
             self:_save_pending_progress(book_id,submitted_position,reason or "cloud_not_confirmed")
         end
-        callback(ok,remote,reason,meta)
+        notify_waiters(ok,remote,reason,meta)
     end
     local function verify()
         attempt=attempt+1
@@ -25362,7 +26049,7 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
                 finish(false,nil,"superseded",{superseded=true}); return
             end
             self.sync:remote(book_id,function(remote,remote_err)
-                local matched,actual,source,meta=self:_remote_matches(remote,submitted_position)
+                local matched,actual,source,meta=self:_remote_matches(remote,submitted_position,true)
                 meta=type(meta)=="table" and meta or {}
                 local remote_updated=tonumber(remote and remote.updated_at or 0) or 0
                 local target_co=tonumber(submitted_position.canonical_offset or submitted_position.chapter_offset or submitted_position.offset)
@@ -25382,15 +26069,33 @@ function Plugin:_verify_progress_submission(book_id,submitted_position,options,c
                     "submitted_at=",tostring(submitted_at),
                     "reason=",tostring(meta.reason or "-"),"matched=",tostring(matched==true))
                 if matched then
-                    finish(true,remote,nil,{actual=actual,source=source,match=meta})
+                    -- An Agent disagreement must not change which wire value
+                    -- confirmed the Web write or what is committed locally.
+                    local confirmed_remote=remote and remote.conflict and remote.web or remote
+                    finish(true,confirmed_remote,nil,{actual=actual,source=source,match=meta})
                 elseif attempt<#delays then
                     self:_save_progress_state(book_id,"settling","已提交，正在等待微信读书云端状态稳定",
                         tonumber(submitted_position.progress),remote and remote.percent,submitted_seq)
                     verify()
                 else
+                    -- A later, well-formed Web reading event is not proof the
+                    -- POST failed: it may be an independent newer device event.
+                    -- Keep the immutable submission pending for reconciliation;
+                    -- never re-POST it merely because the cloud moved.
+                    if remote and tostring(remote.chapter_uid or "")~=""
+                        and remote_co~=nil and remote_co>=0 and remote_updated>submitted_at
+                        and not tostring(remote.position_basis or ""):find("unresolved",1,true)
+                        and meta.reason~="stale_remote" then
+                        meta.cloud_position_changed=true
+                        meta.reason="cloud_position_changed"
+                        logger.info("[MiuRead][ProgressVerify] later Web position observed",
+                            "book=",book_id,"seq=",tostring(submitted_seq),
+                            "remote_chapter=",tostring(remote.chapter_uid),"remote_co=",tostring(remote_co))
+                    end
                     finish(false,remote,remote_err or meta.reason or "cloud_not_confirmed",meta)
                 end
-            end,{force=true,raw_coordinate=true,detached=detached,record_snapshot=record_snapshot,
+            end,{force=true,raw_coordinate=true,web_only=true,verify_only=true,
+                detached=detached,record_snapshot=record_snapshot,
                 catalog_snapshot=catalog_snapshot,update_cloud_anchor=false})
         end)
     end
@@ -25412,7 +26117,7 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
         return false
     end
     local seq=tonumber(snapshot.progress_sequence or 0) or 0
-    local blocked,block_reason=self:_progress_write_fence(book_id)
+    local blocked,block_reason=self:_progress_write_fence(book_id,snapshot)
     if blocked and options.force_write~=true and options.verify_first~=true then
         -- The exact local snapshot has NOT been submitted. Persist it explicitly
         -- as UNSENT; recovery must re-check cloud freshness before a later send.
@@ -25433,8 +26138,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
     local finished=false
     local accepted_notified=false
 
-    local function current()
-        return self:_progress_snapshot_current(book_id,snapshot)
+    local function current(allow_verified)
+        return self:_progress_snapshot_current(book_id,snapshot,allow_verified)
     end
     local function finish(ok,remote,err,meta)
         if finished then return end
@@ -25466,7 +26171,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             catalog_snapshot=options.catalog_snapshot,
         },function(verified,remote,verify_error,verify_meta)
             if finished then return end
-            if verify_error=="superseded" or not current() then
+            if verify_error=="account_changed" then finish(false,remote,verify_error,verify_meta); return end
+            if verify_error=="superseded" or not current(verified==true) then
                 finish(false,remote,"superseded",verify_meta)
                 return
             end
@@ -25479,7 +26185,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             end
             self:_save_pending_progress(book_id,snapshot,verify_error or "cloud_not_confirmed")
             self:_save_progress_state(book_id,"upload_unconfirmed",
-                options.unconfirmed_message or "请求已提交，但云端位置尚未确认",
+                (verify_meta and verify_meta.cloud_position_changed) and "进度请求已提交；云端出现更新的位置，等待新旧裁决"
+                    or options.unconfirmed_message or "请求已提交，但云端位置尚未确认",
                 tonumber(snapshot.progress),remote and remote.percent,seq)
             finish(false,remote,verify_error or "cloud_not_confirmed",verify_meta)
         end)
@@ -25578,7 +26285,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             catalog_snapshot=options.catalog_snapshot,
         },function(verified,remote,verify_error,meta)
             if finished then return end
-            if verify_error=="superseded" or not current() then
+            if verify_error=="account_changed" then finish(false,remote,verify_error,meta); return end
+            if verify_error=="superseded" or not current(verified==true) then
                 finish(false,remote,"superseded",meta)
             elseif verified then
                 self:_save_progress_state(book_id,"local_uploaded",
@@ -25588,7 +26296,8 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
             else
                 self:_save_pending_progress(book_id,snapshot,verify_error or "cloud_not_confirmed")
                 self:_save_progress_state(book_id,"upload_unconfirmed",
-                    options.unconfirmed_message or "原提交位置仍等待微信确认",
+                    (meta and meta.cloud_position_changed) and "云端出现新的阅读位置；原提交待裁决"
+                        or options.unconfirmed_message or "原提交位置仍等待微信确认",
                     tonumber(snapshot.progress),remote and remote.percent,seq)
                 finish(false,remote,verify_error or "cloud_not_confirmed",meta)
             end
@@ -25746,6 +26455,12 @@ function Plugin:_use_remote_position(id,localp,remote,options)
     options=type(options)=="table" and options or {}
     local automatic=options.automatic==true
     local callback=type(options.callback)=="function" and options.callback or function() end
+    -- A cloud jump may complete after the reader has produced another local
+    -- event. Freeze the original transaction identity before navigation.
+    local start_session=self.store:session(id) or {}
+    local start_epoch=tonumber(start_session.progress_epoch or 0) or 0
+    local start_seq=tonumber(start_session.progress_latest_sequence or 0) or 0
+    local start_read_event=tonumber(start_session.local_read_event_at or 0) or 0
     self:_clear_progress_resolution(id)
     local remotep=tonumber(remote and (remote.canonical_progress or remote.calculated_percent or remote.percent)) or 0
     -- A previously verified chapter/co -> XPointer mapping is the cheapest
@@ -25806,6 +26521,16 @@ function Plugin:_use_remote_position(id,localp,remote,options)
                     "remote_co=",tostring(remote and remote.offset or "-"),
                     "co_delta=",tostring(meta and meta.co_delta or "-"))
                 if matched then
+                    local fresh_session=self.store:session(id) or {}
+                    if (tonumber(fresh_session.progress_epoch or 0) or 0)~=start_epoch
+                        or (tonumber(fresh_session.progress_latest_sequence or 0) or 0)>start_seq
+                        or (tonumber(fresh_session.local_read_event_at or 0) or 0)>start_read_event then
+                        logger.warn("[MiuRead][ProgressJump] stale cloud jump not adopted",
+                            "book=",id,"start_seq=",tostring(start_seq),
+                            "current_seq=",tostring(fresh_session.progress_latest_sequence or 0))
+                        callback(false,"superseded",{kind="stale",actual_position=actual_position})
+                        return
+                    end
                     -- Cache only after authoritative chapter/co verification;
                     -- approximate or merely searchable XPointers never become trusted.
                     local verified_xpointer=self:_current_reader_xpointer()
@@ -25933,9 +26658,8 @@ function Plugin:on_remote_source_conflict(id,localp,remote,automatic,local_posit
     local web,agent=remote and remote.web or nil,remote and remote.agent or nil
     local wt=tonumber(web and web.updated_at or 0) or 0
     local at=tonumber(agent and agent.updated_at or 0) or 0
-    local grace=tonumber(Config.POSITION_CLOCK_SKEW_GRACE_SECONDS) or 30
     local selected,reason
-    if web and agent and wt>0 and at>0 and math.abs(wt-at)>grace then
+    if web and agent and wt>0 and at>0 and wt~=at then
         if at>wt then selected,reason=agent,"agent_newer_cloud_source" else selected,reason=web,"web_newer_cloud_source" end
     elseif web and not agent then selected,reason=web,"web_only_cloud_source"
     elseif agent and not web then selected,reason=agent,"agent_only_cloud_source"
@@ -25978,6 +26702,17 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
     }
     local winner=tostring(result.winner or "conflict")
     local reason=tostring(result.reason or "unknown")
+    -- beta.17 policy: a real Kindle coordinate is authoritative on automatic open.
+    -- Explicit 'use cloud' actions still call the separate manual adoption path.
+    local local_uid=tostring(type(local_position)=="table" and (local_position.chapter_uid or local_position.chapterUid) or "")
+    local local_offset=type(local_position)=="table" and tonumber(local_position.canonical_offset
+        or local_position.chapter_offset or local_position.offset) or nil
+    if automatic and local_uid~="" and local_offset~=nil then
+        if winner=="remote" or winner=="conflict" then
+            winner="local"
+            reason="kindle_coordinate_authoritative"
+        end
+    end
     local remote_uid=tostring(remote and (remote.chapter_uid or remote.chapterUid) or "")
     local remote_co=tonumber(remote and (remote.canonical_offset or remote.offset or remote.chapter_offset))
 
@@ -26053,6 +26788,20 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
                 self._position_resolution_applying=false
                 if ok then
                     self:_clear_progress_write_fence(id,"remote_position_verified")
+                    local pending_session=self.store:session(id) or {}
+                    local previous_pending=type(pending_session.pending_progress)=="table"
+                        and pending_session.pending_progress or nil
+                    if previous_pending and tostring(pending_session.progress_upload_state or "")=="remote_newer_pending" then
+                        local pending_time=tonumber(pending_session.local_read_event_at
+                            or previous_pending.updated_at or previous_pending.captured_at or 0) or 0
+                        local remote_time=tonumber(resolved_remote.updated_at or resolved_remote.updated or 0) or 0
+                        if remote_time>0 and (pending_time<=0 or remote_time>=pending_time) then
+                            -- Sequence-conditional: do not erase a newer reading-end write.
+                            self:_clear_pending_progress(id,previous_pending.progress_sequence)
+                            logger.info("[MiuRead][ProgressRecovery] older pending retired after verified remote landing",
+                                "book=",id,"seq=",tostring(previous_pending.progress_sequence or 0))
+                        end
+                    end
                     local resolved_local=type(actual_position)=="table" and U.copy(actual_position) or U.copy(local_position)
                     resolved_local.updated_at=tonumber(resolved_remote and (resolved_remote.updated_at or resolved_remote.updated) or 0) or os.time()
                     self:_save_position_resolution(id,"aligned","remote_position_verified",resolved_local,resolved_remote)
@@ -26127,12 +26876,13 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
         return apply_remote(remote)
     end
 
-    -- LOCAL_NEWER is the only automatic state that authorizes a cloud write.
+    -- beta.6: latest local wins, but opening/reading NEVER uploads progress.
+    -- The existing finalizer persists its final coordinate and writes only
+    -- after the user ends reading. No one-shot network write on book open.
     self:_clear_progress_write_fence(id,"local_newer:"..reason)
-    self:_save_progress_state(id,"local_selected","已确认本机阅读事件更新，准备后台上传",localp,remotep)
-    self.sync:end_progress_sync("本机位置更新，后台上传")
+    self:_save_progress_state(id,"local_selected","本机阅读位置较新；结束阅读时自动上传",localp,remotep)
+    self.sync:end_progress_sync("本机位置较新，等待结束阅读")
     if automatic then self:_open_sync_close("local position newer",false); self:_finish_auto_position_check(id,"local newer") end
-    UIManager:scheduleIn(.08,function() if self.ui and self.ui.document then self:upload_local_progress(false) end end)
     return true
 end
 
@@ -26172,12 +26922,12 @@ function Plugin:show_sync_status(detail)
             or failed_text(math.max(0,(tonumber(pending.progress or 0) or 0)-(tonumber(pending.progress_active or 0) or 0)),
                 self:progress_sync_label())
         local rows={
-            {text="总状态",post_text=self:_home_sync_status_label(),enabled=false,bold=true},
+            {text="手动同步",sub_item_table_func=function() return self:sync_now_menu() end},
         }
         local total_failed=tonumber(pending.failed_total or 0) or 0
         if total_failed>0 then
-            rows[#rows+1]={text="全部重新同步",post_text=tostring(total_failed).." 项",
-                callback=function() self:_sync_home_pending({source="sync_status_all"}) end}
+            rows[#rows+1]={text="重试失败项目",post_text=tostring(total_failed).." 项",
+                callback=function() self:_confirm_sync_retry() end}
         end
         rows[#rows+1]={text="阅读进度",post_text=progress_status,
             enabled=(tonumber(pending.progress or 0) or 0)>0,
@@ -26536,14 +27286,13 @@ function Plugin:_repair_downloaded_book(book_ref,confirmed)
         return true
     end
     local annotations_only=report.repair_kind=="annotations"
+    if annotations_only then
+        self:info("这是旧版划线与想法下载留下的批注状态。新版本的评论通过阅读器独立获取；无需重新生成旧评论版 EPUB。")
+        return true
+    end
     local title=tostring(stored.title or record.title or "本书")
     if confirmed~=true then
-        local text
-        if annotations_only then
-            text="《"..title.."》正文已经生成，但部分划线与想法未完整下载。\n\n修复时只补缺失内容，已完成正文和阅读位置会保留。"
-        else
-            text="《"..title.."》的书籍内容或章节映射需要修复。\n\n将优先使用现有断点，只补缺失内容；新文件验证成功前不会替换原文件。"
-        end
+        local text="《"..title.."》的书籍内容或章节映射需要修复。\n\n将优先使用现有正文断点，只补缺失内容；新文件验证成功前不会替换原文件。"
         UIManager:show(ConfirmBox:new{
             text=text,ok_text="开始修复",cancel_text="取消",
             ok_callback=function() self:_repair_downloaded_book(id,true) end,
@@ -26555,8 +27304,8 @@ function Plugin:_repair_downloaded_book(book_ref,confirmed)
         return false
     end
     local book={bookId=id,title=stored.title or record.title,author=stored.author or record.author,cover=stored.cover}
-    local options=BookIntegrity.repair_options(record)
-    self:status_toast("修复书籍",annotations_only and "正在补全缺失的划线与想法" or "正在检查并补全书籍内容",4)
+    local options=b4_content_only_options(BookIntegrity.repair_options(record))
+    self:status_toast("修复书籍","正在检查并补全书籍内容",4)
     return self:download(book,options,false,function(new_record)
         self.store:reload()
         if type(new_record)=="table" and new_record.pending_install==true then
@@ -26571,8 +27320,7 @@ function Plugin:_repair_downloaded_book(book_ref,confirmed)
             self.store:save_session(id,{book_integrity_repaired_at=os.time(),book_integrity_error=false})
             local session=self.store:session(id) or {}
             local extra=session.sync_repair_required==true and "\n\n书籍已修复。阅读同步仍需在打开本书后重新验证。" or ""
-            self:info((annotations_only and "书籍修复完成。\n\n已补全缺失的划线与想法，正文和阅读位置未重新下载。"
-                or "书籍修复完成。\n\n缺失内容已补全，新文件已经通过检查。")..extra)
+            self:info("书籍修复完成。\n\n缺失内容已补全，新文件已经通过检查。"..extra)
         else
             self.store:save_session(id,{book_integrity_error=checked.error or checked.repair_kind,book_integrity_checked_at=os.time()})
             self:info("书籍仍有未完成内容：\n"..tostring(checked.error or (checked.annotation_pending and "部分划线与想法仍待修复" or "完整性检查未通过")))
@@ -26630,7 +27378,7 @@ function Plugin:scan_downloaded_books_for_integrity_repair()
             elseif record then
                 local report=BookIntegrity.inspect(self.store,id,record)
                 if report.repair_kind~="none" then
-                    local label=report.repair_kind=="annotations" and "批注待修复" or "书籍待修复"
+                    local label="书籍待修复"
                     rows[#rows+1]={text=tostring(book.title or record.title or id),post_text=label,
                         callback=function() self:_repair_downloaded_book(book_id) end}
                 end
@@ -27340,7 +28088,7 @@ function Plugin:download_settings_menu()
     local policy_label=policy=="allow" and "允许后台下载" or (policy=="after_reading" and "退出阅读后下载" or "每次询问")
     local items={
         {text="阅读时下载策略",post_text=policy_label,sub_item_table_func=function() return self:download_reader_policy_menu() end},
-        {text="自动准备下一章",post_text="单章节阅读 · 隐藏缓存，不提前加入本地书架",checked_func=function() return self.store:preferences().chapter_prefetch_enabled==true end,keep_menu_open=true,callback=function() self:_toggle_chapter_prefetch() end},
+        {text="自动准备下一章",checked_func=function() return self.store:preferences().chapter_prefetch_enabled==true end,keep_menu_open=true,callback=function() self:_toggle_chapter_prefetch() end},
         {text="章节末尾连续阅读",post_text="最后一页继续翻进入下一章",checked_func=function() return self.store:preferences().chapter_continuous_enabled~=false end,keep_menu_open=true,callback=function() self:_toggle_chapter_continuous() end},
         {text="下载网络",post_text=self:_download_network_mode_label(),sub_item_table_func=function() return self:download_network_mode_menu() end},
         {text="下载关键进度提示",checked_func=function() return self.store:preferences().download_notice_enabled~=false end,keep_menu_open=true,callback=function() self:_toggle_preference("download_notice_enabled") end},
@@ -28622,21 +29370,34 @@ function Plugin:show_thought_favorites(options)
     local sort=options.sort or "saved"
     local reopen=function() self:show_thought_favorites(options) end
     local items={}
-    if #rows>1 then
-        items[#items+1]={
-            icon="settings",label="排序方式",text="排序方式",
-            value=self:_thought_favorite_sort_label(sort),post_text=self:_thought_favorite_sort_label(sort),
-            callback=function() self:_show_thought_favorite_sort(options) end,
-        }
+    local tools={
+        {icon="settings",label="排序方式",value=self:_thought_favorite_sort_label(sort),
+            callback=function() self:_show_thought_favorite_sort(options) end},
+        {icon="search",label="搜索收藏评论",callback=function()
+            self:_search_thought_favorites(options)
+        end},
+        {icon="bookmark",label="全部收藏",callback=function()
+            local next_options=U.copy(options);next_options.book_id=nil;next_options.chapter_uid=nil
+            next_options.query=nil;next_options.scope_label="我的评论收藏"
+            self:show_thought_favorites(next_options)
+        end},
+    }
+    local books=ThoughtFavorites.books(self.store) or {}
+    if #books>0 then
+        tools[#tools+1]={icon="current-book",label="按书籍筛选",value=tostring(#books).." 本",
+            callback=function() self:_show_thought_favorite_books(options) end}
     end
-    if U.trim(tostring(options.book_id or ""))=="" then
-        local books=ThoughtFavorites.books(self.store) or {}
-        if #books>1 then
-            items[#items+1]={
-                icon="current-book",label="按书籍查看",text="按书籍查看",
-                value=tostring(#books).." 本",post_text=tostring(#books).." 本",
-                callback=function() self:_show_thought_favorite_books(options) end,
-            }
+    local scope=self:_current_thought_favorite_scope()
+    if scope.book_id~="" then
+        tools[#tools+1]={icon="current-book",label="本书收藏",callback=function()
+            local opts=U.copy(options);opts.book_id=scope.book_id;opts.chapter_uid=nil
+            opts.scope_label="本书评论收藏";self:show_thought_favorites(opts)
+        end}
+        if scope.chapter_uid~="" then
+            tools[#tools+1]={icon="bookmark",label="本章收藏",callback=function()
+                local opts=U.copy(options);opts.book_id=scope.book_id;opts.chapter_uid=scope.chapter_uid
+                opts.scope_label="本章评论收藏";self:show_thought_favorites(opts)
+            end}
         end
     end
 
@@ -28676,13 +29437,24 @@ function Plugin:show_thought_favorites(options)
         local subtitle=tostring(#rows).." 条 · "..self:_thought_favorite_sort_label(sort)
         if U.trim(tostring(options.query or ""))~="" then subtitle="“"..tostring(options.query).."” · "..subtitle end
         return ReaderListDialog.show{
-            title=title,subtitle=subtitle,items=items,page_size=6,
+            title=title,subtitle=subtitle,page_size=6,
+            initial_page=options.initial_page or 1,
+            initial_category=options.initial_category or "favorites",
+            on_page_change=function(page,category)
+                options.initial_page=page;options.initial_category=category
+            end,
+            categories={{key="favorites",label="收藏",items=items},
+                {key="tools",label="筛选 · 排序",items=tools}},
             on_back=options.back_callback or function() self:_show_reader_comment_center() end,
             on_home=function() return self:_reader_home_action("thought favorites") end,
         }
     end
 
-    local menu_items={}
+    local menu_items={{text="筛选与排序",sub_item_table_func=function()
+        local out={}
+        for _,tool in ipairs(tools) do out[#out+1]={text=tool.label,post_text=tool.value,callback=tool.callback} end
+        return out
+    end}}
     for _,item in ipairs(items) do
         menu_items[#menu_items+1]={text=item.text,post_text=item.post_text,close_before_action=true,callback=item.callback}
     end
@@ -29002,7 +29774,9 @@ function Plugin:_show_thought_href(href)
     local info=Thoughts.parse_href(href); if not info then return false end
     -- A disabled comment layer still owns its internal links. Consume them
     -- silently instead of letting KOReader report #miuthought as invalid.
-    if not self:_thoughts_enabled() then return true end
+    -- The visual overlay switch must not block explicit offline list actions.
+    -- Legacy in-book links remain suppressed when the overlay is hidden.
+    if not self:_thoughts_enabled() and not self._opening_cached_comment then return true end
     if self._thought_popup_busy or self._thought_popup then return true end
     local runtime=self._download_runtime
     if runtime and self.download_task and self.download_task:busy() and runtime.comment_slow_notice~=true then
@@ -29076,6 +29850,159 @@ function Plugin:_thought_edge_page_turn(ges)
     logger.info("[MiuRead][ThoughtPopup] edge annotation tap converted to page turn",
         "percent=",tostring(percent),"direction=",diff<0 and "backward" or "forward")
     return true
+end
+
+-- B3: public comments are a non-invasive ReaderView module for pure EPUBs.
+-- Old notes EPUBs retain their original link-based rendering and never get a
+-- second overlaid set of marks. No hook writes to the document or cloud.
+function Plugin:_teardown_comment_overlay()
+    if self._comment_overlay_task then
+        UIManager:unschedule(self._comment_overlay_task)
+        self._comment_overlay_task=nil
+    end
+    if self._comment_overlay_touch and self.ui and self.ui.unRegisterTouchZones then
+        pcall(self.ui.unRegisterTouchZones,self.ui,{{id="miuread_public_comment_tap",
+            overrides={"tap_forward","tap_backward","tap_link","readerhighlight_tap"}}})
+    end
+    self._comment_overlay_touch=nil
+    if self.ui and self.ui.view and type(self.ui.view.view_modules)=="table" then
+        self.ui.view.view_modules.miuread_public_comment_overlay=nil
+    end
+    self._comment_overlay=nil
+    self._comment_overlay_chapter=nil
+    self._comment_overlay_document=nil
+    self._comment_overlay_toc_index=nil
+end
+
+function Plugin:_install_comment_overlay()
+    if self._comment_overlay then return true end
+    local ui=self.ui
+    if not ui or not ui.document or not ui.view
+        or type(ui.view.registerViewModule)~="function"
+        or self:_current_book_supports_miuread_marks()
+        or not self:_reader_session_is_weread() then return false end
+    local doc=ui.document
+    if type(doc.getXPointer)~="function"
+        or type(doc.getScreenBoxesFromPositions)~="function"
+        or doc.info and doc.info.has_pages then return false end
+    local Overlay=require("miuread.comment_overlay")
+    local overlay=Overlay:new()
+    overlay.ui=ui;overlay.view=ui.view
+    overlay:setEnabled(self:_thoughts_enabled())
+    local ok,err=pcall(ui.view.registerViewModule,ui.view,
+        "miuread_public_comment_overlay",overlay)
+    if not ok then
+        logger.warn("[MiuRead][CommentOverlay] register failed",tostring(err))
+        return false
+    end
+    self._comment_overlay=overlay
+    self._comment_overlay_document=doc
+    local touch_ok,device=pcall(require,"device")
+    if touch_ok and device and device.isTouchDevice and device:isTouchDevice()
+        and type(ui.registerTouchZones)=="function" then
+        local registered=pcall(ui.registerTouchZones,ui,{{
+            id="miuread_public_comment_tap",ges="tap",
+            screen_zone={ratio_x=0,ratio_y=0,ratio_w=1,ratio_h=1},
+            overrides={"tap_forward","tap_backward","tap_link","readerhighlight_tap"},
+            handler=function(ges) return self:_on_comment_overlay_tap(ges) end,
+        }})
+        self._comment_overlay_touch=registered==true
+    end
+    return true
+end
+
+function Plugin:_on_comment_overlay_tap(ges)
+    if not self:_thoughts_enabled() or self:_reader_gesture_guard_active()
+        or not ges or not ges.pos or self._thought_popup_busy then return false end
+    local overlay=self._comment_overlay
+    if not overlay or overlay.enabled~=true then return false end
+    local width=Device.screen and Device.screen:getWidth() or 0
+    if width>0 and (ges.pos.x<width*.15 or ges.pos.x>width*.85) then return false end
+    local hit=overlay:hitTest(ges.pos)
+    if not hit then return false end
+    return self:_show_thought_href(Thoughts.href(hit.book_id,hit.chapter_uid,hit.range))
+end
+
+function Plugin:_refresh_current_comment_overlay(force)
+    local overlay=self._comment_overlay
+    if not overlay then
+        if not self:_install_comment_overlay() then return false end
+        overlay=self._comment_overlay
+    end
+    if not self.ui or not self.ui.document or self._comment_overlay_document~=self.ui.document
+        or self:_current_book_supports_miuread_marks() then
+        self:_teardown_comment_overlay(); return false
+    end
+    overlay:setEnabled(self:_thoughts_enabled())
+    if not self:_thoughts_enabled() then return true end
+    local scope=self:_current_thought_favorite_scope()
+    if scope.book_id=="" or scope.chapter_uid=="" then
+        overlay:setRecords({});return false
+    end
+    local context=self:_current_book_record()
+    if not context or not context.record then
+        -- A stale reader session or missing book record must not leave marks
+        -- from the previously opened chapter on the active page.
+        overlay:setRecords({})
+        self._comment_overlay_chapter=nil
+        return false
+    end
+    local key=scope.book_id..":"..scope.chapter_uid
+    if force~=true and self._comment_overlay_chapter==key then return true end
+    local groups=self.comment_sync:load(scope.book_id,scope.chapter_uid)
+    if type(groups)~="table" then
+        overlay:setRecords({});self._comment_overlay_chapter=key
+        return false
+    end
+    -- Projection is conservative and offline-only. A failed match stays
+    -- available in the chapter's independent cached comment list.
+    local Locator=require("miuread.comment_locator")
+    local ok,records,stats=pcall(Locator.resolve,self.store,self.reader,self.ui,
+        scope.book_id,scope.chapter_uid,context.record,groups)
+    if not ok then
+        overlay:setRecords({})
+        self._comment_overlay_chapter=nil
+        logger.warn("[MiuRead][CommentOverlay] locate failed",tostring(records))
+        return false
+    end
+    overlay:setRecords(records)
+    self._comment_overlay_chapter=key
+    logger.info("[MiuRead][CommentOverlay] projected","chapter=",scope.chapter_uid,
+        "matched=",tostring(stats and stats.matched or 0),
+        "unmatched=",tostring(stats and stats.unmatched or 0),
+        "reason=",tostring(stats and stats.error or ""))
+    UIManager:setDirty(self.ui,"ui")
+    return true
+end
+
+function Plugin:_schedule_comment_overlay_refresh(force)
+    if not self:_thoughts_enabled() or not self:_reader_session_is_weread() then return end
+    if force~=true and self._comment_overlay and self.ui and self.ui.toc then
+        local toc=self.ui.toc
+        local xp=self.ui.rolling and self.ui.rolling.xpointer
+        if type(toc.getTocIndexByPage)=="function" and xp then
+            local ok,index=pcall(toc.getTocIndexByPage,toc,xp)
+            if ok and index and self._comment_overlay_toc_index==index then return end
+            if ok and index then self._comment_overlay_toc_index=index end
+        end
+    end
+    if self._comment_overlay_task then UIManager:unschedule(self._comment_overlay_task) end
+    local task
+    task=function()
+        if self._comment_overlay_task~=task then return end
+        self._comment_overlay_task=nil
+        if self.ui and self.ui.document then self:_refresh_current_comment_overlay(force==true) end
+    end
+    self._comment_overlay_task=task
+    UIManager:scheduleIn(.8,task)
+end
+
+function Plugin:onUpdatePos()
+    if self._comment_overlay then self._comment_overlay:invalidate() end
+end
+
+function Plugin:onDocumentRerendered()
+    if self._comment_overlay then self._comment_overlay:invalidate() end
 end
 
 function Plugin:_on_thought_tap(ges)
@@ -29251,8 +30178,12 @@ function Plugin:on_sync_record_ready(current)
         local record=current.record or {}
         local variant=tostring(current.variant or record.variant or "")
         if record.annotation_requested==true or variant:find("notes",1,true) then
+            self:_teardown_comment_overlay()
             self:_setup_thought_tap()
             self:_sync_reader_annotation_mark_style("sync record ready")
+        else
+            self:_install_comment_overlay()
+            self:_schedule_comment_overlay_refresh(false)
         end
         -- ReaderReady already records the file immediately in LuaSettings
         -- memory. Once Sync resolves the canonical book id, backfill that id
@@ -29405,6 +30336,7 @@ function Plugin:_prepare_reader_disappearance(reason)
     end
     self._repair_prompt_open=false
     self:_teardown_thought_tap()
+    self:_teardown_comment_overlay()
     self._progress_prompted_book_id=nil
     self._progress_check_running=false
     return true
@@ -29827,6 +30759,9 @@ function Plugin:onReaderReady()
             self:_setup_thought_tap()
             self:_sync_reader_annotation_mark_style("reader ready")
             logger.info("[MiuRead][ThoughtPopup] local tap ready before cloud sync")
+        elseif self:_reader_session_is_weread() then
+            self:_install_comment_overlay()
+            self:_schedule_comment_overlay_refresh(false)
         end
         local pending=HOME_SESSION.pending_annotation_jump
         if type(pending)=="table" then
@@ -30128,6 +31063,8 @@ function Plugin:onPageUpdate(page)
     if weread then
         self.sync:on_page(page)
         self:_schedule_thought_prewarm()
+        -- No network or full-document search on the page-turn hot path.
+        self:_schedule_comment_overlay_refresh(false)
     end
 end
 function Plugin:_annotation_sync_preferences()
@@ -31566,6 +32503,9 @@ function Plugin:onResume()
     self._miuread_suspended=false
     HOME_SESSION.suspended=false
     StatusToast.set_blocked(false)
+    -- The suspend freeze stops the download idle pump; re-arm it in case a
+    -- hibernated download is still waiting for a memory window.
+    self:_download_idle_pump_ensure("device resumed")
     -- Ref #92: on Kobo the radio is expected to be OFF at the raw wake edge
     -- because KOReader unloads Wi-Fi for suspend. Restore the *pre-suspend user
     -- intent* through KOReader's own network backend instead of interpreting
@@ -31655,6 +32595,12 @@ function Plugin:onResume()
         logger.info("[MiuRead][Power] resume stable",
             "state=",normal.state,"generation=",tostring(normal.generation))
         self:_pump_finished_status(true)
+        -- UI timers may have stopped during physical suspend. Re-evaluate a
+        -- durable memory-wait queue now that the device is fully resumed.
+        local waiting=self.store:download_queue()[1]
+        if waiting and (waiting.wait_reason=="low_memory" or waiting.wait_reason=="background_busy") then
+            UIManager:scheduleIn(.6,function() self:_start_next_queued_download() end)
+        end
     end)
 
     local reader_active=self.ui and self.ui.document
@@ -31950,6 +32896,7 @@ function Plugin:_schedule_post_reader_work(reason,delay,phase)
 end
 
 function Plugin:onCloseDocument()
+    self:_teardown_comment_overlay()
     if self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
     BookExcerptDialog.close("document close")
     local closing_path=normalized_reader_file(self:_current_document_path())

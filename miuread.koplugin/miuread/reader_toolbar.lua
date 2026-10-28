@@ -16,6 +16,7 @@ local Widget = require("ui/widget/widget")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local TransientGuard = require("miuread.transient_guard")
+local DialogTransition = require("miuread.dialog_transition")
 local Skin = require("miuread.reader_skin")
 local Ui = require("miuread.ui_components")
 local UiScale = require("miuread.ui_scale")
@@ -351,7 +352,8 @@ local Toolbar = InputContainer:extend{
     name = "miuread_reader_toolbar",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Full-screen gesture capture, partial opaque ink frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     closed = false,
@@ -904,13 +906,7 @@ function Toolbar:onCloseWidget()
     self.pending_action = nil
     self.closed = true
     if live_toolbar == self then live_toolbar = nil end
-    if region then UIManager:setDirty(nil, function() return "ui", region end) end
-    if action then
-        UIManager:scheduleIn(.04, function()
-            local ok, err = pcall(action)
-            if not ok then logger.warn("[MiuRead][ReaderToolbar] action failed", tostring(err)) end
-        end)
-    end
+    DialogTransition.after_close(region, action, "ReaderToolbar")
 end
 
 local M = {}

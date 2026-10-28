@@ -1614,13 +1614,10 @@ function NativePopup:init()
 end
 
 function NativePopup:onShow()
-    if self.online_likes_enabled == true then
-        UIManager:setDirty(self, function() return "ui", self.popup_dimen end)
-    else
-        -- Keep the beta.20 waveform exactly when the optional online-like
-        -- feature is disabled.
-        UIManager:setDirty(self, function() return "partial", self.popup_dimen end)
-    end
+    -- A newly opened comment panel must get a legible UI waveform, even when
+    -- online likes are off. Fast partials are only suitable for minor updates,
+    -- not first paint of borders, author names and multiline text.
+    UIManager:setDirty(self, function() return "ui", self.popup_dimen end)
 end
 
 function NativePopup:onTapPage(_, ges)
@@ -1686,12 +1683,10 @@ function NativePopup:onCloseWidget()
         pcall(callback)
     end
     if region then
-        if self.online_likes_enabled == true then
-            UIManager:setDirty(nil, function() return "ui", region end)
-        else
-            -- Match beta.20 closing behavior when likes are off.
-            UIManager:setDirty("all", function() return "partial", region end)
-        end
+        -- Always repaint the newly exposed reader pixels, not just refresh
+        -- old framebuffer memory with a fast waveform.
+        local DialogTransition = require("miuread.dialog_transition")
+        UIManager:nextTick(function() DialogTransition.restore(region) end)
     end
 end
 

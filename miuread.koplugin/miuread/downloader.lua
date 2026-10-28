@@ -993,7 +993,10 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         elseif preview_mode=="partial" then preview_name="【试读版·部分内容】"
         else preview_name="【试读版】" end
     end
-    local formal_filename=U.safe_name(book.title,"book")..preview_name..range_name..chapter_name.." ["..suffix.."].epub"
+    -- B4: newly generated clean books have no redundant edition suffix.
+    -- The already-installed clean record below retains its exact former path.
+    local edition_suffix=kind=="notes" and (" ["..suffix.."]") or ""
+    local formal_filename=U.safe_name(book.title,"book")..preview_name..range_name..chapter_name..edition_suffix..".epub"
     local filename=hidden_prefetch and (U.id_name(opt.chapter_uid).."-"..storage_kind..".epub") or formal_filename
     local path=hidden_prefetch and self.store:hidden_prefetch_path(book.bookId,opt.chapter_uid,storage_kind) or self.store:epub_path(filename)
     -- Keep the exact path of an existing variant. KOReader sidecar notes are
@@ -1101,9 +1104,34 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         "chapters=",tostring(#chapters),"assets=",tostring(#assets),
         "memory_kb=",tostring(math.floor(collectgarbage("count"))))
     local now=os.time()
+    -- The package loops never re-enter respect_reader_priority, so a
+    -- hibernate marker written mid-package used to be ignored until install
+    -- finished; on a small-memory device the run continued down to ~18 MiB
+    -- free and wedged the whole OS. Check the marker and a hard memory floor
+    -- here per entry: aborting discards only this package pass (chapters stay
+    -- checkpointed) and the parent parks the task for a later retry window.
+    local RuntimePressureWorker=require("miuread.runtime_pressure")
+    local package_abort_kb=RuntimePressureWorker.thresholds().package_abort
+    local package_guard_count=0
+    local function package_guard(force)
+        package_guard_count=package_guard_count+1
+        if not force and package_guard_count%16~=0 then return end
+        if type(opt.hibernating)=="function" and opt.hibernating() then
+            logger.warn("[MiuRead][Download] package aborted by hibernate marker")
+            error("__MIUREAD_HIBERNATE__:package")
+        end
+        local memory=RuntimePressureWorker.memory_snapshot(true)
+        local available=memory and tonumber(memory.available_kb or 0) or 0
+        if available>0 and available<package_abort_kb then
+            logger.warn("[MiuRead][Download] package aborted for memory",
+                "memory_kb=",tostring(available),"floor_kb=",tostring(package_abort_kb))
+            error("__MIUREAD_HIBERNATE__:package")
+        end
+    end
     local function package_progress(detail)
         detail=type(detail)=="table" and detail or {}
         ensure_not_cancelled()
+        package_guard()
         local current=math.max(0,tonumber(detail.current) or 0)
         local total=math.max(1,tonumber(detail.total) or 1)
         local phase=tostring(detail.phase or "package")
@@ -1126,6 +1154,8 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
             })
         end
     end
+    -- Check the very first package step, even for books with <16 callbacks.
+    package_guard(true)
     local built,build_error=pcall(Epub.build,temp_path,book,chapters,css,assets,cover,{
         schema=8,book_id=book.bookId,title=book.title,author=book.author,
         variant=storage_kind,base_variant=kind,standalone=standalone,chapter_uid=opt.chapter_uid,
@@ -1159,6 +1189,8 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
             unresolved=link_stats.unresolved or 0,critical=link_stats.unresolved_critical or 0},
     },package_progress)
     if not built then os.remove(temp_path); error(build_error) end
+    local boundary_ok,boundary_error=pcall(package_guard,true)
+    if not boundary_ok then os.remove(temp_path); error(boundary_error,0) end
     ensure_not_cancelled()
     if type(progress)=="function" then
         progress("package",1,1,book.title,{
@@ -1170,6 +1202,7 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
     local validation_last_report_at=0
     validation_options.on_progress=function(detail)
         ensure_not_cancelled()
+        package_guard()
         detail=type(detail)=="table" and detail or {}
         local current=math.max(0,tonumber(detail.current) or 0)
         local total=math.max(1,tonumber(detail.total) or 1)
@@ -1185,7 +1218,13 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
             })
         end
     end
-    local valid,validation_error=EpubInstaller.validate(temp_path,validation_options)
+    -- validate() can throw when its progress callback detects hibernation.
+    -- That exception must not leave a half-validated .miuread-new-*.epub.
+    local validation_call_ok,valid,validation_error=pcall(EpubInstaller.validate,temp_path,validation_options)
+    if not validation_call_ok then
+        os.remove(temp_path)
+        error(valid,0)
+    end
     if not valid then
         logger.warn("[MiuRead][Download] EPUB validation failed",tostring(validation_error))
         os.remove(temp_path)
@@ -1251,6 +1290,8 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         end
         opt.translation_batch_summary=total>0 and {total=total,available=available} or nil
     end
+    local preinstall_ok,preinstall_error=pcall(package_guard,true)
+    if not preinstall_ok then os.remove(temp_path); error(preinstall_error,0) end
     logger.info("[MiuRead][Download] low-memory EPUB package completed",
         "bytes=",tostring(U.file_size(temp_path) or 0),
         "memory_kb=",tostring(math.floor(collectgarbage("count"))))

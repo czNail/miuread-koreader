@@ -25,6 +25,23 @@ class PrepareBetaReleaseTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_auto_cleans_identical_historical_sections_for_manual_release(self):
+        previous = self.changelog.read_text()
+        self.changelog.write_text(previous + "\n# Changelog\n\n" + previous)
+        self.assertTrue(prepare(self.root, "6.0.1-beta.2", "修复发布准备"))
+        log = self.changelog.read_text()
+        self.assertEqual(log.count("# Changelog"),1)
+        self.assertEqual(log.count("## 6.0.0-beta.1"),1)
+        self.assertEqual(log.count("## 6.0.1-beta.2"),1)
+        self.assertFalse(prepare(self.root, "6.0.1-beta.2", "修复发布准备"))
+
+    def test_conflicting_history_fails_without_modifying_files(self):
+        self.changelog.write_text("# Changelog\n\n## 6.0.0-beta.1\n- first\n## 6.0.0-beta.1\n- different\n")
+        before=[p.read_bytes() for p in (self.config,self.meta,self.changelog)]
+        with self.assertRaisesRegex(ValueError, "Conflicting changelog"):
+            prepare(self.root,"6.0.1-beta.2","note")
+        self.assertEqual(before,[p.read_bytes() for p in (self.config,self.meta,self.changelog)])
+
     def test_prepares_and_preserves_history(self):
         changed = prepare(self.root, "6.0.1-beta.2", "修复书架刷新 | 保留阅读进度")
         self.assertTrue(changed)
@@ -41,10 +58,20 @@ class PrepareBetaReleaseTest(unittest.TestCase):
         self.assertFalse(prepare(self.root, "6.0.1-beta.2", "修复书架刷新"))
         self.assertEqual(before, [f.read_bytes() for f in (self.config, self.meta, self.changelog)])
 
-    def test_existing_version_notes_cannot_be_rewritten(self):
+    def test_prepared_unpublished_version_notes_may_be_edited(self):
         prepare(self.root, "6.0.1-beta.2", "修复书架刷新")
-        with self.assertRaisesRegex(ValueError, "不一致"):
-            prepare(self.root, "6.0.1-beta.2", "不同的更新说明")
+        self.assertTrue(prepare(self.root, "6.0.1-beta.2", "不同的更新说明 | 保留进度保护"))
+        log = self.changelog.read_text()
+        self.assertIn("- 不同的更新说明\n- 保留进度保护", log)
+        self.assertNotIn("- 修复书架刷新", log)
+        self.assertEqual(log.count("## 6.0.1-beta.2"), 1)
+        self.assertFalse(prepare(self.root, "6.0.1-beta.2", "不同的更新说明 | 保留进度保护"))
+
+    def test_prepared_version_without_changelog_fails_closed(self):
+        self.config.write_text(self.config.read_text().replace("6.0.0-beta.1", "6.0.1-beta.2"))
+        self.meta.write_text(self.meta.read_text().replace("6.0.0-beta.1", "6.0.1-beta.2"))
+        with self.assertRaisesRegex(ValueError, "缺少对应版本条目"):
+            prepare(self.root, "6.0.1-beta.2", "修复")
 
     def test_rejects_rollback_and_invalid_version(self):
         with self.assertRaisesRegex(ValueError, "版本回退"):
