@@ -876,31 +876,134 @@ local function review_coverage(response,batch)
     return count
 end
 
+-- Preserve every valid range and its reviews when comparing Web/Gateway. Both
+-- providers can return the same range with different data. No empty response
+-- is allowed to erase nonempty data from another provider.
+local function review_rows(value)
+    if type(value)~="table" then return {} end
+    return type(value.reviews)=="table" and value.reviews
+        or (type(value.updated)=="table" and value.updated or {})
+end
+local function review_items(row)
+    if type(row)~="table" then return {} end
+    return type(row.pageReviews)=="table" and row.pageReviews
+        or (type(row.reviews)=="table" and row.reviews
+        or (type(row.updated)=="table" and row.updated or {}))
+end
+local function review_count(value)
+    local count=0
+    for _,row in ipairs(review_rows(value)) do count=count+#review_items(row) end
+    return count
+end
+local function join_review_responses(web,agent,batch)
+    local allowed,by_range,sequence={},{},{}
+    for _,item in ipairs(batch or {}) do allowed[tostring(item.range or "")]=true end
+    local function merge(source)
+        for _,row in ipairs(review_rows(source)) do
+            local key=type(row)=="table" and tostring(row.range or row.markRange or "") or ""
+            if allowed[key] and type(row)=="table" then
+                local incoming=review_items(row)
+                local target=by_range[key]
+                if not target then
+                    target={range=key,pageReviews={},_miu_sources={}}
+                    by_range[key]=target
+                    sequence[#sequence+1]=target
+                end
+                local seen=target._miu_seen or {}
+                target._miu_seen=seen
+                for _,entry in ipairs(incoming) do
+                    if type(entry)=="table" then
+                        local key_id=tostring(entry.reviewId or entry.id or "")
+                        local nested=type(entry.review)=="table" and entry.review or entry
+                        if key_id=="" then key_id=tostring(nested.reviewId or nested.id or "") end
+                        if key_id=="" then key_id=tostring(nested.content or nested.text or "")
+                            .. "|" .. tostring(nested.createTime or nested.createdAt or "") end
+                        if not seen[key_id] then
+                            seen[key_id]=true
+                            target.pageReviews[#target.pageReviews+1]=entry
+                        end
+                    end
+                end
+                target._miu_sources[#target._miu_sources+1]=source._annotation_source or "unknown"
+                -- Explicit total=0 is only authoritative when both responses agree.
+                local total=tonumber(row.totalCount or row.total or row.reviewCount)
+                if total~=nil then target._miu_total=math.max(total,tonumber(target._miu_total or 0) or 0) end
+            end
+        end
+    end
+    merge(web);merge(agent)
+    local uncertain={}
+    for _,item in ipairs(sequence) do
+        if item._miu_total==nil and #item.pageReviews==0 then uncertain[item.range]=true end
+        if item._miu_total~=nil and #item.pageReviews<item._miu_total then uncertain[item.range]=true end
+        item._miu_seen=nil
+    end
+    return {reviews=sequence,_annotation_source="merged",_miu_uncertain_ranges=uncertain}
+end
+
+local function mark_unverified_single_source(response)
+    if type(response)~="table" then return response end
+    local uncertain={}
+    for _,row in ipairs(review_rows(response)) do
+        if type(row)=="table" then
+            local key=tostring(row.range or row.markRange or "")
+            local n=#review_items(row)
+            local expected=tonumber(row.totalCount or row.reviewCount or row.total)
+            if key~="" and (n==0 and expected~=0 or expected and expected>n) then
+                uncertain[key]=true
+            end
+        end
+    end
+    response._miu_uncertain_ranges=uncertain
+    return response
+end
+
 function Api:readreviews(id, chapter_uid, batch)
     if self.web_annotation_auth_dead==true then
         logger.dbg("[MiuRead][API] web readReviews skipped; annotation circuit open",
             "book=",tostring(id),"chapter=",tostring(chapter_uid),"ranges=",tostring(#(batch or {})))
-        return self:_agent_readreviews(id,chapter_uid,batch)
+        return mark_unverified_single_source(self:_agent_readreviews(id,chapter_uid,batch))
     end
     local ok,value=pcall(self._web_readreviews,self,id,chapter_uid,batch)
     if ok then
         self.web_annotation_auth_dead=false
         local covered=review_coverage(value,batch)
-        if covered<#(batch or {}) then
-            -- An ambiguous or incomplete Web success used to be recorded as
-            -- an authoritative empty chapter. Try the official Gateway once.
+        local entries=review_count(value)
+        logger.info("[MiuRead][Comments] Web batch", "book=",tostring(id),
+            "chapter=",tostring(chapter_uid),"requested=",tostring(#(batch or {})),
+            "covered=",tostring(covered),"entries=",tostring(entries))
+        local declared=0
+        for _,group in ipairs(review_rows(value)) do
+            local count=tonumber(group.totalCount or group.reviewCount or group.total)
+            if count and count>0 then declared=declared+count end
+        end
+        if covered<#(batch or {}) or entries==0 or (declared>0 and entries<declared) then
+            -- Coverage alone cannot establish comment completeness. Check the
+            -- second source even if all Web ranges were present but empty.
             local agent_ok,agent=pcall(self._agent_readreviews,self,id,chapter_uid,batch)
-            if agent_ok and review_coverage(agent,batch)>covered then
-                logger.info("[MiuRead][API] readreviews Gateway recovered incomplete Web response",
-                    "book=",tostring(id),"chapter=",tostring(chapter_uid),
-                    "web_ranges=",tostring(covered),"gateway_ranges=",tostring(review_coverage(agent,batch)))
-                return agent
+            if agent_ok then
+                local combined=join_review_responses(value,agent,batch)
+                logger.info("[MiuRead][Comments] cross-source batch", "book=",tostring(id),
+                    "chapter=",tostring(chapter_uid),"gateway_ranges=",tostring(review_coverage(agent,batch)),
+                    "gateway_entries=",tostring(review_count(agent)),
+                    "merged_entries=",tostring(review_count(combined)))
+                return combined
             end
-            if not agent_ok then
-                propagate_control_error(agent)
-                logger.warn("[MiuRead][API] readreviews Gateway fallback unavailable",
-                    "book=",tostring(id),"chapter=",tostring(chapter_uid),
-                    "error=",U.first_line(agent,120))
+            propagate_control_error(agent)
+            logger.warn("[MiuRead][Comments] Gateway cross-check unavailable",
+                "book=",tostring(id),"chapter=",tostring(chapter_uid),
+                "error=",U.first_line(agent,120))
+            -- A fully empty unverified Web response must not be permanently
+            -- committed as an authoritative finished chapter.
+            if entries==0 or (declared>0 and entries<declared) then
+                local uncertain={}
+                for _,row in ipairs(review_rows(value)) do
+                    local key=tostring(row.range or row.markRange or "")
+                    local n=#review_items(row)
+                    local expected=tonumber(row.totalCount or row.reviewCount or row.total)
+                    if key~="" and (n==0 or (expected and expected>n)) then uncertain[key]=true end
+                end
+                value._miu_uncertain_ranges=uncertain
             end
         end
         return value
@@ -914,7 +1017,7 @@ function Api:readreviews(id, chapter_uid, batch)
     logger.warn("[MiuRead][API] web readReviews unavailable; using Skill Gateway",
         "book=",tostring(id),"chapter=",tostring(chapter_uid),
         "ranges=",tostring(#(batch or {})),"error=",tostring(value))
-    return self:_agent_readreviews(id,chapter_uid,batch)
+    return mark_unverified_single_source(self:_agent_readreviews(id,chapter_uid,batch))
 end
 
 Api._scalar = scalar

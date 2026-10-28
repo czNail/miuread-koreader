@@ -568,7 +568,8 @@ local function validate_terminal_progress(book,position)
     local last_uid=last_readable_chapter_uid(book)
     if not last_uid then return false,"refusing unverified 100% progress without a readable final chapter" end
     if tostring(position.chapter_uid or "")~=last_uid then
-        return false,"refusing 100% progress outside final readable chapter"
+        return false,"refusing 100% progress outside final readable chapter (local_uid="
+            .. tostring(position.chapter_uid or "-") .. ", final_uid=" .. tostring(last_uid) .. ")"
     end
     return true
 end
@@ -790,20 +791,27 @@ function Worker.run(job)
     local protocol_time_only = job.time_only == true and not reading_time_compat
     local position_override
     if reading_time_compat then
-        -- beta.3: a full read-time report must echo the *Web* position it may
-        -- overwrite, never the Agent gateway position.  If Web cannot expose a
-        -- trustworthy coordinate, defer the time report rather than risk a
-        -- destructive position write.  The parent retains retry-safe intervals.
-        local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)
-        if refreshed then
-            position_override = normalize_cloud_anchor(nil, book)
-            if position_override then position_override.source="web_cookie_read_time_guard" end
+        -- beta.17 user policy: Kindle is the authority for both progress and
+        -- position-bearing time reports. Do not gate time on Web getProgress,
+        -- which currently returns a parameter-format error for some books.
+        -- A time report is a full /web/book/read write, not a harmless timer:
+        -- require an exact native chapter and safe percentage before dispatch.
+        local local_position,local_error=estimate_position(book,progress_ratio)
+        if local_position and local_position.native_offset==true
+            and tostring(local_position.offset_basis or "")=="wr_data_co" then
+            local valid,why=validate_terminal_progress(book,local_position)
+            if valid and local_position.chapter_idx~=nil then
+                position_override=local_position
+                position_override.source="kindle_native_time_guard"
+            else
+                local_error=why or "native chapter index unavailable"
+            end
         end
         if not position_override then
-            return finish(settings, book, {
-                ok=false,error="fresh Web position unavailable: "..tostring(web_error or "incomplete coordinates"),
-                error_kind=web_error_kind or "context",meta={request_dispatched=false},
-            }, context_changed)
+            return finish(settings,book,{
+                ok=false,error="Kindle reading-time position unavailable: "..tostring(local_error or "invalid native coordinate"),
+                error_kind="context",meta={request_dispatched=false},
+            },context_changed)
         end
     end
     local accepted, result, first_error, first_kind, first_position, first_public, first_meta = attempt_report(

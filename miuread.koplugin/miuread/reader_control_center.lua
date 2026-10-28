@@ -292,19 +292,31 @@ function Center:_build_root()
         local pages = math.max(1, math.ceil(#flat / capacity))
         self._section_page = math.max(1, math.min(pages, tonumber(self._section_page) or 1))
         local first=(self._section_page-1)*capacity+1
-        local page_rows={}
-        for i=first, math.min(#flat,first+capacity-1) do page_rows[#page_rows+1]=flat[i].item end
+        local page_sections={}
         if self._section_page>1 then
-            table.insert(page_rows,1,{icon="back", label="上一页", keep_open=true, callback=function()
+            page_sections[#page_sections+1]={items={{icon="back",label="上一页",keep_open=true,callback=function()
                 self._section_page=self._section_page-1; self:_rebuild()
-            end})
+            end}}}
+        end
+        for i=first,math.min(#flat,first+capacity-1) do
+            local entry=flat[i]
+            local tail=page_sections[#page_sections]
+            if not tail or tostring(tail.title or "")~=entry.title or tail._nav then
+                tail={title=entry.title,items={}}
+                page_sections[#page_sections+1]=tail
+            end
+            tail.items[#tail.items+1]=entry.item
         end
         if self._section_page<pages then
-            page_rows[#page_rows+1]={icon="chevron-right",label="下一页",keep_open=true,callback=function()
+            page_sections[#page_sections+1]={items={{icon="chevron-right",label="下一页",keep_open=true,callback=function()
                 self._section_page=self._section_page+1; self:_rebuild()
-            end}
+            end}}}
         end
-        sections={{items=page_rows}}
+        -- Recalculate with section headers; shrink rows if this page contains more headers.
+        sections=page_sections
+        while item_h>1 and self:_sections_height(sections,section_title_h,item_h,gap)>row_budget do
+            item_h=item_h-1
+        end
     end
     local body_h = self:_sections_height(sections, section_title_h, item_h, gap)
     local content_h = header_h + tabs_h + gap + body_h

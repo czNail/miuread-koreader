@@ -5523,8 +5523,8 @@ function Plugin:_home_apply_section(section)
         shelf_pages=total_pages,
         empty_text=selected.empty,
         on_open_book=function(book,anchor,ges) self:_home_open_book(book,anchor,ges) end,
-        -- Home shelf books intentionally have no long-press action. All book
-        -- actions remain discoverable from the normal tap menu.
+        -- beta.17: preserve book-management access when a downloaded book taps straight into Reader.
+        on_hold_book=function(book,anchor) self:_home_hold_book(book,anchor) end,
         home_actions=self:_home_action_entries(),
         on_shelf_filter=right_callback,
         shelf_filter_label=right_label,
@@ -9119,6 +9119,7 @@ function Plugin:_home_show_full_shelf(title,rows,options)
             on_left_action=options.on_left_action,
             on_right_action=options.on_right_action,
             on_select=function(book,anchor) self:_home_open_book(book,anchor) end,
+            on_hold=function(book,anchor) self:_home_hold_book(book,anchor) end,
             on_page_changed=function(page,first,last,current)
                 if show_covers then self:_on_shelf_page(rows,current,page,first,last) end
             end,
@@ -14544,14 +14545,15 @@ function Plugin:_show_reader_comment_center(back_callback)
                 or {has_cache=false,status="not_fetched",comments=0}
             local can_fetch=scope.book_id~="" and scope.chapter_uid~=""
             local main_label
-            if cache.status=="partial" and can_fetch then main_label="继续获取本章评论"
-            elseif not cache.has_cache then main_label=cache.status=="error" and "重试获取本章评论" or "获取本章评论"
+            if (cache.status=="partial" or cache.status=="error") and can_fetch then
+                main_label=cache.has_cache and "继续获取本章评论" or "重试获取本章评论"
+            elseif not cache.has_cache then main_label="获取本章评论"
             else main_label="查看本章评论" end
             local content_rows={
                 {icon=cache.has_cache and "comment" or "download",label=main_label,
                     value=self:_reader_comment_status_label(scope),enabled=can_fetch,arrow=true,
                     callback=function()
-                        if cache.status=="partial" or not cache.has_cache then
+                        if cache.status=="partial" or cache.status=="error" or not cache.has_cache then
                             self:_fetch_current_chapter_comments(false,reopen)
                         else self:_show_current_chapter_comments(scope,reopen) end
                     end},
@@ -18078,8 +18080,8 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
         on_back=function() return self:_home_handle_back() end,
         on_empty_account=function() self:_home_open_section(active) end,
         on_open_book=function(book,anchor,ges) self:_home_open_book(book,anchor,ges) end,
-        -- Home shelf books intentionally have no long-press action. All book
-        -- actions remain discoverable from the normal tap menu.
+        -- beta.17: preserve book-management access when a downloaded book taps straight into Reader.
+        on_hold_book=function(book,anchor) self:_home_hold_book(book,anchor) end,
         home_actions=self:_home_action_entries(),
         on_shelf_filter=active_right_callback,
         shelf_filter_label=active_right_label,
@@ -23478,10 +23480,10 @@ function Plugin:_progress_sync_issue_items()
                 local old_conflict=pending_reason=="freshness_conflict"
                     or pending_reason:find("^write_fenced:conflict:")~=nil
                     or tostring(reason):find("ambiguous_clock_conflict",1,true)~=nil
-                local can_send=can_replay and upload_state~="remote_newer_pending"
-                    and (upload_state=="pending_send" or legacy_unsent
+                local can_send=can_replay
+                    and (upload_state=="pending_send" or upload_state=="remote_newer_pending" or legacy_unsent
                     or (old_conflict and (upload_state=="" or upload_state=="false")))
-                local can_verify=can_replay and not can_send and upload_state~="remote_newer_pending"
+                local can_verify=can_replay and not can_send
                 local explicit_mismatch=pending_reason=="chapter_offset_mismatch" or pending_reason=="chapter_mismatch"
                     or pending_reason=="position_mismatch" or pending_reason=="remote_position_mismatch"
                 local can_resubmit=not authority_conflict and replayable==true and (session.progress_resubmit_allowed==true
@@ -23496,8 +23498,8 @@ function Plugin:_progress_sync_issue_items()
                     state_label=coordinate_only and "正在换算整书位置"
                         or (anchor_only and (saved_anchor and "正在恢复精确位置" or "需要重新打开本书确认")
                         or (authority_conflict and "需要选择本机或云端"
-                        or (upload_state=="remote_newer_pending" and "等待打开书籍恢复较新云端"
-                        or (can_send and "等待上传" or (replayable and (labels[state] or "待处理") or "需要打开本书确认"))))),
+                        or (can_send and "等待上传 Kindle 进度"
+                        or (replayable and (labels[state] or "待处理") or "需要打开本书确认")))),
                     reason=coordinate_only and "精确章节位置已保存，等待补全整书目录"
                         or (anchor_only and (saved_anchor and "退出前的文本锚点已保存，可在主页后台恢复微信精确坐标"
                             or "旧记录没有保存足够的定位锚点，需要重新打开本书建立上下文")
@@ -23832,7 +23834,7 @@ function Plugin:_submit_saved_pending_progress(item,callback)
     local upload_state=tostring(session.progress_upload_state or "")
     local pending_reason=tostring(current.pending_reason or "")
     local legacy_unsent=upload_state=="fenced" or pending_reason:find("^write_fenced:")~=nil
-    if upload_state~="pending_send" and not legacy_unsent then
+    if upload_state~="pending_send" and upload_state~="remote_newer_pending" and not legacy_unsent then
         callback(true,"already_dispatched")
         return true
     end
@@ -23847,106 +23849,28 @@ function Plugin:_submit_saved_pending_progress(item,callback)
 
     local position=self:_prepare_progress_snapshot(book_id,current) or current
     local localp=tonumber(position.progress)
-    local PR=_G.__MIUREAD_POSITION_RESOLUTION
-    if not (PR and type(PR.decide)=="function") then callback(false,"position_resolver_missing"); return false end
-
-    -- beta.6: UNSENT recovery always obtains a fresh cloud observation first.
-    -- A snapshot blocked by a previous reconciliation was never submitted and
-    -- must never jump directly into readback verification or blind resubmission.
-    self:_save_progress_state(book_id,"checking","重新读取云端位置后再决定是否上传本机进度",
+    if not self:_progress_snapshot_current(book_id,position) then
+        callback(false,"superseded")
+        return false
+    end
+    -- beta.17: the user explicitly selected Kindle-authoritative uploads.
+    -- An UNSENT precise local coordinate does not need a preliminary remote
+    -- freshness vote. The full upload still verifies its eventual cloud readback.
+    self:_clear_progress_write_fence(book_id,"kindle_pending_send_authoritative")
+    self:_save_progress_state(book_id,"uploading","正在上传 Kindle 本机保存的精确位置",
         localp,nil,position.progress_sequence)
-    local started,remote_start_error=self.sync:remote(book_id,function(remote,remote_err)
-        if not self:_progress_snapshot_current(book_id,position) then
-            callback(false,"superseded",remote)
-            return
-        end
-        if not remote then
-            self:_save_progress_state(book_id,"waiting_network","暂时无法确认云端位置；本机精确位置继续保留",
-                localp,nil,position.progress_sequence)
-            callback(false,remote_err or "remote_unavailable")
-            return
-        end
-        -- A selected cloud view with only percent is not an exact position:
-        -- never retire or overwrite an UNSENT chapter/co on that basis.
-        local remote_uid=tostring(remote.chapter_uid or remote.chapterUid or "")
-        local remote_co=tonumber(remote.canonical_offset or remote.chapter_offset or remote.offset or remote.chapterOffset)
-        if remote_uid=="" or remote_co==nil then
-            self:_save_progress_state(book_id,"waiting_network",
-                "云端尚未返回可验证的章节坐标；保留本机待上传位置",
-                localp,tonumber(remote.percent),position.progress_sequence)
-            callback(false,"remote_coordinate_unavailable",remote)
-            return
-        end
-        -- Web and Agent may disagree temporarily. Sync:remote() already
-        -- selects its best current observation; compare event freshness there.
-        local latest_session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or session
-        local state=type(latest_session.position_state)=="table" and latest_session.position_state or {}
-        local decision=PR.decide{
-            local_position=position,
-            remote_position=remote,
-            verified_anchor=PR.trusted_verified_anchor(latest_session,state),
-            local_seq=tonumber(position.progress_sequence or latest_session.progress_latest_sequence or 0) or 0,
-            verified_seq=tonumber(latest_session.progress_verified_sequence or 0) or 0,
-            local_updated_at=math.max(
-                tonumber(latest_session.local_read_event_at or 0) or 0,
-                tonumber(position.updated_at or 0) or 0
-            ),
-            remote_updated_at=tonumber(remote.updated_at or remote.updated or 0) or 0,
-            clock_skew_grace=tonumber(Config.POSITION_CLOCK_SKEW_GRACE_SECONDS) or 30,
-        }
-        local winner=tostring(decision and decision.winner or "conflict")
-        local reason=tostring(decision and decision.reason or "unknown")
-        logger.info("[MiuRead][ProgressRecovery] freshness checked",
-            "book=",book_id,"winner=",winner,"reason=",reason,
-            "local_event=",tostring(latest_session.local_read_event_at or 0),
-            "remote_updated=",tostring(remote.updated_at or 0))
-
-        if winner=="aligned" then
-            self.sync:set_cloud_anchor(book_id,position,"pending_send_already_aligned",true)
-            self.sync:mark_verified(book_id,"pending_send_already_aligned",localp,localp,position,
-                {detached=true,record_snapshot=record_snapshot})
-            self:_commit_progress_verified(book_id,position,remote,"此前保留的本机位置已与云端一致")
-            callback(true,"already_aligned",remote)
-            return
-        end
-        if winner=="remote" then
-            -- Cloud read is not local adoption. Preserve the unsent snapshot
-            -- until a later verified cloud landing commits the handover.
-            self.store:save_session(book_id,{
-                progress_upload_state="remote_newer_pending",
-                progress_submission_phase="unsent",
-                progress_decided_at=os.time(),
-            })
-            self:_save_progress_state(book_id,"remote_newer_pending",
-                "云端阅读时间较新；保留原本机位置，待打开书籍精确恢复后交接",
-                localp,tonumber(remote.percent),position.progress_sequence)
-            callback(true,"remote_newer_pending_local_retained",remote)
-            return
-        end
-        if winner~="local" then
-            self:_save_progress_state(book_id,"deferred","本机与云端新旧暂时无法安全判断；稍后重新确认",
-                localp,tonumber(remote.percent),position.progress_sequence)
-            callback(false,"freshness_conflict",remote)
-            return
-        end
-
-        self:_clear_progress_write_fence(book_id,"recovery_local_newer:"..reason)
-        self:_save_progress_state(book_id,"uploading","已确认本机阅读事件更新，正在继续上传",
-            localp,tonumber(remote.percent),position.progress_sequence)
-        local upload_started=self:_submit_progress_snapshot(book_id,position,{
-            detached=true,reason="pending_send_recovered",pending_reason="upload_queued",
-            pending_already_saved=true,record_override=record_snapshot,record_snapshot=record_snapshot,
-            uploading_message="此前未发送的精确位置正在继续上传",
-            verifying_message="阅读进度已提交，等待微信确认",
-            unconfirmed_message="阅读进度已提交，仍等待微信确认",
-            failed_message="精确位置已保存，稍后继续上传",
-            verify_delays={3,10,24},force_write=true,
-        },function(ok,verified_remote,err)
-            callback(ok,err,verified_remote)
-        end)
-        if not upload_started then callback(false,"progress_worker_busy") end
-    end,{raw_coordinate=true,update_cloud_anchor=false,detached=true,record_snapshot=record_snapshot})
-    if started==false then callback(false,remote_start_error or "remote_check_busy") end
+    local started=self:_submit_progress_snapshot(book_id,position,{
+        detached=true,reason="kindle_pending_send",pending_reason="upload_queued",
+        pending_already_saved=true,record_override=record_snapshot,record_snapshot=record_snapshot,
+        uploading_message="正在上传 Kindle 本机进度",
+        verifying_message="阅读进度已提交，等待微信确认",
+        unconfirmed_message="阅读进度已提交，仍等待微信确认",
+        failed_message="Kindle 精确位置已保存，稍后继续上传",
+        verify_delays={3,10,24},force_write=true,
+    },function(ok,verified_remote,err)
+        callback(ok,err,verified_remote)
+    end)
+    if not started then callback(false,"progress_worker_busy") end
     return started~=false
 end
 
@@ -25294,6 +25218,12 @@ function Plugin:_progress_write_fence(book_id,position)
     -- A failed cloud jump and a fuzzy timestamp disagreement are not evidence
     -- that a new, separately captured reading-end snapshot is unsafe to send.
     -- Keep all OTHER fences until their existing transaction checks resolve.
+    if (reason:find("^remote_newer:") or reason:find("^conflict:")
+        or reason=="remote_exact_unresolved") and type(position)=="table"
+        and position.safe==true and tostring(position.chapter_uid or "")~=""
+        and tonumber(position.canonical_offset or position.chapter_offset or position.offset)~=nil then
+        return false,"kindle_exact_position_authoritative"
+    end
     if reason:find("^remote_newer:") and type(position)=="table" then
         local session=self.store:session(book_id) or {}
         local current_event=tonumber(session.local_read_event_at or 0) or 0
@@ -26673,6 +26603,17 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
     }
     local winner=tostring(result.winner or "conflict")
     local reason=tostring(result.reason or "unknown")
+    -- beta.17 policy: a real Kindle coordinate is authoritative on automatic open.
+    -- Explicit 'use cloud' actions still call the separate manual adoption path.
+    local local_uid=tostring(type(local_position)=="table" and (local_position.chapter_uid or local_position.chapterUid) or "")
+    local local_offset=type(local_position)=="table" and tonumber(local_position.canonical_offset
+        or local_position.chapter_offset or local_position.offset) or nil
+    if automatic and local_uid~="" and local_offset~=nil then
+        if winner=="remote" or winner=="conflict" then
+            winner="local"
+            reason="kindle_coordinate_authoritative"
+        end
+    end
     local remote_uid=tostring(remote and (remote.chapter_uid or remote.chapterUid) or "")
     local remote_co=tonumber(remote and (remote.canonical_offset or remote.offset or remote.chapter_offset))
 

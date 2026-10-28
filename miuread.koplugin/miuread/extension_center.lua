@@ -1886,7 +1886,12 @@ local function prioritize_extension_rows(rows)
     for _,row in ipairs(rows or {}) do
         local label=tostring(row.text or "")
         if label=="注意" or label=="一键安装不可用" or label=="自动安装不可用"
-            or label=="自动更新已停用" or label=="重复安装" then
+            or label=="自动更新已停用" or label=="重复安装"
+            or label:find("插件状态",1,true)==1
+            or label:find("当前更改",1,true)==1
+            or label:find("仓库状态",1,true)==1
+            or label:find("网络状态",1,true)==1
+            or label:find("自动更新/重装",1,true)==1 then
             warnings[#warnings+1]=row
         elseif row.enabled==false and not row.callback and not row.sub_item_table_func then
             details[#details+1]=row

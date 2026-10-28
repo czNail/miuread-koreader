@@ -3131,7 +3131,10 @@ function Sync:upload(elapsed, callback, options)
     local path_snapshot=tostring(record.path or "")
     local core_hash=self:_core_map_hash(record)
     local session = self.store:session(book_id) or {}
-    if session.sync_repair_required==true and options.repair~=true then
+    -- beta.17: a reading-time context repair flag must not veto a valid,
+    -- independent Kindle progress-only upload. The worker still validates its
+    -- own current credentials, native chapter and payload before dispatch.
+    if session.sync_repair_required==true and options.repair~=true and options.progress_only~=true then
         local repair_kind=self:_normalize_report_error_kind(session.sync_repair_kind,session.sync_repair_error)
         if repair_kind~="context" then
             self:_clear_noncontext_repair_flag(book_id,session,"upload_reclassified")
@@ -4209,20 +4212,39 @@ function Sync:_write_daemon_control(active, immediate, extra)
         -- serialize canonical/pending CloudAnchor coordinates at all. Only the
         -- dedicated server-wire channel is allowed into daemon control.
         local wire_anchor=book_id~="" and self:remote_wire_anchor(book_id) or nil
+        -- beta.17: a position-bearing time report requires the same valid
+        -- Kindle coordinate as a normal progress report. Capture it on the
+        -- foreground reader's control update; the background worker never
+        -- reads a stale server anchor or invents a chapter coordinate.
         local position=nil
-        if not time_only then
-            local record=self:record()
-            if record and book_id~="" and tostring(record.book.book_id or "")==book_id then
-                position=position_override or self:_position_for_report(nil,precise_position)
-                if type(position)=="table" and position.safe==true then
-                    self:_save_local_snapshot(book_id,position)
-                else
-                    position=nil
-                end
+        local record=self:record()
+        if record and book_id~="" and tostring(record.book.book_id or "")==book_id then
+            position=position_override or self:_position_for_report(nil,true)
+            if type(position)=="table" and position.safe==true
+                and position.native_offset==true and tostring(position.offset_basis or position.position_basis or "")=="wr_data_co" then
+                self:_save_local_snapshot(book_id,position)
+            else
+                position=nil
             end
         end
-        local native_offset_flag = existing.local_native_chapter_offset == true
-        if position then native_offset_flag = position.native_offset == true end
+        local same_context=tostring(existing.book_id or "")==book_id
+            and tostring(existing.core_map_hash or "")==tostring(d.core_map_hash or "")
+            and tonumber(existing.record_generation or -1)==tonumber(d.record_generation or 0)
+        if not position and same_context and existing.position_safe==true
+            and tostring(existing.local_chapter_uid or "")~=""
+            and existing.local_native_chapter_offset==true
+            and tostring(existing.local_chapter_offset_basis or "")=="wr_data_co" then
+            -- Retain only a proven previous Kindle snapshot of the same book,
+            -- same generation and same core catalog.
+            position={chapter_uid=existing.local_chapter_uid,
+                chapter_index=existing.local_chapter_idx,
+                chapter_offset=existing.local_chapter_offset,
+                progress=(tonumber(existing.progress_ratio) or 0)*100,
+                chapter_word_count=existing.local_chapter_word_count,
+                native_offset=true,offset_basis="wr_data_co",safe=true,
+                source="previous_kindle_control"}
+        end
+        local native_offset_flag=position and position.native_offset==true or false
         local control = {
             active = active ~= false and d.active == true,
             generation = own_generation,
@@ -4244,7 +4266,7 @@ function Sync:_write_daemon_control(active, immediate, extra)
             position_source = position and position.source or existing.position_source,
             position_basis = position and position.position_basis or existing.position_basis,
             position_precision_ms = position and position.precision_ms or existing.position_precision_ms,
-            position_safe = time_only or (position and true or existing.position_safe==true),
+            position_safe = position~=nil and position.safe==true,
             -- beta.15: reading_time_compat consumes only these fresh server-wire
             -- fields. Do not retain an older value when no wire anchor is known;
             -- omission forces the worker to GET the current server position.

@@ -39,7 +39,8 @@ class CommentB2(unittest.TestCase):
     def test_reader_menu_has_explicit_requests(self):
         main = source('main.lua')
         self.assertIn('self.comment_sync=require("miuread.comment_sync"):new(self.api,self.store,self.annotations)', main)
-        self.assertIn('or "获取本章评论"', main)
+        self.assertIn('main_label="获取本章评论"', main)
+        self.assertIn('main_label=cache.has_cache and "继续获取本章评论"', main)
         self.assertIn('label="更新本章评论"', main)
         self.assertIn('main_label="查看本章评论"', main)
         self.assertIn('title="本章已缓存评论"', main)

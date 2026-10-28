@@ -685,7 +685,7 @@ local function shelf_book_card(book, width, height, callback, hold_callback)
     end
     return tappable(width, height, CenterContainer:new{dimen = Geom:new{w = width, h = height}, body},
         function(anchor,ges) if callback then callback(book, anchor, ges) end end,
-        function(anchor) if hold_callback then hold_callback(book, anchor) end end)
+        hold_callback and function(anchor) hold_callback(book, anchor) end or nil)
 end
 
 local function home_action_icon(icon, width, height, enabled)

@@ -250,8 +250,18 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
                 new_invalid=new_invalid+invalid
                 if #texts>0 then
                     if not review_map[key] then review_map[key]={}; group_count=group_count+1 end
-                    for _,item in ipairs(texts) do review_map[key][#review_map[key]+1]=item end
-                    entry_count=entry_count+#texts
+                    local seen={}
+                    for _,old in ipairs(review_map[key]) do
+                        seen[tostring(old.review_id or old.content or "")]=true
+                    end
+                    for _,item in ipairs(texts) do
+                        local id=tostring(item.review_id or item.content or "")
+                        if not seen[id] then
+                            seen[id]=true
+                            review_map[key][#review_map[key]+1]=item
+                            entry_count=entry_count+1
+                        end
+                    end
                 end
             else
                 new_invalid=new_invalid+1
@@ -313,7 +323,9 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
         if skipped==0 then
             for _,group in ipairs(rows) do
                 local key=range_key(group)
-                if requested[key] and type(group.pageReviews or group.reviews or group.updated)=="table" then
+                if requested[key] and type(group.pageReviews or group.reviews or group.updated)=="table"
+                    and not (type(response._miu_uncertain_ranges)=="table"
+                        and response._miu_uncertain_ranges[key]==true) then
                     answered[key]=true
                 else
                     invalid_range=invalid_range+1
@@ -402,7 +414,8 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
     end
     logger.info("[MiuRead][Annotations] chapter fetched","book=",result.book_id,"chapter=",result.chapter_uid,
         "underlines=",result.underline_count,"thought_groups=",result.thought_count,
-        "thought_entries=",result.thought_entry_count,"pending_ranges=",#result.pending_ranges)
+        "thought_entries=",result.thought_entry_count,"pending_ranges=",#result.pending_ranges,
+        "review_complete=",tostring(result.review_complete))
     return result
 end
 

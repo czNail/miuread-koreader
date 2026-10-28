@@ -49,12 +49,15 @@ local agent={reviews={{range='1-4',pageReviews={}}}}
 client._web_readreviews=function() return web end
 client._agent_readreviews=function() agent_calls=agent_calls+1;return agent end
 local batch={{range='1-4'}}
-assert(client:readreviews('b',5,batch)==agent and agent_calls==1,
-    'Incomplete Web result must attempt Gateway')
+local recovered=client:readreviews('b',5,batch)
+assert(type(recovered)=='table' and #recovered.reviews==1 and agent_calls==1,
+    'Incomplete Web result must attempt Gateway and merge ranges')
 web={reviews={{range='1-4',pageReviews={}}}}
-assert(client:readreviews('b',5,batch)==web and agent_calls==1,
-    'Covered Web result must not retry Gateway')
+local empty=client:readreviews('b',5,batch)
+assert(type(empty)=='table' and agent_calls==2 and empty._miu_uncertain_ranges['1-4']==true,
+    'Covered but empty Web result must still cross-check Gateway')
 web={reviews={}};agent={reviews={}}
-assert(client:readreviews('b',5,batch)==web and agent_calls==2,
-    'Two empty replies remain unconfirmed')
+local two_empty=client:readreviews('b',5,batch)
+assert(type(two_empty)=='table' and agent_calls==3,
+    'Two empty replies require cross-source verification')
 print('PASS: zero / partial coverage, nested text, Gateway recovery, no redundant calls')
