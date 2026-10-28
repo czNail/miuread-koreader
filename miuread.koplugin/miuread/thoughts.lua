@@ -166,7 +166,11 @@ function Thoughts.parse_href(href)
 end
 
 local function legacy_cache_path(store, book_id, chapter_uid)
-    return store:book_dir(book_id) .. "/thoughts/" .. U.id_name(chapter_uid) .. ".json"
+    -- Legacy cache reads are also side-effect free; a missing book should
+    -- remain deleted after checking whether archived comments exist.
+    local root = type(store.book_cache_path) == "function"
+        and store:book_cache_path(book_id) or store:book_dir(book_id)
+    return root .. "/thoughts/" .. U.id_name(chapter_uid) .. ".json"
 end
 
 local function load_legacy(store, book_id, chapter_uid)

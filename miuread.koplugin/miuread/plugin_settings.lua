@@ -79,6 +79,7 @@ local function home_page_settings(plugin)
     local home=plugin:_home_preferences()
     return {
         {text="页面布局",post_text=(home.layout_style=="compact" and "紧凑布局" or "标准布局"),sub_item_table_func=function() return plugin:home_layout_settings_menu() end},
+        {text="主页顶栏显示",post_text=home.header_visible==false and "已隐藏" or "自定义项目",sub_item_table_func=function() return plugin:home_header_settings_menu() end},
         {text="主页阅读统计",post_text=plugin:_home_stats_visibility_label(home),sub_item_table_func=function() return plugin:home_stats_settings_menu() end},
         {text="显示书架封面",checked_func=function() return plugin.store:preferences().shelf_covers~=false end,keep_menu_open=true,callback=function() plugin:_toggle_preference("shelf_covers") end},
         {text="网络补全图书信息",post_text="只补充缺失资料",checked_func=function() return plugin:_home_preferences().network_metadata~=false end,keep_menu_open=true,callback=function() plugin:_toggle_home_network_metadata() end},

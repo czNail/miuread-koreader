@@ -14,6 +14,7 @@ local Widget = require("ui/widget/widget")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local TransientGuard = require("miuread.transient_guard")
+local DialogTransition = require("miuread.dialog_transition")
 local Skin = require("miuread.reader_skin")
 local Ui = require("miuread.ui_components")
 
@@ -168,7 +169,8 @@ local Dialog = InputContainer:extend{
     name = "miuread_reader_frontlight_dialog",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Captures full-screen input but paints only a partial frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     closed = false,
@@ -362,8 +364,21 @@ function Dialog:_build_content()
 
     local desired_h = pad * 2 + header_h + gap + slider_h * setting_count
         + gap * math.max(0, setting_count - 1) + gap + action_h + handle_h
-    self.panel_h = math.min(sh - outer_margin * 2, desired_h)
-    self._stable_panel_h = math.max(tonumber(self._stable_panel_h) or 0, self.panel_h)
+    local max_h = sh - outer_margin * 2
+    if desired_h > max_h then
+        -- This is a real layout constraint, not an E-Ink refresh problem:
+        -- clipping the paper without resizing sliders hides the lower button.
+        gap = math.min(gap, Skin.dp(5, 4, 7))
+        local fixed = pad * 2 + header_h + gap * (setting_count + 1) + action_h + handle_h
+        slider_h = math.min(slider_h, math.max(Skin.dp(62, 54, 80),
+            math.floor((max_h - fixed) / setting_count)))
+        desired_h = fixed + slider_h * setting_count
+    end
+    if desired_h > max_h then
+        error("frontlight dialog cannot fit screen with legible controls")
+    end
+    self.panel_h = desired_h
+    self._stable_panel_h = math.min(max_h, math.max(tonumber(self._stable_panel_h) or 0, self.panel_h))
     self.panel_h = self._stable_panel_h
     local placement = tostring(self.opts and self.opts.placement or "top")
     local panel_y = placement == "center" and math.max(outer_margin, math.floor((sh - self.panel_h) / 2)) or top_margin
@@ -531,13 +546,7 @@ function Dialog:onCloseWidget()
     self.pending_action = nil
     self.closed = true
     if live_dialog == self then live_dialog = nil end
-    if region then UIManager:setDirty(nil, function() return "ui", region end) end
-    if action then
-        UIManager:scheduleIn(.04, function()
-            local ok, err = pcall(action)
-            if not ok then logger.warn("[MiuRead][ReaderFrontlightDialog] deferred action failed", tostring(err)) end
-        end)
-    end
+    DialogTransition.after_close(region, action, "ReaderFrontlightDialog")
 end
 
 local M = {}

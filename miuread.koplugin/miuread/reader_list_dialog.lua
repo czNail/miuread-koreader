@@ -404,8 +404,14 @@ function Dialog:_build_content()
     local requested_page_size = self:_page_size()
     local max_h = math.floor(sh * (portrait and .76 or .84))
     local fixed_h = pad * 2 + header_h + subtitle_h + tab_h + Skin.dp(8, 6, 12)
-    local possible_slots = math.max(2, math.floor((max_h - fixed_h - pager_h_default) / row_h))
-    local page_size = math.max(2, math.min(requested_page_size, possible_slots))
+    -- Reserve the inline action strip and pager even when they are initially
+    -- hidden: expanding a row must never push the final row under the footer.
+    local available_rows = max_h - fixed_h - pager_h_default - action_h - action_gap
+    if available_rows < row_h then
+        row_h = math.max(Skin.dp(28, 24, 37), available_rows)
+    end
+    local possible_slots = math.max(1, math.floor(math.max(1, available_rows) / math.max(1, row_h)))
+    local page_size = math.max(1, math.min(requested_page_size, possible_slots))
     local items = self:_items(selected)
     local pages = math.max(1, math.ceil(#items / page_size))
     self.page = math.max(1, math.min(pages, tonumber(self.page) or 1))
@@ -425,7 +431,11 @@ function Dialog:_build_content()
     end
     local expanded_h = self.expanded_index and (action_gap + action_h) or 0
     local body_h = visible_slots * row_h + expanded_h
-    local requested_h = math.min(max_h, fixed_h + body_h + pager_h)
+    local requested_h = fixed_h + body_h + pager_h
+    if requested_h > max_h then
+        -- Never silently clamp the frame while rendering rows outside it.
+        error("reader list contents exceed available panel height")
+    end
     -- Keep one stable white rectangle while navigating inside the same dialog.
     -- A child page may be shorter than its parent; shrinking a transparent modal
     -- would leave the parent's pixels behind on e-ink until a full refresh.

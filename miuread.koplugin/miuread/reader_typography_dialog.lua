@@ -87,7 +87,8 @@ local Dialog = InputContainer:extend{
     name = "miuread_reader_typography_dialog",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Captures full-screen input but paints only a partial frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     closed = false,

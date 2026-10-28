@@ -30,13 +30,13 @@ local function show_variant(plugin, book_id, variant)
         {text = "文件大小", post_text = human_size(variant.size), enabled = false},
         {text = "打开" .. label, callback = function() plugin:open_file(variant.file) end},
     }
-    if kind == "clean" or kind == "notes" then
-        local annotations = kind == "notes"
+    if kind == "clean" then
         items[#items + 1] = {
-            text = "重新下载" .. label,
-            callback = function() plugin:choose_download_mode(book, {annotations = annotations}, false) end,
+            text = "重新下载正文",
+            callback = function() plugin:choose_download_mode(book, {annotations = false}, false) end,
         }
     end
+    -- Old notes files stay readable/manageable, but have no notes-download action.
     items[#items + 1] = {
         text = "删除" .. label,
         callback = function() plugin:_confirm_delete_variant(book_id, kind, book.title or book_id) end,

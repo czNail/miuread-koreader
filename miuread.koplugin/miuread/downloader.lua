@@ -993,7 +993,10 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         elseif preview_mode=="partial" then preview_name="【试读版·部分内容】"
         else preview_name="【试读版】" end
     end
-    local formal_filename=U.safe_name(book.title,"book")..preview_name..range_name..chapter_name.." ["..suffix.."].epub"
+    -- B4: newly generated clean books have no redundant edition suffix.
+    -- The already-installed clean record below retains its exact former path.
+    local edition_suffix=kind=="notes" and (" ["..suffix.."]") or ""
+    local formal_filename=U.safe_name(book.title,"book")..preview_name..range_name..chapter_name..edition_suffix..".epub"
     local filename=hidden_prefetch and (U.id_name(opt.chapter_uid).."-"..storage_kind..".epub") or formal_filename
     local path=hidden_prefetch and self.store:hidden_prefetch_path(book.bookId,opt.chapter_uid,storage_kind) or self.store:epub_path(filename)
     -- Keep the exact path of an existing variant. KOReader sidecar notes are

@@ -50,7 +50,8 @@ local Dialog = InputContainer:extend{
     name = "miuread_reader_settings_dialog",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Captures full-screen input but paints only a partial frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
     closed = false,
@@ -292,14 +293,68 @@ function Dialog:_build_content()
     row_count = math.max(1, row_count)
     local natural_row_h = math.max(Skin.dp(47, 40, 61), math.floor(sh * (portrait and .044 or .062)))
     local max_h = sh - top_inset - math.max(28, math.floor(sh * .052))
+    local min_row_h = Skin.dp(38, 34, 48)
+    local pager_h = Skin.dp(38, 34, 50)
+    -- Flatten only for pagination.  Preserve original row callbacks/settings.
+    local entries = {}
+    for _, section in ipairs(sections) do
+        for _, row in ipairs(section.rows or {}) do
+            entries[#entries + 1] = {title=section.title or "", row=row}
+        end
+    end
+    -- Build height-bounded pages. Count repeated section headings and gaps:
+    -- a fixed row-count limit alone can still overflow on multi-section pages.
+    local base_h = pad * 2 + header_h + subtitle_h
+        + (hero_h > 0 and gap + hero_h or 0) + gap + handle_h + pager_h
+    local budget = math.max(1, max_h - base_h)
+    local pages, current, used, prior_title = {}, {}, 0, nil
+    for _, entry in ipairs(entries) do
+        local title = tostring(entry.title or "")
+        local title_cost = title ~= prior_title and
+            ((title ~= "" and section_title_h or 0) + (#current > 0 and gap or 0)) or 0
+        local cost = min_row_h + title_cost
+        if #current > 0 and used + cost > budget then
+            pages[#pages+1] = current
+            current, used, prior_title = {}, 0, nil
+            title_cost = title ~= "" and section_title_h or 0
+            cost = min_row_h + title_cost
+        end
+        current[#current+1] = entry
+        used = used + cost
+        prior_title = title
+    end
+    if #current > 0 then pages[#pages+1] = current end
+    self._settings_pages = math.max(1, #pages)
+    self._settings_page = math.max(1, math.min(self._settings_pages, tonumber(self._settings_page) or 1))
+    if self._settings_pages > 1 then
+        local sliced = {}
+        for _, item in ipairs(pages[self._settings_page]) do
+            local last = sliced[#sliced]
+            if not last or last.title ~= item.title then
+                last = {title=item.title, rows={}}
+                sliced[#sliced+1] = last
+            end
+            last.rows[#last.rows+1] = item.row
+        end
+        sections = sliced
+        row_count, titled_count = #pages[self._settings_page], 0
+        for _, section in ipairs(sections) do
+            if tostring(section.title or "") ~= "" then titled_count = titled_count + 1 end
+        end
+    end
     local fixed_h = pad * 2 + header_h + subtitle_h + (hero_h > 0 and gap + hero_h or 0)
         + gap + titled_count * section_title_h + math.max(0, #sections - 1) * gap + handle_h
-    local available_rows = math.max(row_count * Skin.dp(38, 34, 48), max_h - fixed_h)
-    local row_h = math.min(natural_row_h, math.max(Skin.dp(38, 34, 48), math.floor(available_rows / row_count)))
+        + (self._settings_pages > 1 and pager_h or 0)
+    local available_rows = math.max(1, max_h - fixed_h)
+    local row_h = math.min(natural_row_h, math.max(1, math.floor(available_rows / row_count)))
     local body_h = row_count * row_h + titled_count * section_title_h + math.max(0, #sections - 1) * gap
     local content_h = header_h + subtitle_h + (hero_h > 0 and gap + hero_h or 0) + gap + body_h + handle_h
-    self.panel_h = math.min(max_h, pad * 2 + content_h)
-    self._stable_panel_h = math.max(tonumber(self._stable_panel_h) or 0, self.panel_h)
+        + (self._settings_pages > 1 and pager_h or 0)
+    if pad * 2 + content_h > max_h then
+        error("reader settings contents exceed available panel height")
+    end
+    self.panel_h = pad * 2 + content_h
+    self._stable_panel_h = math.min(max_h, math.max(tonumber(self._stable_panel_h) or 0, self.panel_h))
     self.panel_h = self._stable_panel_h
     self.dimen = Geom:new{x = 0, y = 0, w = sw, h = sh}
     self.frame_dimen = Geom:new{x = outer_margin, y = top_inset, w = panel_w, h = self.panel_h}
@@ -380,6 +435,29 @@ function Dialog:_build_content()
         if section_index < #sections then y = y + gap end
     end
 
+    if self._settings_pages > 1 then
+        local nav_h = pager_h - Skin.dp(5, 4, 7)
+        local nav_w = math.floor(content_w / 3)
+        local function page_button(label, enabled, step)
+            local tap = TapBox:new{dimen=Geom:new{w=nav_w,h=nav_h}, enabled=enabled,
+                callback=function()
+                    if not enabled then return end
+                    self._settings_page = self._settings_page + step
+                    self:_rebuild()
+                end}
+            tap[1] = Ui.textbox(label, nav_w, nav_h, Skin.face("cfont", 10, 14, 9),
+                {alignment="center",halign="center"})
+            return tap
+        end
+        local nav = HorizontalGroup:new{align="center",
+            page_button("上一页",self._settings_page>1,-1),
+            Ui.textbox(tostring(self._settings_page).." / "..tostring(self._settings_pages),
+                nav_w,nav_h,Skin.face("cfont",10,14,9),{alignment="center",halign="center"}),
+            page_button("下一页",self._settings_page<self._settings_pages,1),
+        }
+        root[#root+1] = OffsetContainer:new{x_off=outer_margin+pad,y_off=y,nav}
+        y = y + pager_h
+    end
     local handle_w = Skin.dp(34, 28, 48)
     root[#root + 1] = OffsetContainer:new{
         x_off = outer_margin + math.floor((panel_w - handle_w) / 2),

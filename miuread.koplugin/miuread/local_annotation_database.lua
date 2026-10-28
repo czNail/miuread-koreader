@@ -342,15 +342,19 @@ function LocalAnnotationDatabase.list(store, book_id, limit)
     return out
 end
 
-function LocalAnnotationDatabase.pending(store, book_id, limit)
+function LocalAnnotationDatabase.pending(store, book_id, limit, options)
     if not LocalAnnotationDatabase.exists(store, book_id) then return {} end
     local conn = open(store, book_id, false)
     local out = {}
     local ok, err = xpcall(function()
+        -- Deleting local files must not send pending remote-delete tombstones.
+        -- Apply the filter inside SQL (before LIMIT), not only after fetching.
+        local upload_only = type(options)=="table" and options.upload_only==true
+        local states = upload_only and "('local_only','unknown')"
+            or "('local_only','unknown','delete_pending','delete_unknown')"
         local statement = conn:prepare("SELECT " .. SELECT_COLUMNS .. [[
             FROM local_annotations
-            WHERE book_id = ? AND sync_state IN
-                ('local_only','unknown','delete_pending','delete_unknown')
+            WHERE book_id = ? AND sync_state IN ]] .. states .. [[
             ORDER BY updated_at ASC LIMIT ?
         ]])
         statement:bind(tostring(book_id or ""), math.max(1, tonumber(limit) or 200))

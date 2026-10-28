@@ -151,7 +151,7 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
         underline_count=0,thought_count=0,thought_entry_count=0,errors={},underline_request_ok=false,
         underlines_partial=false,completed_ranges={},pending_ranges={},review_complete=false,complete=false}
 
-    local reuse_pending=previous and previous.underline_request_ok==true
+    local reuse_pending=previous and options.force_refresh~=true and previous.underline_request_ok==true
         and previous.underlines_partial~=true and #(previous.underlines or {})>0
         and #(previous.pending_ranges or {})>0
     if reuse_pending then
@@ -276,6 +276,12 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
     end
 
     local function accept_response(batch,response,label)
+        if type(response.reviews)~="table" and type(response.updated)~="table" and #response==0 then
+            result.error_kind=result.error_kind or "data"
+            result.errors[#result.errors+1]=tostring(label).." missing review list"
+            save_checkpoint()
+            return false
+        end
         local rows,invalid=table_entries(array_from(response,{"reviews","updated"}))
         local entry_invalid=merge_review_rows(rows)
         local skipped=invalid+entry_invalid
@@ -284,11 +290,12 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
             result.errors[#result.errors+1]=tostring(label).." skipped malformed review entries"
             invalid_review_count=invalid_review_count+invalid
         end
-        -- A successful response is complete even when a malformed optional
-        -- review entry was skipped. Keeping the whole range pending caused
-        -- the same data to be fetched and normalized indefinitely.
-        mark_batch_completed(batch)
+        -- Invalid response rows cannot prove a range was fully fetched.
+        -- Keep its checkpoint pending; do not silently label partial data
+        -- as a successful empty chapter.
+        if skipped==0 then mark_batch_completed(batch) end
         save_checkpoint()
+        return skipped==0
     end
 
     local function split_batch(batch)
@@ -308,8 +315,7 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
             return self.api:readreviews(book_id,uid,batch)
         end)
         if good then
-            accept_response(batch,response,label)
-            return true,false
+            return accept_response(batch,response,label),false
         end
 
         if is_data_specific_failure(response) and #batch>1 then

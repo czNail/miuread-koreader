@@ -108,6 +108,12 @@ local function validate_delete_path(path, policy)
     local temp_dir = normalize_path(policy.temp_dir)
     path = normalize_path(path)
 
+    -- Global user collections are NEVER a book deletion target, even if a
+    -- corrupt old library entry accidentally lists them as a book file.
+    local favorites = data_dir .. "/thought_favorites.sqlite3"
+    if path == favorites or path == favorites .. "-wal" or path == favorites .. "-shm" then
+        return false, "独立评论收藏受保护"
+    end
     if path == "" or path == "/" or path == data_dir or path == cache_books_dir
         or path == books_root or path == temp_dir then
         if mode == "cover_cache" and path == covers_dir then return true end

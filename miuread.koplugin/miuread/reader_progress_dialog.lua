@@ -14,6 +14,7 @@ local Widget = require("ui/widget/widget")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local TransientGuard = require("miuread.transient_guard")
+local DialogTransition = require("miuread.dialog_transition")
 local Skin = require("miuread.reader_skin")
 local Ui = require("miuread.ui_components")
 
@@ -58,7 +59,8 @@ local Dialog = InputContainer:extend{
     name = "miuread_reader_progress_dialog",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    covers_fullscreen = true,
+    -- Captures full-screen input but paints only a partial frame.
+    covers_fullscreen = false,
     stop_events_propagation = true,
     percent = 0,
     whole_percent = nil,
@@ -129,8 +131,21 @@ function Dialog:init()
     local small_h = math.max(Skin.dp(42, 36, 55), math.floor(sh * (portrait and .04 or .058)))
     local wide_h = math.max(Skin.dp(45, 39, 58), math.floor(sh * (portrait and .043 or .062)))
     local handle_h = Skin.dp(18, 15, 25)
-    local content_h = header_h + progress_h + gap + small_h + gap + wide_h + gap + wide_h + handle_h
-    self.panel_h = math.min(sh - top_inset - math.max(28, math.floor(sh * .052)), pad * 2 + content_h)
+    local content_h = header_h + progress_h + gap * 3 + small_h + wide_h * 2 + handle_h
+    local max_h = sh - top_inset - math.max(28, math.floor(sh * .052))
+    if content_h + pad * 2 > max_h then
+        local Geometry = require("miuread.modal_geometry")
+        local values, ok = Geometry.scale_to_fit(math.max(1,max_h-pad*2),
+            {header_h,value_h,value_track_gap,track_h,gap,gap,gap,small_h,wide_h,wide_h,handle_h}, 1)
+        if not ok then error("reader progress cannot fit this screen") end
+        header_h,value_h,value_track_gap,track_h = values[1],values[2],values[3],values[4]
+        gap,small_h,wide_h,handle_h = math.min(values[5],values[6],values[7]),values[8],
+            math.min(values[9],values[10]),values[11]
+        progress_h=value_h+value_track_gap+track_h
+        content_h = header_h + progress_h + gap * 3 + small_h + wide_h * 2 + handle_h
+    end
+    self.panel_h = pad * 2 + content_h
+    assert(self.panel_h <= max_h, "reader progress frame exceeds screen")
     self.dimen = Geom:new{x = 0, y = 0, w = sw, h = sh}
     self.frame_dimen = Geom:new{x = outer_margin, y = top_inset, w = panel_w, h = self.panel_h}
     self.ges_events = {
@@ -331,13 +346,7 @@ function Dialog:onCloseWidget()
     self.pending_action = nil
     self.closed = true
     if live_dialog == self then live_dialog = nil end
-    if region then UIManager:setDirty(nil, function() return "ui", region end) end
-    if action then
-        UIManager:scheduleIn(.04, function()
-            local ok, err = pcall(action)
-            if not ok then logger.warn("[MiuRead][ReaderProgressDialog] action failed", tostring(err)) end
-        end)
-    end
+    DialogTransition.after_close(region, action, "ReaderProgressDialog")
 end
 
 local M = {}

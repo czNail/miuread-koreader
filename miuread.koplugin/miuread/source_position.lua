@@ -271,6 +271,34 @@ function M.cacheChapter(reader, book_id, uid, version, coord_html)
     return true, path
 end
 
+-- B3: only inspect existing authoritative coordinate sources. Never request
+-- remote content merely to render cached public comments. Existing sources
+-- may have a version suffix; pick the latest *existing* valid file.
+function M.readCachedChapter(store, book_id, uid)
+    if not store or not store.book_dir then return nil end
+    local root=store:book_dir(book_id) .. "/progress-source-position"
+    local prefix=U.id_name(tostring(uid or "")).."-v"
+    if prefix=="-v" then return nil end
+    local candidates={}
+    local ok=pcall(function()
+        for file in lfs.dir(root) do
+            if file:sub(1,#prefix)==prefix and file:sub(-6)==".xhtml" then
+                local path=root.."/"..file
+                local st=lfs.attributes(path)
+                if st and st.mode=="file" and st.size>0 and st.size<=MAX_SOURCE_BYTES then
+                    candidates[#candidates+1]={path=path,mtime=tonumber(st.modification) or 0}
+                end
+            end
+        end
+    end)
+    if not ok then return nil end
+    table.sort(candidates,function(a,b) return a.mtime>b.mtime end)
+    for _,item in ipairs(candidates) do
+        local body=read_cached(item.path)
+        if body then return body end
+    end
+end
+
 local function norm_count_before(map, text_boundary)
     local norm_map = type(map) == "table" and map.norm_map or nil
     if type(norm_map) ~= "table" or #norm_map == 0 then return nil end

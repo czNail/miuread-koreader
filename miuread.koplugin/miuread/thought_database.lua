@@ -1,18 +1,23 @@
 local SQLiteStore = require("miuread.sqlite_store")
+local Json = require("miuread.json")
 local U = require("miuread.util")
 local lfs = require("libs/libkoreader-lfs")
 
 local ThoughtDatabase = {}
 
-ThoughtDatabase.SCHEMA_VERSION = 3
+ThoughtDatabase.SCHEMA_VERSION = 4
 ThoughtDatabase.FILE_NAME = "thoughts.sqlite3"
 
 local function chapter_key(value)
     return U.id_name(tostring(value or ""))
 end
 
+-- Read-only lookups must not recreate an empty cache directory after a
+-- book is deleted. Only a write operation is allowed to create the book dir.
 local function database_path(store, book_id)
-    return store:book_dir(book_id) .. "/" .. ThoughtDatabase.FILE_NAME
+    local root = type(store.book_cache_path) == "function"
+        and store:book_cache_path(book_id) or store:book_dir(book_id)
+    return root .. "/" .. ThoughtDatabase.FILE_NAME
 end
 
 local function initialize(conn)
@@ -52,6 +57,27 @@ local function initialize(conn)
             ON thought_comments(review_id);
         CREATE INDEX IF NOT EXISTS idx_thought_comment_created
             ON thought_comments(created);
+        -- V4 stores synchronization and future document-location state separately
+        -- from the original review rows. The existing V3 tables are never rebuilt.
+        CREATE TABLE IF NOT EXISTS thought_sync_state (
+            chapter_uid TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'legacy',
+            last_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_success_at INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            cursor TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(chapter_uid) REFERENCES thought_chapters(chapter_uid) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS thought_locations (
+            chapter_uid TEXT NOT NULL,
+            range_key TEXT NOT NULL,
+            document_fingerprint TEXT NOT NULL DEFAULT '',
+            xpointer_start TEXT NOT NULL DEFAULT '',
+            xpointer_end TEXT NOT NULL DEFAULT '',
+            match_status TEXT NOT NULL DEFAULT 'pending',
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(chapter_uid, range_key)
+        );
         INSERT OR IGNORE INTO thought_chapters(chapter_uid, group_count, comment_count, updated_at)
         SELECT g.chapter_uid,
                COUNT(*),
@@ -60,9 +86,9 @@ local function initialize(conn)
           FROM thought_groups g
          GROUP BY g.chapter_uid;
     ]])
-    -- Migration history is no longer part of the runtime schema. Existing beta databases
-    -- may still contain this table; dropping it does not touch comment/group data.
-    conn:exec("DROP TABLE IF EXISTS thought_migration;")
+    -- Preserve legacy migration records: a schema open must never destroy data.
+    conn:exec([[INSERT OR IGNORE INTO thought_sync_state(chapter_uid, status, last_success_at)
+        SELECT chapter_uid, 'legacy', updated_at FROM thought_chapters;]])
     SQLiteStore.set_text(conn, "thought_schema_version", tostring(ThoughtDatabase.SCHEMA_VERSION))
 end
 
@@ -91,61 +117,143 @@ local function normalized_groups(groups)
     local rows, seen_ranges = {}, {}
     for _, group in ipairs(groups or {}) do
         local item = compact_group(group)
-        if item and not seen_ranges[item.range] then
-            seen_ranges[item.range] = true
-            rows[#rows + 1] = item
+        if item then
+            local previous = seen_ranges[item.range]
+            if previous then
+                for _, row in ipairs(item.texts) do previous.texts[#previous.texts + 1] = row end
+            else
+                seen_ranges[item.range] = item
+                rows[#rows + 1] = item
+            end
         end
     end
     return rows
 end
 
 local function open(store, book_id, read_only)
+    if read_only ~= true then store:book_dir(book_id) end
     local conn = SQLiteStore.open(database_path(store, book_id), read_only == true)
     if read_only ~= true then initialize(conn) end
     return conn
 end
 
-local function replace_chapter(conn, chapter_uid, groups)
+-- Append/merge responses. A partial network batch must NEVER replace older reviews.
+-- Keep the V3 ordinal keys and group order so old reading clients can still load
+-- the database. IDs are preferred; a content fingerprint is the legacy fallback.
+local function review_fingerprint(item)
+    return table.concat({tostring(item.author or ""), tostring(item.content or ""),
+        tostring(item.created or 0)}, "\31")
+end
+
+local function merge_chapter(conn, chapter_uid, groups)
     chapter_uid = chapter_key(chapter_uid)
     if chapter_uid == "" then error("章节标识为空") end
     local rows = normalized_groups(groups)
+    local previous = conn:prepare("SELECT 1 FROM thought_chapters WHERE chapter_uid = ? LIMIT 1")
+    local was_known = previous:bind(chapter_uid):step() ~= nil
+    previous:close()
 
-    local delete_comments = conn:prepare("DELETE FROM thought_comments WHERE chapter_uid = ?")
-    delete_comments:bind(chapter_uid):step()
-    delete_comments:close()
-    local delete_groups = conn:prepare("DELETE FROM thought_groups WHERE chapter_uid = ?")
-    delete_groups:bind(chapter_uid):step()
-    delete_groups:close()
+    local existing_groups = {}
+    local group_stmt = conn:prepare([[SELECT range_key, ordinal FROM thought_groups
+        WHERE chapter_uid = ? ORDER BY ordinal]])
+    group_stmt:bind(chapter_uid)
+    local next_group = 0
+    while true do
+        local row = group_stmt:step()
+        if not row then break end
+        local range = tostring(row[1] or "")
+        local ordinal = tonumber(row[2] or 0) or 0
+        existing_groups[range] = true
+        if ordinal > next_group then next_group = ordinal end
+    end
+    group_stmt:close()
 
-    local insert_group = conn:prepare([[
-        INSERT INTO thought_groups(chapter_uid, range_key, ordinal) VALUES(?, ?, ?)
-    ]])
-    local insert_comment = conn:prepare([[
-        INSERT INTO thought_comments(
-            chapter_uid, range_key, ordinal, content, abstract, author, likes, created, review_id
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ]])
-    local comments = 0
-    for group_index, group in ipairs(rows) do
-        insert_group:bind(chapter_uid, group.range, group_index):step()
-        insert_group:clearbind():reset()
-        for comment_index, item in ipairs(group.texts or {}) do
-            insert_comment:bind(chapter_uid, group.range, comment_index,
-                item.content, item.abstract, item.author, item.likes, item.created, item.review_id):step()
-            insert_comment:clearbind():reset()
-            comments = comments + 1
+    local added = 0
+    for _, group in ipairs(rows) do
+        local range = group.range
+        if not existing_groups[range] then
+            next_group = next_group + 1
+            local add_group = conn:prepare([[INSERT INTO thought_groups
+                (chapter_uid, range_key, ordinal) VALUES(?, ?, ?)]])
+            add_group:bind(chapter_uid, range, next_group):step()
+            add_group:close()
+            existing_groups[range] = true
+        end
+        local by_id, by_fingerprint = {}, {}
+        local next_ordinal = 0
+        local old = conn:prepare([[SELECT ordinal, content, abstract, author, likes, created, review_id
+            FROM thought_comments WHERE chapter_uid = ? AND range_key = ? ORDER BY ordinal]])
+        old:bind(chapter_uid, range)
+        while true do
+            local row = old:step()
+            if not row then break end
+            local ordinal = tonumber(row[1] or 0) or 0
+            if ordinal > next_ordinal then next_ordinal = ordinal end
+            local item = {content=row[2], abstract=row[3], author=row[4],
+                created=row[6], review_id=tostring(row[7] or "")}
+            if item.review_id ~= "" then by_id[item.review_id] = ordinal end
+            by_fingerprint[review_fingerprint(item)] = ordinal
+        end
+        old:close()
+        for _, item in ipairs(group.texts) do
+            local fingerprint = review_fingerprint(item)
+            local ordinal = (item.review_id ~= "" and by_id[item.review_id]) or by_fingerprint[fingerprint]
+            if ordinal then
+                -- Nonempty incoming text is the latest known text, while an empty
+                -- value must not blank a previously stored review.
+                local update = conn:prepare([[UPDATE thought_comments
+                    SET content = CASE WHEN ? <> '' THEN ? ELSE content END,
+                        abstract = CASE WHEN ? <> '' THEN ? ELSE abstract END,
+                        author = CASE WHEN ? <> '' THEN ? ELSE author END,
+                        likes = ?,
+                        review_id = CASE WHEN ? <> '' THEN ? ELSE review_id END
+                    WHERE chapter_uid = ? AND range_key = ? AND ordinal = ?]])
+                update:bind(item.content, item.content, item.abstract, item.abstract,
+                    item.author, item.author, item.likes, item.review_id, item.review_id,
+                    chapter_uid, range, ordinal):step()
+                update:close()
+            else
+                next_ordinal = next_ordinal + 1
+                ordinal = next_ordinal
+                local insert = conn:prepare([[INSERT INTO thought_comments(
+                    chapter_uid, range_key, ordinal, content, abstract, author, likes, created, review_id
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)]])
+                insert:bind(chapter_uid, range, ordinal, item.content, item.abstract,
+                    item.author, item.likes, item.created, item.review_id):step()
+                insert:close()
+                added = added + 1
+            end
+            if item.review_id ~= "" then by_id[item.review_id] = ordinal end
+            by_fingerprint[fingerprint] = ordinal
         end
     end
-    insert_group:close()
-    insert_comment:close()
-    local chapter_statement = conn:prepare([[
-        INSERT OR REPLACE INTO thought_chapters(
-            chapter_uid, group_count, comment_count, updated_at
-        ) VALUES(?, ?, ?, ?)
-    ]])
-    chapter_statement:bind(chapter_uid, #rows, comments, os.time()):step()
-    chapter_statement:close()
-    return {groups=#rows, comments=comments}
+
+    local counts = conn:prepare([[SELECT
+        (SELECT COUNT(*) FROM thought_groups WHERE chapter_uid = ?),
+        (SELECT COUNT(*) FROM thought_comments WHERE chapter_uid = ?)]])
+    local count_row = counts:bind(chapter_uid, chapter_uid):step()
+    counts:close()
+    local group_count = tonumber(count_row and count_row[1] or 0) or 0
+    local comment_count = tonumber(count_row and count_row[2] or 0) or 0
+    local create_chapter = conn:prepare([[INSERT OR IGNORE INTO thought_chapters
+        (chapter_uid, group_count, comment_count, updated_at) VALUES(?, 0, 0, 0)]])
+    create_chapter:bind(chapter_uid):step()
+    create_chapter:close()
+    local mark = conn:prepare([[UPDATE thought_chapters SET group_count = ?,
+        comment_count = ?, updated_at = ? WHERE chapter_uid = ?]])
+    mark:bind(group_count, comment_count, os.time(), chapter_uid):step()
+    mark:close()
+    -- 'partial' is intentionally conservative: the reader's API might return
+    -- only the first page, and B2 will own verified pagination/completeness.
+    local new_state = conn:prepare([[INSERT OR IGNORE INTO thought_sync_state
+        (chapter_uid, status) VALUES(?, 'legacy')]])
+    new_state:bind(chapter_uid):step()
+    new_state:close()
+    local state = conn:prepare([[UPDATE thought_sync_state SET status = 'partial',
+        last_attempt_at = ?, last_success_at = ?, last_error = '' WHERE chapter_uid = ?]])
+    state:bind(os.time(), os.time(), chapter_uid):step()
+    state:close()
+    return {groups=group_count, comments=comment_count, added=added, previously_known=was_known}
 end
 
 local function chapter_counts_conn(conn, chapter_uid)
@@ -174,11 +282,90 @@ function ThoughtDatabase.save_chapter(store, book_id, chapter_uid, groups)
     local conn = open(store, book_id, false)
     local ok, result = xpcall(function()
         return SQLiteStore.transaction(conn, function()
-            return replace_chapter(conn, chapter_uid, groups)
+            return merge_chapter(conn, chapter_uid, groups)
         end)
     end, debug.traceback)
     pcall(conn.close, conn)
     if not ok then return nil, tostring(result) end
+    return result
+end
+
+function ThoughtDatabase.sync_state(store, book_id, chapter_uid, with_cursor)
+    if not ThoughtDatabase.exists(store, book_id) then return nil end
+    local ok, result = pcall(function()
+        return SQLiteStore.with_connection(database_path(store, book_id), true, function(conn)
+            local stmt = conn:prepare(with_cursor and [[SELECT status, last_attempt_at, last_success_at,
+                last_error, cursor FROM thought_sync_state WHERE chapter_uid = ? LIMIT 1]] or
+                [[SELECT status, last_attempt_at, last_success_at,
+                last_error FROM thought_sync_state WHERE chapter_uid = ? LIMIT 1]])
+            local row = stmt:bind(chapter_key(chapter_uid)):step()
+            stmt:close()
+            if not row then return nil end
+            return {status=tostring(row[1] or "legacy"),
+                last_attempt_at=tonumber(row[2] or 0) or 0,
+                last_success_at=tonumber(row[3] or 0) or 0,
+                last_error=tostring(row[4] or ""), cursor=with_cursor and tostring(row[5] or "") or ""}
+        end)
+    end)
+    return ok and result or nil
+end
+
+-- B2 checkpoint and comments are committed in one SQLite transaction. The
+-- `cursor` is a compact range-level checkpoint, not a fabricated API page token.
+function ThoughtDatabase.load_checkpoint(store, book_id, chapter_uid)
+    local state=ThoughtDatabase.sync_state(store,book_id,chapter_uid,true)
+    if not state or state.cursor=="" then return nil end
+    local ok,snapshot=pcall(Json.decode,state.cursor)
+    return ok and type(snapshot)=="table" and snapshot or nil
+end
+
+function ThoughtDatabase.record_fetch(store, book_id, chapter_uid, groups, checkpoint, metadata)
+    metadata=type(metadata)=="table" and metadata or {}
+    local ok,serialized=pcall(Json.encode,checkpoint)
+    if not ok or type(serialized)~="string" then return nil,"评论断点无法序列化" end
+    local conn=open(store,book_id,false)
+    local good,result=xpcall(function()
+        return SQLiteStore.transaction(conn,function()
+            local counts=merge_chapter(conn,chapter_uid,groups or {})
+            local now=os.time()
+            local status=metadata.partial==true and "partial" or
+                (metadata.empty==true and counts.comments==0 and "empty" or "cached")
+            local stmt=conn:prepare([[UPDATE thought_sync_state SET
+                status=?,last_attempt_at=?,
+                last_success_at=CASE WHEN ? = 1 THEN ? ELSE last_success_at END,
+                last_error=?,cursor=? WHERE chapter_uid=?]])
+            stmt:bind(status,now,metadata.succeeded==true and 1 or 0,now,
+                tostring(metadata.error or ""),serialized,chapter_key(chapter_uid)):step()
+            stmt:close()
+            return counts
+        end)
+    end,debug.traceback)
+    pcall(conn.close,conn)
+    if not good then return nil,tostring(result) end
+    return result
+end
+
+-- Preserve all cached groups and the last known good cursor on any error.
+function ThoughtDatabase.record_error(store,book_id,chapter_uid,reason)
+    local conn=open(store,book_id,false)
+    local ok,result=xpcall(function()
+        return SQLiteStore.transaction(conn,function()
+            local key=chapter_key(chapter_uid)
+            local ch=conn:prepare([[INSERT OR IGNORE INTO thought_chapters(chapter_uid)
+                VALUES(?) ]])
+            ch:bind(key):step(); ch:close()
+            local stmt=conn:prepare([[INSERT OR IGNORE INTO thought_sync_state(chapter_uid)
+                VALUES(?) ]])
+            stmt:bind(key):step(); stmt:close()
+            local update=conn:prepare([[UPDATE thought_sync_state
+                SET status='error',last_attempt_at=?,last_error=? WHERE chapter_uid=?]])
+            update:bind(os.time(),tostring(reason or "unknown"),key):step()
+            update:close()
+            return true
+        end)
+    end,debug.traceback)
+    pcall(conn.close,conn)
+    if not ok then return nil,tostring(result) end
     return result
 end
 
@@ -392,6 +579,60 @@ function ThoughtDatabase.integrity(store, book_id)
         end)
     end)
     return ok and result == true
+end
+
+-- B3: location cache remains inside the existing per-book SQLite file.
+-- Entries are document- and quote-specific; a different EPUB or text revision
+-- cannot silently reuse the wrong XPointer. All writes are transactional.
+function ThoughtDatabase.load_locations(store,book_id,chapter_uid)
+    if not ThoughtDatabase.exists(store,book_id) then return {} end
+    local ok,rows=pcall(function()
+        return SQLiteStore.with_connection(database_path(store,book_id),true,function(conn)
+            local out={}
+            local stmt=conn:prepare([[SELECT range_key, document_fingerprint,
+                xpointer_start,xpointer_end,match_status FROM thought_locations
+                WHERE chapter_uid=?]])
+            stmt:bind(chapter_key(chapter_uid))
+            while true do
+                local row=stmt:step();if not row then break end
+                out[tostring(row[1] or "")]= {
+                    document_fingerprint=tostring(row[2] or ""),
+                    xpointer_start=tostring(row[3] or ""),
+                    xpointer_end=tostring(row[4] or ""),
+                    match_status=tostring(row[5] or "pending")}
+            end
+            stmt:close()
+            return out
+        end)
+    end)
+    return ok and rows or nil
+end
+
+function ThoughtDatabase.save_locations(store,book_id,chapter_uid,entries)
+    if type(entries)~="table" or #entries==0 then return true end
+    local conn=open(store,book_id,false)
+    local ok,result=xpcall(function()
+        return SQLiteStore.transaction(conn,function()
+            local stmt=conn:prepare([[INSERT OR REPLACE INTO thought_locations
+                (chapter_uid,range_key,document_fingerprint,xpointer_start,
+                 xpointer_end,match_status,updated_at) VALUES(?,?,?,?,?,?,?)]])
+            for _,entry in ipairs(entries) do
+                if type(entry)=="table" and tostring(entry.range or "")~="" then
+                    stmt:bind(chapter_key(chapter_uid),tostring(entry.range),
+                        tostring(entry.document_fingerprint or ""),
+                        tostring(entry.xpointer_start or ""),
+                        tostring(entry.xpointer_end or ""),
+                        tostring(entry.match_status or "unmatched"),os.time()):step()
+                    stmt:reset()
+                end
+            end
+            stmt:close()
+            return true
+        end)
+    end,debug.traceback)
+    pcall(conn.close,conn)
+    if not ok then return nil,tostring(result) end
+    return result
 end
 
 function ThoughtDatabase.remove(store, book_id)

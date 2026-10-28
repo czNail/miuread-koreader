@@ -1,5 +1,53 @@
 # Changelog
 
+## 6.1.0-beta.13 - Beta Update
+
+- 统一正文 EPUB 下载，整书、单章、范围及预下载不再新建带评论 EPUB；旧文件保留识别与打开能力。
+- 公开评论由阅读器主动获取，保存到现有每书 SQLite，支持离线查看、增量合并、部分失败续传及独立更新。
+- 在纯净 EPUB 中使用保守 XPointer 定位和非侵入式划线覆盖层；无法准确定位的评论仍在章节离线列表保留。
+- 评论数据库 V4 迁移保留历史数据。删除书籍清理关联本地缓存、保留全局评论收藏；删除前的安全上传不执行云端删除。
+- 主页顶栏按内容宽度均匀分配留白，支持逐项与整栏隐藏；Wi-Fi 仅显示状态图标，点击后进入连接详情与网络管理。
+- 修复弹窗内容裁切、大小弹窗切换残影及背景恢复时序，尽量保持 E-Ink 局部刷新。
+- B7 整合修复：删除后的只读评论查询不再重建缓存目录；章节失效时清除旧覆盖标记；划线绘制限制在阅读视口；极窄屏避免顶栏溢出。
+- 保留阅读进度、阅读时间、个人批注同步及原有 Beta/Tag 发布工作流；Kindle 实机显示与微信读书线上接口仍需验证。
+
+
+## 6.1.0-beta.13-B4 - Development checkpoint (not a release)
+
+- New whole-book, single-chapter, range, and prefetch jobs generate clean EPUB only; no comments are requested during book downloads.
+- Remove edition-choice dialogs across shelf, book menu, current-book rebuild, and chapter/range actions; retain the existing foreground/background/after-reading choices.
+- Existing legacy notes EPUBs can still be opened or deleted via local file management, without offering a new notes download.
+- Keep older clean EPUB paths for KOReader sidecars; new clean EPUBs use a filename without an edition suffix.
+- Ignore legacy notes-only repair checkpoints instead of interpreting them as clean EPUB content; retain their data untouched.
+- Preserve B1–B3 comment cache, annotation sync, and overlay behavior. B5 top bar and B6 E-Ink dialog changes remain out of scope.
+
+## 6.1.0-beta.13-B3 - Development checkpoint (not a release)
+
+- B3 only: project cached public comments onto pure EPUB via conservative, offline XPointer location matching; never write or rebuild EPUB.
+- Persist matched/unmatched document-specific locations in existing per-book thoughts.sqlite3; invalidate on changed document or quote.
+- ReaderView paint overlay + tap to existing native thought popup (favorites/copy/likes), with chapter-scoped cache, layout invalidation and lifecycle cleanup.
+- Preserve link-based behavior for legacy notes EPUBs; ambiguous, missing and unverified anchors remain accessible through the chapter's offline comment list.
+- Does not remove dual-version download choices (B4), modify homepage (B5) or global dialogs (B6). Kindle/KOReader display and WeRead live-API integration still require device verification.
+
+## 6.1.0-beta.13-B2 - Development checkpoint (not a release)
+
+- 以 B1 为基线新增按需的本章公开评论同步：不在打开书籍、翻页或后台下载时自动请求评论。
+- 评论中心新增本章缓存列表、主动获取、断点续传与独立更新；首次启用评论且未缓存时询问是否联网。
+- 评论和范围级断点共同提交到现有 `thoughts.sqlite3`，支持重启后恢复；正常二次查看完全离线。
+- 明确区分网络失败、部分获取和合法空结果，非破坏性合并新评论，异常响应不清空旧内容。
+- 保留 API 的可核实能力边界：当前每个范围最多请求首批 30 条，不声称已穷尽所有历史评论。
+- B2 暂时在阅读器提供独立的离线评论列表；正文 XPointer 覆盖层为 B3，双版本下载入口调整为 B4。
+- B1 收藏、删除与个人云端批注保护继续保留；未改动发布自动化、进度同步或阅读时间上报。
+
+## 6.1.0-beta.13-B1 - Development checkpoint (not a release)
+
+- 评论数据库 Schema V3 → V4 原地升级：新增章节同步状态与定位缓存表，保留历史评论和迁移记录。
+- 评论保存改为按 review_id / 稳定内容指纹合并，空或不完整响应不能清空既有评论。
+- 本地删除书籍时清理该书文档、缓存与索引，独立全局评论收藏继续保存；安全禁止误删收藏数据库。
+- 删除前的“先同步”仅处理可上传的新增个人批注；排除本地云端删除标记，防止误删云端记录。
+- 保护未同步及 held_local 批注：批注状态无法读取时不静默当作零条，要求用户明确选择。
+- 本批不改变评论下载触发、EPUB 版本选项、主页顶栏或墨水屏弹窗刷新；这些属于 B2–B6。
+
 ## 6.1.0-beta.12 - Beta Update
 
 - 修复 Lua 5.1/LuaJIT 发布回归测试的模块搜索路径

@@ -991,9 +991,21 @@ function AnnotationSync:sync_book(book, record, options)
     if diagnostic_only then
         rows, rows_error = LocalDB.list(self.store, book_id, options.limit or 200)
     else
-        rows, rows_error = LocalDB.pending(self.store, book_id, options.limit or 200)
+        rows, rows_error = LocalDB.pending(self.store, book_id, options.limit or 200,
+            {upload_only=options.upload_only==true})
     end
     if not rows then return {ok=false, error=rows_error} end
+    -- B1 safety: the pre-delete path may upload local additions but may never
+    -- consume deletion tombstones. Do this before collecting cloud API needs.
+    if options.upload_only == true then
+        local additions = {}
+        for _, row in ipairs(rows) do
+            if row.sync_state ~= "delete_pending" and row.sync_state ~= "delete_unknown" then
+                additions[#additions + 1] = row
+            end
+        end
+        rows = additions
+    end
     local summary = LocalDB.summary(self.store, book_id) or {}
     local result = {ok=true,total=#rows,synced=0,deleted=0,failed=0,locate_failed=0,
         metadata_failed=0,coord_failed=0,unknown=0,skipped=0,reconciled=0,errors={}, diagnostic_only=diagnostic_only,
@@ -1142,6 +1154,9 @@ function AnnotationSync:sync_book(book, record, options)
                 stage_log(row, "diagnostic", false, locate_error or "locate_failed")
             end
             result.skipped = result.skipped + 1
+        elseif (row.sync_state == "delete_pending" or row.sync_state == "delete_unknown")
+            and options.upload_only == true then
+            result.skipped = result.skipped + 1 -- Never delete cloud data during local-book removal.
         elseif row.sync_state == "delete_pending" or row.sync_state == "delete_unknown" then
             -- A local tombstone is only removed after cloud reconciliation proves
             -- the remote item is already absent or a delete request returns
