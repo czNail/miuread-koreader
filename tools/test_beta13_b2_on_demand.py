@@ -16,7 +16,7 @@ class CommentB2(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertIsNotNone(config)
         self.assertEqual(meta.group(1), config.group(1))
-        self.assertRegex(meta.group(1), r'^6\.1\.0-beta\.(?:13(?:-B[1-6])?|14)$')
+        self.assertRegex(meta.group(1), r'^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$')
 
     def test_no_epub_writes_or_auto_download_in_new_module(self):
         module = source('miuread/comment_sync.lua')
@@ -51,7 +51,9 @@ class CommentB2(unittest.TestCase):
     def test_incomplete_batches_not_marked_as_empty(self):
         parser = source('miuread/annotations.lua')
         self.assertIn('missing review list', parser)
-        self.assertIn('if skipped==0 then mark_batch_completed(batch) end', parser)
+        self.assertIn('mark_batch_completed(confirmed)', parser)
+        self.assertIn('response lacks ', parser)
+        self.assertIn('local requested={}', parser)
         self.assertIn('options.force_refresh~=true and previous.underline_request_ok', parser)
 
     def test_deletion_and_personal_data_not_regressed(self):

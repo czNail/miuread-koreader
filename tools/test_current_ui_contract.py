@@ -1,4 +1,4 @@
-"""beta.14 interaction/layout source contracts; excludes device E-Ink validation."""
+"""Current interaction/layout source contracts; excludes device E-Ink validation."""
 from pathlib import Path
 import re, unittest
 
@@ -10,7 +10,7 @@ class UIContract(unittest.TestCase):
     def test_release_versions_match(self):
         meta=re.search(r'version\s*=\s*"([^"]+)"',read('_meta.lua'))
         config=re.search(r'VERSION\s*=\s*"([^"]+)"',read('miuread/config.lua'))
-        self.assertEqual(meta.group(1), '6.1.0-beta.14')
+        self.assertRegex(meta.group(1), r'^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$')
         self.assertEqual(meta.group(1),config.group(1))
 
     def test_text_box_has_explicit_bounded_height(self):

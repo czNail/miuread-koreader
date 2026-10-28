@@ -854,6 +854,28 @@ function Api:_agent_readreviews(id,chapter_uid,batch)
     return value
 end
 
+-- A success status and an empty `reviews` array do not establish that
+-- all requested highlight ranges were queried. Compare range coverage
+-- without logging personal review texts or user credentials.
+local function review_coverage(response,batch)
+    if type(response)~="table" or type(response.reviews)~="table" then return 0 end
+    local requested,found={},{}
+    for _,item in ipairs(batch or {}) do
+        if type(item)=="table" then requested[tostring(item.range or "")]=true end
+    end
+    for _,item in ipairs(response.reviews) do
+        if type(item)=="table" then
+            local key=tostring(item.range or item.markRange or "")
+            if requested[key] and type(item.pageReviews or item.reviews or item.updated)=="table" then
+                found[key]=true
+            end
+        end
+    end
+    local count=0
+    for _ in pairs(found) do count=count+1 end
+    return count
+end
+
 function Api:readreviews(id, chapter_uid, batch)
     if self.web_annotation_auth_dead==true then
         logger.dbg("[MiuRead][API] web readReviews skipped; annotation circuit open",
@@ -861,7 +883,28 @@ function Api:readreviews(id, chapter_uid, batch)
         return self:_agent_readreviews(id,chapter_uid,batch)
     end
     local ok,value=pcall(self._web_readreviews,self,id,chapter_uid,batch)
-    if ok then self.web_annotation_auth_dead=false; return value end
+    if ok then
+        self.web_annotation_auth_dead=false
+        local covered=review_coverage(value,batch)
+        if covered<#(batch or {}) then
+            -- An ambiguous or incomplete Web success used to be recorded as
+            -- an authoritative empty chapter. Try the official Gateway once.
+            local agent_ok,agent=pcall(self._agent_readreviews,self,id,chapter_uid,batch)
+            if agent_ok and review_coverage(agent,batch)>covered then
+                logger.info("[MiuRead][API] readreviews Gateway recovered incomplete Web response",
+                    "book=",tostring(id),"chapter=",tostring(chapter_uid),
+                    "web_ranges=",tostring(covered),"gateway_ranges=",tostring(review_coverage(agent,batch)))
+                return agent
+            end
+            if not agent_ok then
+                propagate_control_error(agent)
+                logger.warn("[MiuRead][API] readreviews Gateway fallback unavailable",
+                    "book=",tostring(id),"chapter=",tostring(chapter_uid),
+                    "error=",U.first_line(agent,120))
+            end
+        end
+        return value
+    end
     propagate_control_error(value)
     self:_note_web_annotation_failure(value)
     -- Batch-shape failures must go back to the adaptive splitter. Falling

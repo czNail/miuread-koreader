@@ -104,14 +104,24 @@ local function review_texts(group,yield_check)
         -- review can never abort the whole book download.
         local ok, item = pcall(function()
             if type(page) ~= "table" then return nil end
-            local nested = rawget(page, "review")
-            local r = type(nested) == "table" and nested or page
-            if type(r) ~= "table" then return nil end
-            local content = scalar_str(rawget(r, "content") or rawget(r, "review") or rawget(r, "text"))
+            -- Agent and Web may wrap the actual text at different review
+            -- depths. Never interpret a nested table as literal comment text.
+            local r = page
+            local review_id = scalar_str(rawget(page, "reviewId") or rawget(page, "id"))
+            for _ = 1, 3 do
+                if scalar_str(rawget(r, "content") or rawget(r, "text"))~="" then break end
+                local nested = rawget(r, "review")
+                if type(nested) ~= "table" then break end
+                if review_id == "" then
+                    review_id = scalar_str(rawget(nested, "reviewId") or rawget(nested, "id"))
+                end
+                r = nested
+            end
+            local content = scalar_str(rawget(r, "content") or rawget(r, "text"))
             if content == "" then return nil end
             local author = type(rawget(r, "author")) == "table" and rawget(r, "author") or {}
             local author_name = scalar_str(rawget(author, "nick") or rawget(author, "name") or rawget(r, "authorName"))
-            local key = scalar_str(rawget(r, "reviewId") or rawget(r, "id"))
+            local key = review_id
             if key == "" then key = content .. "\0" .. author_name end
             return {
                 key = key,
@@ -120,7 +130,7 @@ local function review_texts(group,yield_check)
                 created = tonumber(rawget(r, "createTime") or rawget(r, "createdAt") or 0) or 0,
                 author = author_name,
                 likes = tonumber(rawget(page, "likesCount") or rawget(r, "likesCount") or 0) or 0,
-                review_id = scalar_str(rawget(r, "reviewId") or rawget(r, "id")),
+                review_id = review_id,
             }
         end)
         if ok and item and not seen[item.key] then
@@ -290,12 +300,43 @@ function Annotations:fetch_chapter(book_id, uid, progress, options)
             result.errors[#result.errors+1]=tostring(label).." skipped malformed review entries"
             invalid_review_count=invalid_review_count+invalid
         end
-        -- Invalid response rows cannot prove a range was fully fetched.
-        -- Keep its checkpoint pending; do not silently label partial data
-        -- as a successful empty chapter.
-        if skipped==0 then mark_batch_completed(batch) end
+        -- Never mark a *requested* range completed just because the HTTP
+        -- request returned 200 with {reviews={}} or a partial review array.
+        -- Only a well-formed response entry for the same range (including a
+        -- concrete {pageReviews={}} empty result) establishes coverage.
+        local requested={}
+        for _,item in ipairs(batch) do
+            local key=range_key(item)
+            if key~="" then requested[key]=true end
+        end
+        local answered,invalid_range={},0
+        if skipped==0 then
+            for _,group in ipairs(rows) do
+                local key=range_key(group)
+                if requested[key] and type(group.pageReviews or group.reviews or group.updated)=="table" then
+                    answered[key]=true
+                else
+                    invalid_range=invalid_range+1
+                end
+            end
+            local confirmed={}
+            for _,item in ipairs(batch) do
+                if answered[range_key(item)] then confirmed[#confirmed+1]=item end
+            end
+            mark_batch_completed(confirmed)
+        end
+        local missing=0
+        for key in pairs(requested) do if not answered[key] then missing=missing+1 end end
+        if missing>0 or invalid_range>0 then
+            result.error_kind=result.error_kind or "data"
+            result.errors[#result.errors+1]=tostring(label).." response lacks "..tostring(missing).." requested ranges"
+            logger.warn("[MiuRead][Annotations] readreviews incomplete coverage",
+                "book=",result.book_id,"chapter=",result.chapter_uid,
+                "requested=",tostring(#batch),"answered=",tostring(#batch-missing),
+                "invalid=",tostring(invalid_range))
+        end
         save_checkpoint()
-        return skipped==0
+        return skipped==0 and missing==0 and invalid_range==0
     end
 
     local function split_batch(batch)

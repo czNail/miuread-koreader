@@ -25,6 +25,23 @@ class PrepareBetaReleaseTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_auto_cleans_identical_historical_sections_for_manual_release(self):
+        previous = self.changelog.read_text()
+        self.changelog.write_text(previous + "\n# Changelog\n\n" + previous)
+        self.assertTrue(prepare(self.root, "6.0.1-beta.2", "修复发布准备"))
+        log = self.changelog.read_text()
+        self.assertEqual(log.count("# Changelog"),1)
+        self.assertEqual(log.count("## 6.0.0-beta.1"),1)
+        self.assertEqual(log.count("## 6.0.1-beta.2"),1)
+        self.assertFalse(prepare(self.root, "6.0.1-beta.2", "修复发布准备"))
+
+    def test_conflicting_history_fails_without_modifying_files(self):
+        self.changelog.write_text("# Changelog\n\n## 6.0.0-beta.1\n- first\n## 6.0.0-beta.1\n- different\n")
+        before=[p.read_bytes() for p in (self.config,self.meta,self.changelog)]
+        with self.assertRaisesRegex(ValueError, "Conflicting changelog"):
+            prepare(self.root,"6.0.1-beta.2","note")
+        self.assertEqual(before,[p.read_bytes() for p in (self.config,self.meta,self.changelog)])
+
     def test_prepares_and_preserves_history(self):
         changed = prepare(self.root, "6.0.1-beta.2", "修复书架刷新 | 保留阅读进度")
         self.assertTrue(changed)

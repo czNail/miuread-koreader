@@ -9,6 +9,7 @@ are supported by the workflow and use a separate workspace-only preparation path
 import argparse
 import re
 from pathlib import Path
+from changelog_integrity import normalize_changelog
 
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$")
 CONFIG_RE = re.compile(r'(?m)^(\s*VERSION\s*=\s*["\'])([^"\']+)(["\'],?\s*)$')
@@ -82,7 +83,8 @@ def prepare(root, version, notes):
     changelog_path = root / "CHANGELOG.md"
     config = config_path.read_text(encoding="utf-8")
     meta = meta_path.read_text(encoding="utf-8")
-    changelog = changelog_path.read_text(encoding="utf-8")
+    original_changelog = changelog_path.read_text(encoding="utf-8")
+    changelog = normalize_changelog(original_changelog)
 
     config_version = find_version(config, CONFIG_RE, "config.lua")
     meta_version = find_version(meta, META_RE, "_meta.lua")
@@ -96,6 +98,10 @@ def prepare(root, version, notes):
         if previous_notes is None:
             raise ValueError(f"源码已经是 {version}，但 CHANGELOG 缺少对应版本条目")
         if previous_notes == bullets:
+            if changelog != original_changelog:
+                changelog_path.write_text(changelog, encoding="utf-8")
+                print(f"Normalized duplicate release notes for {version}")
+                return True
             print(f"Already prepared: {version} (no changes)")
             return False
         # The workflow independently forbids changing an existing immutable tag.

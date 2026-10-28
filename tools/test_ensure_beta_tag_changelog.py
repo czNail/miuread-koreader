@@ -36,9 +36,34 @@ class ChangelogTagReleaseTest(unittest.TestCase):
         self.assertNotIn("## v6.1.0-beta.7", value)
         self.assertFalse(ensure_changelog(self.root, "6.1.0-beta.7", "ignored"))
 
+    def test_identical_duplicate_target_sections_are_auto_merged(self):
+        body = "## 6.1.0-beta.7 - Fix\n\n- unchanged\n\n"
+        self.file.write_text("# Changelog\n\n" + body + "# Changelog\n\n" + body + "## 6.1.0-beta.6\n\n- old\n",encoding="utf-8")
+        self.assertTrue(ensure_changelog(self.root, "6.1.0-beta.7", "commit"))
+        value = self.file.read_text()
+        self.assertEqual(value.count("## 6.1.0-beta.7 - Fix"), 1)
+        self.assertEqual(value.count("# Changelog"), 1)
+        self.assertIn("## 6.1.0-beta.6",value)
+        self.assertFalse(ensure_changelog(self.root, "6.1.0-beta.7", "commit"))
+
+    def test_duplicated_historical_release_does_not_block_new_tag(self):
+        old = "## 6.1.0-beta.6 - Old\n\n- preserved\n\n"
+        self.file.write_text("# Changelog\n\n" + old + old, encoding="utf-8")
+        self.assertTrue(ensure_changelog(self.root, "6.1.0-beta.7", "new release"))
+        value=self.file.read_text()
+        self.assertEqual(value.count("## 6.1.0-beta.6"),1)
+        self.assertIn("## 6.1.0-beta.7 - Beta Update", value)
+
+    def test_duplicate_conflict_reports_lines_and_preserves_original(self):
+        source = "# Changelog\n\n## 6.1.0-beta.7\n- first\n## 6.1.0-beta.7\n- second\n"
+        self.file.write_text(source,encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Conflicting.*lines 3 and 5"):
+            ensure_changelog(self.root, "6.1.0-beta.7", "commit")
+        self.assertEqual(self.file.read_text(), source)
+
     def test_duplicates_raise(self):
         self.file.write_text("# Changelog\n\n## 6.1.0-beta.7\n- x\n## v6.1.0-beta.7\n- y\n")
-        with self.assertRaisesRegex(ValueError,"Duplicate"):
+        with self.assertRaisesRegex(ValueError,"Conflicting"):
             ensure_changelog(self.root, "6.1.0-beta.7", "commit")
 
     def test_heading_without_bullets_raise(self):

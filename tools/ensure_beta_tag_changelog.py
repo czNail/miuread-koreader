@@ -8,6 +8,7 @@ Existing correct release notes are preserved verbatim.
 import argparse
 import re
 from pathlib import Path
+from changelog_integrity import normalize_changelog
 
 
 def ensure_changelog(root, version, fallback_note):
@@ -15,7 +16,7 @@ def ensure_changelog(root, version, fallback_note):
         raise ValueError("Invalid beta version")
     path = Path(root) / "CHANGELOG.md"
     original = path.read_text(encoding="utf-8")
-    lines = original.splitlines()
+    lines = normalize_changelog(original).splitlines()
     correct = f"## {version}"
     legacy = f"## v{version}"
 
