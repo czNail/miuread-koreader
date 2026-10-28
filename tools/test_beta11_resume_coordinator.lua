@@ -1,4 +1,5 @@
 -- Unit-level test of the real Plugin coordinator, without KOReader UI/device.
+package.path="./miuread.koplugin/?.lua;./miuread.koplugin/?/init.lua;"..package.path
 local source=assert(io.open('miuread.koplugin/main.lua','rb')):read('*a')
 local first=assert(source:find('function Plugin:_schedule_hibernated_download_resume(reason)',1,true))
 local last=assert(source:find('function Plugin:_set_foreground(owner)',first+1,true))

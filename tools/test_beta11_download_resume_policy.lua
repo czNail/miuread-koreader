@@ -1,3 +1,4 @@
+package.path="./miuread.koplugin/?.lua;./miuread.koplugin/?/init.lua;"..package.path
 local Policy=require("miuread.download_resume_policy")
 local cfg={DOWNLOAD_INTERACTION_RESUME_DELAY=2.5,DOWNLOAD_IDLE_PUMP_SECONDS=75}
 assert(Policy.next_delay("memory_pressure",0,0,cfg)==2.5)

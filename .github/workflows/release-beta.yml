@@ -103,6 +103,7 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_prepare_beta_release.py'
           python3 -m unittest discover -s tools -p 'test_beta_release_workflow.py'
           python3 -m unittest discover -s tools -p 'test_beta11_release_guard.py' 
+          python3 -m unittest discover -s tools -p 'test_beta12_release_regression.py'
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
@@ -313,6 +314,8 @@ jobs:
 
       - name: Run Lua syntax checks and release regression verifier
         shell: bash
+        env:
+          LUA_PATH: "./miuread.koplugin/?.lua;./miuread.koplugin/?/init.lua;;"
         run: |
           set -euo pipefail
           sudo apt-get update
