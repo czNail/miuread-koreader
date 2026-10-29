@@ -385,6 +385,7 @@ jobs:
           luajit tools/test_internal_links.lua
           python3 tools/test_extension_center_ux.py
           python3 tools/verify_600_beta1.py
+          python3 tools/test_624_release_verifier_contract.py
           python3 tools/verify_memory_profile.py
           python3 tools/test_beta11_download_resume.py
           lua5.1 tools/test_beta11_download_resume_policy.lua

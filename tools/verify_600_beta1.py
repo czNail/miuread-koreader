@@ -52,18 +52,33 @@ ok('local_coordinate_unresolved=true' in main,'unresolved state included in fail
 ok('can_clear_stale=replayable~=true and not (anchor_only and saved_anchor~=nil)' in main,'recoverable anchors not stale')
 ok('text="恢复精确位置"' in main,'manual anchor recovery action')
 ok('lightweight service exited after requested stop' in sync,'ReadReport requested stop is informational')
-# 6.2 restores periodic reading-time reports through a fresh Web position echo,
-# independent of Kindle local progress positions.
-time_start = worker.find("    if reading_time_compat then\n")
+# 6.2.0-beta.3+ uses a *session-scoped Web opening snapshot*, not a
+# per-interval Legacy GET. This contract checks the actual source-to-POST
+# chain and fails closed on missing/untrusted tuples without resurrecting
+# obsolete "refresh_remote_anchor" requirements.
+time_start = worker.find("    if reading_time_compat then\n", worker.find("    local protocol_time_only = job.time_only"))
 time_end = worker.find("    local accepted, result", time_start + 1) if time_start >= 0 else -1
 time_branch = worker[time_start:time_end] if time_start >= 0 and time_end > time_start else ""
-ok(bool(time_branch)
-   and 'refresh_remote_anchor(client,book_id,book)' in time_branch
-   and 'normalize_cloud_anchor(nil,book)' in time_branch
-   and 'estimate_position(book,progress_ratio)' not in time_branch
-   and 'request_dispatched=false' in time_branch
-   and 'protocol_time_only, position_override' in worker[time_end:time_end+260],
-   'ReadReport 6.2 periodic Web-time echo retained with fail-closed semantics')
+service=(root/'miuread.koplugin/miuread/read_report_service.lua').read_text(encoding='utf-8')
+adapter=(root/'miuread.koplugin/miuread/legacy_adapter_worker.lua').read_text(encoding='utf-8')
+position_contract=(
+    bool(time_branch)
+    and 'local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}' in time_branch
+    and 'book.session_time_anchor_session' in time_branch
+    and 'source=="web_cookie"' in time_branch
+    and 'same_book and from_web and fresh' in time_branch
+    and 'catalog_idx~=nil and catalog_idx==idx' in time_branch
+    and 'position_override=normalize_cloud_anchor(anchor,{})' in time_branch
+    and 'request_dispatched=false' in time_branch
+    and 'refresh_remote_anchor(client,book_id,book)' not in time_branch
+    and 'estimate_position(book,progress_ratio)' not in time_branch
+    and 'protocol_time_only, position_override' in worker[time_end:time_end+260]
+    and 'cloud_anchor = time_only and' in service
+    and 'cloud_anchor = copy(job.cloud_anchor or {})' in adapter
+    and 'self:set_remote_wire_anchor(book_id,web,"remote_observed_wire",true)' in sync
+)
+ok(position_contract,
+   'ReadReport session-scoped Web-time echo with fail-closed validation retained')
 ok('remote_wire_anchor' in sync,'remote wire anchor retained')
 ok('POSITION_CLOCK_SKEW_GRACE_SECONDS = 30' in config,'30s clock skew guard retained')
 ok('lua5.1 tools/test_591_beta1_progress_recovery.lua' in workflow,'new recovery contract in release workflow')
