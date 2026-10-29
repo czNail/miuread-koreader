@@ -9000,11 +9000,11 @@ function Plugin:_home_variant_download_action(target,annotations,context)
         label=annotations and "继续下载带评论版" or "继续下载正文"
         detail="上次任务未完成，点击继续"
         local options=b4_content_only_options((task and task.options) or (repair and repair.options))
-        callback=function() self:choose_download_mode(target,options,false) end
+        callback=function() self:choose_download_mode(target,options,false,{home_sheet=true}) end
     else
         label=annotations and "下载正文与公开想法" or "下载正文"
         detail=annotations and "另存带评论 EPUB，本机纯正文版不受影响" or "只下载正文，评论在阅读时按需获取"
-        callback=function() self:choose_download_mode(target,{annotations=annotations==true},false) end
+        callback=function() self:choose_download_mode(target,{annotations=annotations==true},false,{home_sheet=true}) end
     end
 
     return {
@@ -19667,19 +19667,24 @@ function Plugin:_fetch_book_details_online(b)
         self:info(title.."\n"..author.."\n\n"..tostring(x.intro or x.description or b.intro or b.description or "暂无简介"))
     end,{context=context,timeout=28,status_title="书籍详情",status_text="正在后台获取书籍信息…"})
 end
+-- Download admissions use the same menu family as Home/Reader actions.
+-- The previous ButtonDialog could be shown during a retiring sheet's ink repaint.
 function Plugin:_download_preflight(callback)
     local state=HomeData.device_state(true) or {}
     local function check_battery()
         local battery=tonumber(state.battery)
         if self:_notice_enabled("low_battery") and battery and battery<20 and state.charging~=true then
-            local dialog
-            dialog=ButtonDialog:new{title="当前电量较低。继续下载整本书可能明显缩短使用时间。",title_align="center",buttons={
-                {{text="继续下载",callback=function() UIManager:close(dialog); callback() end}},
-                {{text="继续并不再提示",callback=function() UIManager:close(dialog); self:_set_notice_enabled("low_battery",false); callback() end}},
-                {{text="取消",callback=function() UIManager:close(dialog) end}},
-            }}
-            UIManager:show(dialog)
-            return true
+            return ActionSheet.show{
+                title="低电量提醒",subtitle="继续下载整本书可能明显缩短使用时间。",
+                columns=1,width_ratio=.76,
+                actions={
+                    {icon="download",label="继续下载",callback=callback},
+                    {icon="check",label="继续并不再提示",callback=function()
+                        self:_set_notice_enabled("low_battery",false); callback()
+                    end},
+                    {icon="close",label="取消",callback=function() end},
+                },
+            }
         end
         callback()
         return true
@@ -19690,14 +19695,18 @@ function Plugin:_download_preflight(callback)
         return false
     end
     if self:_notice_enabled("low_storage") and free and free>0 and free<256*1024*1024 then
-        local dialog
-        dialog=ButtonDialog:new{title="剩余存储空间较少。下载图片或生成 EPUB 后可能无法正常保存。",title_align="center",buttons={
-            {{text="继续下载",callback=function() UIManager:close(dialog); check_battery() end}},
-            {{text="打开下载管理",callback=function() UIManager:close(dialog); self:show_downloads() end}},
-            {{text="继续并不再提示",callback=function() UIManager:close(dialog); self:_set_notice_enabled("low_storage",false); check_battery() end}},
-        }}
-        UIManager:show(dialog)
-        return true
+        return ActionSheet.show{
+            title="存储空间提醒",subtitle="下载图片或生成 EPUB 后可能无法正常保存。",
+            columns=1,width_ratio=.76,
+            actions={
+                {icon="download",label="继续下载",callback=check_battery},
+                {icon="folder",label="打开下载管理",callback=function() self:show_downloads() end},
+                {icon="check",label="继续并不再提示",callback=function()
+                    self:_set_notice_enabled("low_storage",false); check_battery()
+                end},
+                {icon="close",label="取消",callback=function() end},
+            },
+        }
     end
     return check_battery()
 end
@@ -19717,12 +19726,10 @@ b4_content_only_options=function(options)
     return result
 end
 
-function Plugin:choose_download_mode(b,opt,open_after)
+function Plugin:choose_download_mode(b,opt,open_after,ui_context)
     opt=b4_content_only_options(opt)
-    local dialog
     local function launch(background,defer_until_reader_closed)
         if defer_until_reader_closed==true then
-            if dialog then UIManager:close(dialog) end
             self:_queue_download(b,opt,open_after,{defer_until_reader_closed=true,reason="退出阅读后下载"})
             return
         end
@@ -19731,7 +19738,6 @@ function Plugin:choose_download_mode(b,opt,open_after)
             return
         end
         self._download_launch_pending=true
-        if dialog then UIManager:close(dialog) end
         self:status_toast("觅阅",tostring(b and b.title or "未命名")..
             (background and "正在准备后台下载" or "正在准备下载"),2)
         UIManager:scheduleIn(.20,function()
@@ -19752,25 +19758,35 @@ function Plugin:choose_download_mode(b,opt,open_after)
             launch(true,true)
             return
         end
-        if dialog then UIManager:close(dialog) end
-        dialog=ButtonDialog:new{title="阅读时下载会增加耗电，并可能导致翻页、评论或菜单响应变慢。",title_align="center",buttons={
-            {{text="继续后台下载",callback=function() UIManager:close(dialog); dialog=nil; launch(true) end}},
-            {{text="退出阅读后下载",callback=function() UIManager:close(dialog); dialog=nil; launch(true,true) end}},
-            {{text="取消",callback=function() UIManager:close(dialog) end}},
-        }}
-        UIManager:show(dialog)
+        -- Never open a native ButtonDialog while the previous menu retires.
+        return ActionSheet.show{
+            title="阅读中下载",subtitle="下载可能增加耗电，并降低翻页或菜单响应速度。",
+            columns=1,width_ratio=.76,
+            actions={
+                {icon="cloud",label="继续后台下载",callback=function() launch(true) end},
+                {icon="history",label="退出阅读后下载",callback=function() launch(true,true) end},
+                {icon="close",label="取消",callback=function() end},
+            },
+        }
     end
     local function start(background)
-        if dialog then UIManager:close(dialog); dialog=nil end
         self:_download_preflight(function() begin_after_preflight(background) end)
     end
-    dialog=ButtonDialog:new{title="下载方式",title_align="center",buttons={
-        {{text="后台下载",callback=function() start(true) end}},
-        {{text="留在当前页面下载",callback=function() start(false) end}},
-        {{text="取消",callback=function() UIManager:close(dialog) end}},
-    }}
-    UIManager:show(dialog)
+    -- Home, Reader and range downloads now share the same tested ActionSheet
+    -- family. The original edition, ranges, queue and callbacks are untouched.
+    return ActionSheet.show{
+        title=opt.annotations==true and "下载方式 · 正文与公开想法" or "下载方式 · 正文",
+        width_ratio=.72, columns=1,
+        actions={
+            {icon="cloud",label="后台下载",detail="下载在后台进行",
+                callback=function() start(true) end},
+            {icon="download",label="留在当前页面下载",detail="显示进度与控制按钮",
+                callback=function() start(false) end},
+            {icon="close",label="取消",callback=function() end},
+        },
+    }
 end
+
 function Plugin:choose_download(b,limit,open_after,uid)
     -- The next decision is *how* to download, not a content edition selector.
     return self:choose_download_mode(b,{annotations=false,limit=limit,chapter_uid=uid},open_after)
