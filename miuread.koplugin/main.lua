@@ -25366,7 +25366,8 @@ function Plugin:reading_time_menu()
     }
     local control=summary.control or {}
     local reasons={authentication="登录或授权需要恢复",network="网络暂不可用",rate_limited="接口限频，正在等待冷却",
-        prepare_failed="上传准备失败，将自动重试",config_token_missing="服务端未返回签名配置，将自动重试",
+        prepare_failed="上传准备失败，将自动重试",web_position_unavailable="云端位置暂不可用，将自动重试",
+        config_token_missing="服务端未返回签名配置，将自动重试",
         signature_token_invalid="服务端签名配置异常，将自动重试",web_request_failed="Web 上传准备失败，将自动重试",
         worker_unavailable="后台任务暂不可用；可稍后点击立即同步重试"}
     if control.reason then rows[#rows+1]={text=reasons[control.reason] or "等待下次同步",enabled=false} end

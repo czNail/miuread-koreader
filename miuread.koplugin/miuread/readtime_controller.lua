@@ -171,7 +171,7 @@ end
 function M:stop(sync,reason,cancel)
     if self.sync==sync or cancel or not self:enabled() then
         self.reading_open=false
-        self.web_window=nil
+        if cancel or not self:enabled() then self.web_window=nil end
     end
     if self.active and (self.active.sync==sync or cancel or not self:enabled()) then
         local active=self.active
@@ -299,7 +299,7 @@ function M:send()
             return claimed
         end
         if Web then
-            local result=Web.send(auth,batch,claim)
+            local result=Web.send(auth,batch,claim,self.sync and self.sync.api)
             result.saved=self.queue:finish(vid,batch,id,result.state,os.time(),result.error)==true
             if not result.saved then result.state="unknown"; result.error="receipt_persist_failed" end
             return result

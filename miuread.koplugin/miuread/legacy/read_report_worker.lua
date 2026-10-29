@@ -835,6 +835,11 @@ function Worker.run(job)
                     break
                 end
             end
+            if idx==nil and catalog_idx~=nil then
+                idx=catalog_idx
+                anchor=deepcopy(anchor)
+                anchor.chapter_idx=idx
+            end
             if session_id~="" and same_book and from_web and fresh and idx~=nil
                 and idx>=0 and idx==math.floor(idx)
                 and catalog_idx~=nil and catalog_idx==idx then

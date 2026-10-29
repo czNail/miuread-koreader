@@ -382,7 +382,14 @@ class OfflineReadtimeTests(unittest.TestCase):
             end} end
             Controller=require('miuread.readtime_controller')
             controller=Controller.new(store)
-            sync={host=host,controller_token='fixture'}
+            web_reads=0
+            sync={host=host,controller_token='fixture',api={web_progress=function(_,book_id,options)
+                assert(options.no_auth_recovery and options.timeout[2]==10)
+                web_reads=web_reads+1
+                if web_read_error then error('synthetic Web read failure') end
+                return {book={bookId=web_wrong_book and 'other' or book_id,
+                    chapterUid=3,chapterIdx=2,chapterOffset=77,progress=42}}
+            end}}
             assert(controller:start(sync,{book={book_id='book'}}))
         ''')
 
@@ -807,7 +814,7 @@ class OfflineReadtimeTests(unittest.TestCase):
             assert(cloud.readingTime==40)
         ''')
 
-    def test_legacy_safe_carry_and_new_outbox_share_the_writer(self):
+    def test_legacy_carry_policy_and_new_outbox_share_the_writer(self):
         self.controller_fixture()
         self.lua.execute('''
             fake_now=1020;controller:stop(sync,'close',false);online=true
@@ -834,7 +841,14 @@ class OfflineReadtimeTests(unittest.TestCase):
                 done(true,{succ=1},nil,{accepted=true})
                 return true
             end
-            local finished
+            local finished,kind
+            s:retry_safe_reading_time('book',{book={book_id='book'}},
+                {safe=true,chapter_uid='3',progress=0},function(ok,_,why) finished,kind=ok,why end)
+            assert(finished and kind=='best_effort_disabled' and #chunks==0)
+            assert(legacy.pending_report_seconds==90 and controller.progress_owner==nil)
+            -- The optional legacy mode still shares the writer if explicitly enabled.
+            require('miuread.config').READ_TIME_BEST_EFFORT=false
+            finished=nil
             s:retry_safe_reading_time('book',{book={book_id='book'}},
                 {safe=true,chapter_uid='3',progress=0},function(ok) finished=ok end)
             assert(controller.progress_owner==s and chunks[1]==60)
@@ -887,19 +901,19 @@ class OfflineReadtimeTests(unittest.TestCase):
     def test_real_web_worker_claims_after_fresh_position_before_post(self):
         self.lua.execute('''
             gets,posts,claims=0,0,0
+            remote_offset=301
+            local api={web_progress=function(_,book_id,options)
+                assert(book_id=='book' and options.no_auth_recovery)
+                gets=gets+1
+                return {book={bookId=book_id,chapterUid=3,chapterOffset=remote_offset,progress=42}}
+            end}
             package.preload['miuread.legacy.client']=function() return {new=function()
                 return {
-                    get_progress=function()
-                        gets=gets+1
-                        return {book={chapterUid=3,chapterIdx=2,chapterOffset=300+gets,progress=42}}
-                    end,
-                    get_web_progress=function()
-                        gets=gets+1
-                        return {book={chapterUid=3,chapterIdx=2,chapterOffset=300+gets,progress=42}}
-                    end,
+                    get_progress=function() error('Agent GET must not run') end,
+                    get_web_progress=function() error('Legacy GET must not run') end,
                     report_read=function(_,payload)
-                        assert(claims==1 and gets==2)
-                        assert(payload.co==302 and payload.ci==2 and payload.pr==42 and payload.rt==20)
+                        assert(claims==1 and gets==1)
+                        assert(payload.co==remote_offset and payload.ci==2 and payload.pr==42 and payload.rt==20)
                         posts=posts+1
                         return {succ=1},200,{}
                     end,
@@ -913,13 +927,59 @@ class OfflineReadtimeTests(unittest.TestCase):
             local Web=require('miuread.web_readtime')
             local batch={book_id='book',seconds=20}
             local auth={cookies={wr_skey='fixture-only-cookie'}}
-            local denied=Web.send(auth,batch,function() claims=claims+1;return false end)
+            local denied=Web.send(auth,batch,function() claims=claims+1;return false end,api)
             assert(denied.state=='pending' and not denied.dispatched and posts==0 and claims==1)
             gets,claims=0,0
+            remote_offset=622 -- Final progress advanced since the earlier preflight.
             local accepted=Web.send(auth,batch,function()
-                assert(gets==2);claims=claims+1;return true
-            end)
+                assert(gets==1);claims=claims+1;return true
+            end,api)
             assert(accepted.state=='confirmed' and accepted.dispatched and posts==1)
+        ''')
+
+    def test_web_primary_read_failure_keeps_rows_unclaimed(self):
+        self.web_fixture()
+        self.lua.execute('''
+            fake_now=1020;controller:stop(sync,'close',false);online=true;web_read_error=true
+            assert(controller:send() and web_reads==1 and web_calls==0)
+            local summary=queue:summary('a')
+            assert(summary.pending==20 and summary.unknown==0 and summary.in_flight==0)
+            assert(summary.control.reason=='web_position_unavailable')
+        ''')
+
+    def test_web_wrong_book_response_cannot_claim_or_send(self):
+        self.web_fixture()
+        self.lua.execute('''
+            fake_now=1020;controller:stop(sync,'close',false);online=true;web_wrong_book=true
+            assert(controller:send() and web_reads==1 and web_calls==0)
+            assert(queue:summary('a').pending==20 and queue:summary('a').unknown==0)
+        ''')
+
+    def test_web_login_change_during_primary_read_cannot_claim(self):
+        self.web_fixture()
+        self.lua.execute('''
+            fake_now=1020;controller:stop(sync,'close',false);online=true
+            local read=sync.api.web_progress
+            sync.api.web_progress=function(...)
+                local result=read(...)
+                auth.login_session_id='new-login'
+                return result
+            end
+            assert(controller:send() and web_reads==1 and web_calls==0)
+            assert(queue:summary('a').pending==20 and queue:summary('a').unknown==0)
+        ''')
+
+    def test_duplicate_close_preserves_the_recent_web_window(self):
+        self.web_fixture()
+        self.lua.execute('''
+            fake_now=1020;controller:stop(sync,'reading_end',false)
+            local window=controller.web_window.id
+            controller:stop(sync,'document_closed',false)
+            assert(controller.web_window.id==window)
+            online=true
+            assert(controller:send() and web_calls==1 and queue:summary('a').pending==0)
+            controller:stop(sync,'duplicate_close',false)
+            assert(not controller:send() and web_calls==1)
         ''')
 
     def test_preferences_migration_preserves_disabled_and_enabled_users(self):
