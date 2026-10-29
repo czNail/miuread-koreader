@@ -21,7 +21,7 @@ Sync.__index = Sync
 local legacy_daemon_retired = false
 
 local CONTEXT_MAX_AGE = 15 * 60
-local READ_REPORT_SERVICE_VERSION = 31
+local READ_REPORT_SERVICE_VERSION = 32
 local FIRST_REPORT_DELAY = 15
 local FINAL_REPORT_MIN_SECONDS = 10
 local PRECISE_POSITION_LEAD_SECONDS = 12
@@ -2373,6 +2373,7 @@ function Sync:set_remote_wire_anchor(book_id,value,state,write_control)
             remote_wire_source=anchor.source,
             remote_wire_state=anchor.state,
             remote_wire_server_updated=anchor.server_updated,
+            remote_wire_fetched_at=anchor.fetched_at,
         })
     end
     logger.info("[MiuRead][RemoteWireAnchor] updated","book=",book_id,
@@ -2537,8 +2538,11 @@ function Sync:remote(book_id, callback, options)
         -- beta.15: every authoritative server observation refreshes the wire
         -- echo anchor immediately, even when a local pending progress item exists
         -- or this call deliberately disables canonical CloudAnchor updates.
-        if not remote.conflict then
-            self:set_remote_wire_anchor(book_id,remote,"remote_observed_wire",true)
+        -- The time-reporting wire tuple must originate from the actual Web
+        -- response, not from the newer-source reconciliation winner (which
+        -- may be Agent). Store it even if the progress resolver chose Agent.
+        if web and tostring(web.source or "")=="web_cookie" then
+            self:set_remote_wire_anchor(book_id,web,"remote_observed_wire",true)
         end
         if not remote.conflict and options.update_cloud_anchor~=false then
             local current_session=self.store:session(book_id) or {}
@@ -4215,13 +4219,12 @@ function Sync:_write_daemon_control(active, immediate, extra)
         local auth=self.store:auth()
         local account=type(auth.account)=="table" and auth.account or {}
         local book_id=tostring(d.book_id or d.final_book_id or "")
-        -- beta.16: the long-lived daemon is permanently time-only and may not
-        -- serialize canonical/pending CloudAnchor coordinates at all. Only the
-        -- dedicated server-wire channel is allowed into daemon control.
+        -- The long-lived daemon is permanently time-only. Only the dedicated
+        -- server-Web wire channel is allowed into its control snapshot.
         local wire_anchor=book_id~="" and self:remote_wire_anchor(book_id) or nil
         -- 6.2: never compute or invent Kindle ci/co for a time-only report.
-        -- This /web/book/read request is still position-bearing, so its worker
-        -- must first GET the current server position and echo that exact tuple.
+        -- This /web/book/read request is still position-bearing: the worker
+        -- consumes only a fresh opening Web tuple from the same reader session.
         -- Progress submissions continue to use their separate exact pipeline.
         local position=nil
         if not time_only then
@@ -4271,6 +4274,7 @@ function Sync:_write_daemon_control(active, immediate, extra)
             remote_wire_source=wire_anchor and wire_anchor.source or nil,
             remote_wire_state=wire_anchor and wire_anchor.state or nil,
             remote_wire_server_updated=wire_anchor and wire_anchor.server_updated or nil,
+            remote_wire_fetched_at=wire_anchor and wire_anchor.fetched_at or nil,
             last_activity = tonumber(self.last_activity) or os.time(),
             updated_at = os.time(),
         }

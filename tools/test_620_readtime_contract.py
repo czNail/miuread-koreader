@@ -19,10 +19,11 @@ class TimeContracts(unittest.TestCase):
     def test_time_gets_one_session_web_anchor_but_progress_is_still_native(self):
         s = source('miuread.koplugin/miuread/legacy/read_report_worker.lua')
         time = s.split('    if reading_time_compat then', 1)[1].split('    local accepted, result',1)[0]
-        self.assertIn('refresh_remote_anchor(client,book_id,book)',time)
+        self.assertIn('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',time)
         self.assertIn('if not position_override then',time)
         self.assertIn('book.session_time_anchor_session=session_id',time)
-        self.assertIn('normalize_cloud_anchor(nil,book)',time)
+        self.assertIn('observed_at>=session_started-2',time)
+        self.assertNotIn('refresh_remote_anchor(client,book_id,book)',time)
         self.assertIn('request_dispatched=false',time)
         self.assertNotIn('estimate_position(book,progress_ratio)',time)
         self.assertIn('validate_terminal_progress(book,position)',s)
@@ -42,8 +43,12 @@ class TimeContracts(unittest.TestCase):
         self.assertIn('仅校验 Tag 对应源码',s)
 
     def test_identity(self):
-        self.assertIn('VERSION = "6.2.0-beta.2"',source('miuread.koplugin/miuread/config.lua'))
-        self.assertIn('version = "6.2.0-beta.2"',source('miuread.koplugin/_meta.lua'))
-        self.assertIn('## 6.2.0-beta.2',source('CHANGELOG.md'))
+        import re
+        config=source('miuread.koplugin/miuread/config.lua')
+        meta=source('miuread.koplugin/_meta.lua')
+        version=re.search(r'\bVERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+)"',config)
+        self.assertIsNotNone(version)
+        self.assertIn('version = "'+version.group(1)+'"',meta)
+        self.assertIn('## '+version.group(1),source('CHANGELOG.md'))
 
 if __name__=='__main__': unittest.main()

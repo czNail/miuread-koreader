@@ -7,6 +7,8 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local GestureBridge = require("miuread.gesture_bridge")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local OverlapGroup = require("ui/widget/overlapgroup")
+local LineWidget = require("ui/widget/linewidget")
 local ProgressWidget = require("ui/widget/progresswidget")
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
@@ -172,10 +174,16 @@ function DownloadProgress:init()
         padding = Size.padding.large,
         fixed_area,
     }
-    self[1] = CenterContainer:new{
-        dimen = self.dimen,
-        self.frame,
-    }
+    local center=CenterContainer:new{dimen=self.dimen,self.frame}
+    if self.comment_opaque==true then
+        self[1]=OverlapGroup:new{dimen=self.dimen,allow_mirroring=false,
+            LineWidget:new{background=Blitbuffer.COLOR_WHITE,
+                dimen=Geom:new{w=Screen:getWidth(),h=Screen:getHeight()}},
+            center,
+        }
+    else
+        self[1]=center
+    end
 end
 
 local function clean_status(value, limit)
@@ -195,7 +203,8 @@ function DownloadProgress:_redraw()
     -- retired by a page transition or another modal. Never dirty a detached
     -- widget: on e-ink that can leave the old white frame as a "ghost" box.
     if self.closed or not self:is_shown() then return false end
-    local target = (self.frame and self.frame.dimen) or self.dimen
+    local target = self.comment_opaque and self.dimen
+        or (self.frame and self.frame.dimen) or self.dimen
     UIManager:setDirty(self, function()
         return "fast", target
     end)
@@ -328,7 +337,8 @@ end
 function DownloadProgress:onShow()
     self.closed = false
     UIManager:setDirty(self, function()
-        return "ui", (self.frame and self.frame.dimen) or self.dimen
+        return "ui", self.comment_opaque and self.dimen
+            or (self.frame and self.frame.dimen) or self.dimen
     end)
 end
 
@@ -336,7 +346,8 @@ function DownloadProgress:onCloseWidget()
     if self._close_notified then return end
     self._close_notified = true
     self.closed = true
-    local region = self.frame and self.frame.dimen and self.frame.dimen:copy() or nil
+    local region = self.comment_opaque and self.dimen
+        or (self.frame and self.frame.dimen and self.frame.dimen:copy() or nil)
     -- Force the newly exposed surface to repaint the exact frame area. This is
     -- intentionally stronger than the progress widget's normal fast refresh.
     if region then

@@ -34,8 +34,10 @@ assert(worker:find('if time_only ~= true then',1,true),
     "precise progress position validation no longer separated from pure time")
 assert(worker:find('position_override=normalize_cloud_anchor(saved,{})',1,true),
     "session Web anchor reuse missing")
-assert(worker:find('refresh_remote_anchor(client,book_id,book)',1,true),
-    "first verified Web position lookup missing")
+assert(worker:find('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',1,true),
+    "the opening Web snapshot is not available to the time writer")
+assert(worker:find('observed_at>=session_started-2',1,true),
+    "the opening Web snapshot is not bound to this reader session")
 assert(worker:find('book.session_time_anchor_session=session_id',1,true),
     "session identity not bound to the time anchor")
 assert(not worker:find('position_override.source="kindle_native_time_guard"',1,true),

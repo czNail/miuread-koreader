@@ -40,8 +40,9 @@ class Beta17Contracts(unittest.TestCase):
         self.assertIn('(not time_only and (control.position_safe',svc)
         self.assertIn('next_due = run_report(control, elapsed, false, "interval")',svc)
         time_block=worker.split('if reading_time_compat then',1)[1].split('local accepted, result',1)[0]
-        self.assertIn('refresh_remote_anchor(client,book_id,book)',time_block)
-        self.assertIn('normalize_cloud_anchor(nil,book)',time_block)
+        self.assertIn('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',time_block)
+        self.assertIn('observed_at>=session_started-2',time_block)
+        self.assertNotIn('refresh_remote_anchor(client,book_id,book)',time_block)
         self.assertNotIn('estimate_position(book,progress_ratio)',time_block)
         self.assertIn('meta={request_dispatched=false}',time_block)
 

@@ -14576,7 +14576,7 @@ function Plugin:_show_comment_range_progress(runtime)
     local resuming=runtime.paused==true
     runtime.paused=false
     local dialog=DownloadProgress:new{
-        title="正在获取公开评论",cancel_text="取消获取",
+        title="正在获取公开评论",comment_opaque=true,cancel_text="取消获取",
         pause_text="暂停获取",background_text="后台获取",
         on_pause=function()
             runtime.paused=true
@@ -14740,23 +14740,45 @@ function Plugin:_start_comment_range(book,rows,first,last,force)
     return true
 end
 
-function Plugin:_comment_chapter_list_menu(book,rows,title,callback,start)
-    local items={}
-    for i,ch in ipairs(rows or {}) do
-        if i>=(tonumber(start) or 1) then
-            local uid=tostring(ch.chapterUid or ch.uid or ch.chapter_uid or "")
+-- Comment acquisition uses one opaque KOReader-native surface on all reader
+-- subpages. A bounded chapter window prevents thousands of widgets on Voyage.
+function Plugin:_comment_chapter_list_menu(book,rows,title,callback,start,on_back)
+    local lower=math.max(1,math.floor(tonumber(start) or 1))
+    local count=#rows
+    local page_size=8
+    local function show_page(page)
+        page=math.max(1,math.min(math.ceil((count-lower+1)/page_size),page))
+        local from=lower+(page-1)*page_size
+        local last=math.min(count,from+page_size-1)
+        local entries={}
+        for i=from,last do
+            local ch=rows[i]
+            local uid=tostring(ch and (ch.chapterUid or ch.uid or ch.chapter_uid) or "")
             if uid~="" then
-                local status=self.comment_sync:status(tostring(book.bookId),uid)
-                local label="第 "..tostring(i).." 章 · "..tostring(ch.title or uid)
-                local hint=status.has_cache and ("缓存 "..tostring(status.comments or 0).." 条") or "未获取"
-                items[#items+1]={text=label,post_text=hint,callback=function() callback(i,ch) end}
+                entries[#entries+1]={label="第 "..tostring(i).." 章",
+                    value=tostring(ch.title or uid),arrow=true,
+                    callback=function() callback(i,ch) end}
             end
         end
+        if page>1 then
+            entries[#entries+1]={label="上一页",arrow=true,
+                callback=function() show_page(page-1) end}
+        end
+        if last<count then
+            entries[#entries+1]={label="下一页",arrow=true,
+                callback=function() show_page(page+1) end}
+        end
+        ReaderSettingsDialog.show{
+            opaque_fullscreen=true,title=title,
+            subtitle="第 "..tostring(from).."—"..tostring(last).." / "..tostring(count).." 章",
+            on_back=on_back,sections={{title="",rows=entries}},
+        }
     end
-    self:list(title,items,"没有可用的章节目录")
+    if lower>count then return self:info("没有可选章节") end
+    return show_page(1)
 end
 
-function Plugin:_choose_comment_range(force)
+function Plugin:_choose_comment_range(force,back_callback)
     local scope=self:_current_thought_favorite_scope()
     if scope.book_id=="" then
         self:info("请先打开觅阅书籍，再选择评论章节范围。")
@@ -14767,47 +14789,78 @@ function Plugin:_choose_comment_range(force)
     return self:_request_catalog(book,"comment-range",function(rows)
         rows=type(rows)=="table" and rows or {}
         if #rows==0 then self:info("暂时没有可用章节目录。") return end
-        self:list("评论获取范围 · "..tostring(book.title or ""),{
-            {text="默认范围：当前章起最多10章",post_text="可在下方自选起止章节",
-                callback=function()
-                    local index=1
-                    for i,ch in ipairs(rows) do
-                        if tostring(ch.chapterUid or ch.uid or ch.chapter_uid or "")==tostring(scope.chapter_uid or "") then
-                            index=i;break
-                        end
-                    end
-                    self:_start_comment_range(book,rows,index,math.min(#rows,index+9),force==true)
-                end},
-            {text="自选起止章节",callback=function()
-                self:_comment_chapter_list_menu(book,rows,"选择评论起始章节",function(first)
-                    self:_comment_chapter_list_menu(book,rows,"选择评论结束章节",function(last)
-                        local function start() self:_start_comment_range(book,rows,first,last,force==true) end
-                        if last-first+1>30 then
-                            UIManager:show(ConfirmBox:new{
-                                text="将获取 "..tostring(last-first+1).." 章的公开评论，可能产生较多请求。是否继续？",
-                                ok_text="开始获取",cancel_text="返回",ok_callback=start,
-                            })
-                        else start() end
-                    end,first)
-                end)
-            end},
-        })
-    end,{context=context,status_text="正在后台读取评论章节目录…"})
+        local first=1
+        for i,ch in ipairs(rows) do
+            if tostring(ch.chapterUid or ch.uid or ch.chapter_uid or "")==tostring(scope.chapter_uid or "") then
+                first=i;break
+            end
+        end
+        local last=math.min(#rows,first+9)
+        local show_editor
+        local function choose_boundary(which)
+            local start=which=="last" and first or 1
+            local select_title=which=="first" and "选择起始章节" or "选择结束章节"
+            return self:_comment_chapter_list_menu(book,rows,select_title,function(index)
+                if which=="first" then
+                    first=index
+                    if last<first then last=first end
+                else last=index end
+                show_editor()
+            end,start,show_editor)
+        end
+        show_editor=function()
+            local function short_title(ch)
+                local name=tostring(ch and ch.title or "")
+                -- The right value column has limited e-ink screen width.
+                if #name>24 then name=name:sub(1,24).."…" end
+                return name
+            end
+            return ReaderSettingsDialog.show{
+                opaque_fullscreen=true,
+                title="选择评论范围",
+                subtitle="共 "..tostring(last-first+1).." 章",
+                on_back=function() self:_comment_fetch_mode_menu(back_callback) end,
+                sections={{title="",rows={
+                    {label="起始章节",value="第 "..tostring(first).." 章",arrow=true,
+                        callback=function() choose_boundary("first") end},
+                    {label="结束章节",value="第 "..tostring(last).." 章",arrow=true,
+                        callback=function() choose_boundary("last") end},
+                    {label="开始获取",value=tostring(last-first+1).." 章",arrow=true,
+                        callback=function()
+                            local function start_task()
+                                self:_start_comment_range(book,rows,first,last,force==true)
+                            end
+                            if last-first+1>30 then
+                                UIManager:show(ConfirmBox:new{
+                                    text="将获取 "..tostring(last-first+1).." 章公开评论，是否继续？",
+                                    ok_text="开始获取",cancel_text="返回",ok_callback=start_task,
+                                })
+                            else start_task() end
+                        end},
+                }}}
+            }
+        end
+        return show_editor()
+    end,{context=context,status_text="正在后台读取评论目录…"})
 end
 
 function Plugin:_comment_fetch_mode_menu(back_callback)
     if self._comment_range_task then return self:_show_comment_range_progress(self._comment_range_task) end
-    self:list("获取公开评论",{
-        {text="自选范围（默认）",post_text="选择章节范围，逐章缓存评论",
-            callback=function() self:_choose_comment_range() end},
-        {text="更新指定范围",post_text="忽略已有完成标记，重新从服务器获取",
-            callback=function() self:_choose_comment_range(true) end},
-        {text="当前章节",post_text="仅获取本章评论",
-            callback=function() self:_fetch_current_chapter_comments(false,back_callback) end},
-        {text="更新当前章节",post_text="重新联网获取本章评论",
-            callback=function() self:_fetch_current_chapter_comments(true,back_callback) end},
-    })
-    return true
+    local function select_range(force)
+        return self:_choose_comment_range(force,back_callback)
+    end
+    return ReaderSettingsDialog.show{
+        opaque_fullscreen=true,title="获取公开评论",
+        on_back=back_callback or function() self:_show_reader_comment_center() end,
+        sections={{title="",rows={
+            {label="自选范围（默认）",arrow=true,callback=function() select_range(false) end},
+            {label="更新指定范围",arrow=true,callback=function() select_range(true) end},
+            {label="当前章节",arrow=true,
+                callback=function() self:_fetch_current_chapter_comments(false,back_callback) end},
+            {label="更新当前章节",arrow=true,
+                callback=function() self:_fetch_current_chapter_comments(true,back_callback) end},
+        }}}
+    }
 end
 
 function Plugin:_show_reader_comment_center(back_callback)
@@ -14815,6 +14868,7 @@ function Plugin:_show_reader_comment_center(back_callback)
     -- Display available offline anchors. Never initiate network access here.
     UIManager:scheduleIn(.03,function() self:_refresh_current_comment_overlay(false) end)
     ReaderSettingsDialog.show{
+        opaque_fullscreen=true,
         title="评论",
         subtitle=function()
             local scope=self:_current_thought_favorite_scope()

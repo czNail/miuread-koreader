@@ -281,9 +281,9 @@ function Service.run(job)
             time_only = time_only,
             report_mode = report_mode,
             reading_time_session_id=tostring(current_job.reading_time_session_id or ""),
-            -- beta.15: time-only compatibility writes may echo only the most
-            -- recent raw server position. If these fields are absent, pass nil
-            -- so the isolated worker refreshes WeRead before writing.
+            -- 6.2.0-beta.3: the normal opening Web read provides one raw
+            -- server tuple for this session. Never initiate a second Legacy
+            -- getProgress from the time worker on the periodic hot path.
             cloud_anchor = time_only and (tostring(control.remote_wire_chapter_uid or "")~=""
                 and tonumber(control.remote_wire_chapter_offset)~=nil
                 and tonumber(control.remote_wire_protocol_progress)~=nil) and {
@@ -293,6 +293,8 @@ function Service.run(job)
                 protocol_progress=control.remote_wire_protocol_progress,
                 raw_progress=control.remote_wire_raw_progress,
                 source=control.remote_wire_source or "remote_wire",
+                fetched_at=control.remote_wire_fetched_at,
+                book_id=current_job.book_id,
             } or nil,
             elapsed_seconds = elapsed,
             cookies = auth.cookies or {},

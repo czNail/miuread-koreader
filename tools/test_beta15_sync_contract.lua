@@ -23,7 +23,7 @@ assert(sync:find('local READ_REPORT_SERVICE_VERSION = 29',1,true),"read-report s
 assert(sync:find('local function remote_wire_anchor_from',1,true),"remote wire parser missing")
 assert(sync:find('function Sync:remote_wire_anchor',1,true),"remote wire getter missing")
 assert(sync:find('function Sync:set_remote_wire_anchor',1,true),"remote wire setter missing")
-assert(sync:find('self:set_remote_wire_anchor(book_id,remote,"remote_observed_wire",true)',1,true),"remote GET does not refresh wire anchor")
+assert(sync:find('self:set_remote_wire_anchor(book_id,web,"remote_observed_wire",true)',1,true),"remote GET does not refresh wire anchor")
 local remote_block=slice(sync,'-- beta.15: every authoritative server observation refreshes the wire','if remote.conflict then')
 assert(remote_block:find('set_remote_wire_anchor',1,true),"wire anchor update missing from remote block")
 assert(remote_block:find('options.update_cloud_anchor~=false',1,true),"canonical CloudAnchor gate unexpectedly removed")
@@ -51,8 +51,8 @@ local norm=slice(worker,'local function normalize_cloud_anchor','local function 
 assert(norm:find('anchor.protocol_progress or anchor.raw_progress or anchor.raw_percent',1,true),"wire protocol progress not accepted")
 assert(norm:find('book.remote_raw_progress',1,true),"fresh server fallback cannot normalize raw progress")
 local compat=slice(worker,'if reading_time_compat then','local accepted, result')
-assert(compat:find('local refreshed,web_error,web_error_kind=refresh_remote_anchor(client, book_id, book)',1,true),"reading-time write does not require fresh server GET")
-assert(compat:find('fresh Web position unavailable:',1,true),"failed GET can still fall through to a position write")
+assert(compat:find('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',1,true),"opening Web snapshot not consumed")
+assert(compat:find('opening Web session position not ready or untrusted',1,true),"invalid Web snapshot does not block POST")
 assert(not compat:find('position_override = normalize_cloud_anchor(job.cloud_anchor, book)',1,true),"reading-time write still trusts cached parent anchor")
 
 -- Manual safe reading-time retry follows the same remote-wire rule.

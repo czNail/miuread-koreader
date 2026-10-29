@@ -105,6 +105,7 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_beta11_release_guard.py' 
           python3 -m unittest discover -s tools -p 'test_beta12_release_regression.py'
           python3 -m unittest discover -s tools -p 'test_620_readtime_contract.py'
+          python3 -m unittest discover -s tools -p 'test_623_session_snapshot_and_comment_ui.py'
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then

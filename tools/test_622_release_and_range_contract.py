@@ -1,4 +1,4 @@
-"""6.2.0-beta.2 source-level safety and UI regression gates."""
+"""6.2.0-beta.3 source-level safety and UI regression gates."""
 import unittest
 from pathlib import Path
 R=Path(__file__).resolve().parent.parent
@@ -9,7 +9,9 @@ class Beta2Contracts(unittest.TestCase):
     def test_one_session_position_cache(self):
         w=read('miuread.koplugin/miuread/legacy/read_report_worker.lua')
         a=w.split('local protocol_time_only = job.time_only',1)[1].split('local accepted, result',1)[0]
-        self.assertLess(a.index('session_time_anchor_session'),a.index('refresh_remote_anchor(client,book_id,book)'))
+        self.assertIn('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',a)
+        self.assertIn('observed_at>=session_started-2',a)
+        self.assertNotIn('refresh_remote_anchor(client,book_id,book)',a)
         self.assertIn('if not position_override then',a)
         self.assertIn('position_override=normalize_cloud_anchor(saved,{})',a)
         self.assertIn('book.session_time_anchor_session=session_id',a)
@@ -23,7 +25,7 @@ class Beta2Contracts(unittest.TestCase):
         self.assertIn('if result.accepted and type(result.legacy_context) == "table"',r)
     def test_best_effort_has_no_persisted_replay(self):
         s=read('miuread.koplugin/miuread/sync.lua')
-        self.assertIn('local READ_REPORT_SERVICE_VERSION = 31',s)
+        self.assertIn('local READ_REPORT_SERVICE_VERSION = 32',s)
         start=s.index('function Sync:_start_daemon(');end=s.index('function Sync:',start+20)
         a=s[start:end]
         self.assertIn('local carry_elapsed=0',a)
@@ -41,7 +43,7 @@ class Beta2Contracts(unittest.TestCase):
     def test_comment_range_worker_and_ui(self):
         m=read('miuread.koplugin/main.lua')
         self.assertIn('自选范围（默认）',m)
-        self.assertIn('function Plugin:_choose_comment_range(force)',m)
+        self.assertIn('function Plugin:_choose_comment_range(force,back_callback)',m)
         self.assertIn('function Plugin:_comment_range_next(runtime)',m)
         self.assertIn('disable_fallback=true',m)
         self.assertIn('runtime.async:run("comment_range_chapter"',m)

@@ -20,14 +20,16 @@ package.preload['miuread.legacy.content']=function()
         fetch_catalog=function() error('catalog fetch should be unnecessary') end}
 end
 local requests={}
-local web_reply={bookId='b',chapterUid='20',chapterIdx=1,chapterOffset=222,progress=72}
+local now=os.time()
+local session='session-'..tostring(now)..'-1-123456'
+local function web_anchor(idx)
+    return {source='web_cookie',book_id='b',fetched_at=now,
+        chapter_uid='20',chapter_idx=idx or 1,chapter_offset=222,protocol_progress=72}
+end
 package.preload['miuread.legacy.client']=function()
     local C={}
     function C:new()return setmetatable({}, {__index=self})end
-    function C:get_web_progress()
-        if web_reply==false then error('temporary web outage') end
-        return web_reply
-    end
+    function C:get_web_progress()error('Legacy Web GET must not run for a time report')end
     function C:parse_web_progress(result,id)
         return require('miuread.legacy.web_progress_wire').parse(result,id)
     end
@@ -58,33 +60,44 @@ local function book(progress,offset,uid)
         local_chapter_offset_basis='wr_data_co',progress=progress,
         catalog_complete=true,core_map_hash='h'}
 end
--- Local Kindle position intentionally differs from the confirmed server tuple.
+-- Local Kindle differs from the opening Web tuple, which the reader had
+-- already obtained through the primary Web API. Legacy GET is never called.
 local result=Worker.run{book_id='b',book=book(12,81),cookies={k='v'},
     core_map_hash='h',elapsed_seconds=47,progress_ratio=.12,
-    time_only=true,report_mode='reading_time_compat'}
-assert(result.ok==true,'fresh Web time echo must be dispatchable')
+    time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=web_anchor()}
+assert(result.ok==true,'verified opening Web session tuple must be dispatchable: '..tostring(result.error))
 assert(#requests==1 and requests[1].ci==1 and requests[1].co==222
     and requests[1].pr==72 and requests[1].rt==47,
-    'time must echo fresh Web tuple, never approximate Kindle position')
+    'time must echo the opening Web tuple, not Kindle position')
 
 local no_native=book(23,82)
 no_native.local_native_chapter_offset=false
 local no_native_result=Worker.run{book_id='b',book=no_native,cookies={k='v'},
-    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat'}
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=web_anchor()}
 assert(no_native_result.ok==true and #requests==2,
-    'time-only worker must not depend on local native offset')
+    'time-only worker must not require native Kindle offset')
 
-web_reply=false
 local outage=Worker.run{book_id='b',book=book(25,84),cookies={k='v'},
-    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat'}
-assert(outage.ok==false and outage.meta.request_dispatched==false
-    and #requests==2,'Web unavailable must fail closed before sending time')
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session}
+assert(outage.ok==false and outage.meta.request_dispatched==false and #requests==2,
+    'missing opening snapshot must fail closed without a Legacy GET')
 
-web_reply={bookId='b',chapterUid='20',chapterIdx=0,chapterOffset=222,progress=72}
 local mismatch=Worker.run{book_id='b',book=book(25,84),cookies={k='v'},
-    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat'}
-assert(mismatch.ok==false and mismatch.meta.request_dispatched==false
-    and #requests==2,'Web chapter-index mismatch must refuse POST')
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=web_anchor(9)}
+assert(mismatch.ok==false and mismatch.meta.request_dispatched==false and #requests==2,
+    'Web chapter-index mismatch must refuse POST')
+
+local expired=web_anchor()
+expired.fetched_at=now-86400
+local stale=Worker.run{book_id='b',book=book(25,84),cookies={k='v'},
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=expired}
+assert(stale.ok==false and stale.meta.request_dispatched==false,
+    'old cross-session Web tuple must not be used')
 
 local nonterminal=Worker.run{book_id='b',book=book(100,99),cookies={k='v'},
     core_map_hash='h',progress_ratio=1,time_only=false}

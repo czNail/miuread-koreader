@@ -491,7 +491,9 @@ local function normalize_cloud_anchor(anchor, book)
     local progress = tonumber(anchor.protocol_progress or anchor.raw_progress or anchor.raw_percent
         or anchor.progress or anchor.canonical_progress or anchor.calculated_percent
         or book.remote_raw_progress)
-    if tostring(uid or "") == "" or offset == nil or progress == nil then return nil end
+    if tostring(uid or "") == "" or offset == nil or offset<0 or offset~=offset
+        or progress == nil or progress~=progress or progress<0 or progress>100
+        or idx==nil or idx<0 or idx~=math.floor(idx) then return nil end
     return {
         chapter_uid = uid,
         chapter_idx = idx or 0,
@@ -799,21 +801,47 @@ function Worker.run(job)
         -- live reader session. Never use arbitrary Kindle coordinates, an
         -- Agent gateway tuple, or a previous session's cached position.
         local session_id=tostring(job.reading_time_session_id or "")
+        local session_started=tonumber(session_id:match("^session%-(%d+)%-"))
         local saved=type(book.session_time_anchor)=="table" and book.session_time_anchor or nil
         if session_id~="" and tostring(book.session_time_anchor_session or "")==session_id
             and saved then
             position_override=normalize_cloud_anchor(saved,{})
         end
         if not position_override then
-            local refreshed,web_error,web_error_kind=refresh_remote_anchor(client,book_id,book)
-            if refreshed then
-                position_override=normalize_cloud_anchor(nil,book)
+            -- The normal reader Web API already obtained the server's raw
+            -- position; the old Legacy GET uses a different authentication
+            -- route and may return '参数格式错误'. Never call it a second time.
+            -- A tuple observed before this reading session is not a new
+            -- opening snapshot even if it happens to be in the Store.
+            local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}
+            local source=tostring(anchor.source or "")
+            local observed_at=tonumber(anchor.fetched_at)
+            local from_web=source=="web_cookie" or source=="web"
+                or source=="web_progress" or source=="web_cookie_progress"
+            local same_book=tostring(anchor.book_id or "")==book_id
+            local fresh=session_started~=nil and observed_at~=nil
+                and observed_at>=session_started-2
+                and observed_at<=os.time()+5
+            local idx=tonumber(anchor.chapter_idx)
+            local uid=tostring(anchor.chapter_uid or "")
+            local catalog_idx=nil
+            for _,chapter in ipairs(type(book.chapters)=="table" and book.chapters or {}) do
+                if tostring(chapter_uid(chapter) or "")==uid then
+                    catalog_idx=tonumber(chapter.chapterIdx or chapter.chapterIndex
+                        or chapter.chapter_index or chapter.chapter_idx or chapter.index)
+                    break
+                end
+            end
+            if session_id~="" and same_book and from_web and fresh and idx~=nil
+                and idx>=0 and idx==math.floor(idx)
+                and catalog_idx~=nil and catalog_idx==idx then
+                position_override=normalize_cloud_anchor(anchor,{})
             end
             if not position_override then
                 return finish(settings,book,{
                     ok=false,
-                    error="Opening Web position unavailable: "..tostring(web_error or "incomplete Web position"),
-                    error_kind=web_error_kind or "context",
+                    error="opening Web session position not ready or untrusted",
+                    error_kind="context",
                     meta={request_dispatched=false},
                 },context_changed)
             end
