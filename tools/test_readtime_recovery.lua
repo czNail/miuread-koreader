@@ -28,7 +28,8 @@ local function encode(v,seen)
     parts[#parts+1]='}'; seen[v]=nil; return table.concat(parts)
 end
 local function decode(s)
-    local f,err=load('return '..tostring(s or '')); assert(f,err)
+    local loader=loadstring or load
+    local f,err=loader('return '..tostring(s or '')); assert(f,err)
     return f()
 end
 local fail_write=false
@@ -37,7 +38,7 @@ package.preload['ui/uimanager']=function() return {scheduleIn=function() end,uns
 package.preload['logger']=function() return {info=function() end,warn=function() end,err=function() end} end
 package.preload['ffi/util']=function() return {} end
 package.preload['miuread.json']=function() return {encode=encode,decode=decode} end
-package.preload['miuread.config']=function() return {READ_INTERVAL=60,READ_FIRST_DELAY=15,REMOTE_THRESHOLD=3,CONTROL_WRITE_DELAY=60} end
+package.preload['miuread.config']=function() return {READ_INTERVAL=60,READ_FIRST_DELAY=15,REMOTE_THRESHOLD=3,CONTROL_WRITE_DELAY=60,READ_TIME_BEST_EFFORT=true} end
 package.preload['miuread.read_report_service']=function() return {} end
 package.preload['miuread.protocol']=function() return {} end
 package.preload['miuread.http']=function() return {} end
@@ -46,6 +47,7 @@ package.preload['miuread.book_integrity']=function() return {} end
 package.preload['miuread.precise_position']=function() return {} end
 package.preload['miuread.source_position']=function() return {} end
 package.preload['miuread.subprocess_hygiene']=function() return {} end
+package.preload['miuread.digests']=function() return {} end
 package.preload['miuread.util']=function()
     return {
         copy=copy,merge=merge,
@@ -72,34 +74,27 @@ function store:save_session(id,patch,flush_now)
 end
 local sync=setmetatable({store=store},Sync)
 
+-- Simulate a persisted 6.1 SAFE journal. 6.2 must retire it instead of
+-- uploading yesterday's seconds.  This test is intentionally behavioral.
+local preexisting=TMP..'/readtime-recovery-v1.json'
+local journal=io.open(preexisting,'wb'); assert(journal)
+journal:write(encode({version=1,entries={book1={book_id='book1',
+    login_session_id='login-1',account_vid='vid-1',core_map_hash='core-1',
+    pending_report_seconds=123,pending_report_safe=true}}}))
+journal:close()
+sessions.book1.pending_report_seconds=123
+sessions.book1.pending_report_safe=true
 local ok,state=sync:_save_safe_pending_state('book1',25,'core-1')
-assert(ok==true and full_flushes==0,'SAFE pending should use tiny journal, not full settings')
-assert(sessions.book1.pending_report_seconds==25 and sessions.book1.pending_report_safe==true,'live session SAFE pending missing')
+assert(ok==true and state=='best_effort_runtime_only','best-effort time should not be queued')
+assert(sessions.book1.pending_report_seconds==0 and sessions.book1.pending_report_safe==false,
+    'old durable time debt was not cleared from the active session')
+assert(io.open(preexisting,'rb')==nil,'legacy time-only journal was not retired')
 local pending,authoritative=sync:_load_readtime_recovery('book1','core-1')
-assert(authoritative==true and pending==25,'journal did not restore SAFE pending')
-
-ok,state=sync:_save_safe_pending_state('book1',0,'core-1')
-assert(ok==true and full_flushes==0,'zero tombstone should stay tiny')
-pending,authoritative=sync:_load_readtime_recovery('book1','core-1')
-assert(authoritative==true and pending==0,'zero tombstone must override stale settings debt')
-
--- Even if an older full settings snapshot still says 25 seconds, the journal's
--- zero tombstone remains authoritative and prevents duplicate replay.
-sessions.book1.pending_report_seconds=25; sessions.book1.pending_report_safe=true
-pending,authoritative=sync:_load_readtime_recovery('book1','core-1')
-assert(authoritative==true and pending==0,'stale full-settings SAFE debt could replay after accepted report')
-
--- Recovery debt may never cross an account/session boundary.
-auth.account.vid='vid-2'
-pending,authoritative=sync:_load_readtime_recovery('book1','core-1')
-assert(authoritative==true and pending==0,'recovery debt crossed account identity')
-auth.account.vid='vid-1'
-
--- If the tiny journal cannot be written, correctness must win: use beta.18's
--- full settings persistence for this crash-critical state.
-fail_write=true
-ok,state=sync:_save_safe_pending_state('book1',31,'core-1')
-assert(ok==true and full_flushes==1,'journal failure did not fall back to full settings persistence')
-assert(sessions.book1.pending_report_seconds==31 and sessions.book1.pending_report_safe==true,'fallback lost SAFE pending')
-
-print('beta19 readtime recovery journal: PASS')
+assert(pending==0 and authoritative==false,'discarded historical time is still recoverable')
+-- Independent exact progress state must not be touched by time cleanup.
+sessions.book1.pending_progress={chapter_uid='chapter-10',canonical_offset=1234,safe=true}
+assert(sync:_save_safe_pending_state('book1',31,'core-1'))
+assert(sessions.book1.pending_progress.chapter_uid=='chapter-10',
+    'best-effort time cleanup damaged pending precise-progress state')
+assert(full_flushes==0,'best-effort time cleanup unnecessarily forced a settings flush')
+print('6.2 best-effort time journal migration and progress isolation: PASS')

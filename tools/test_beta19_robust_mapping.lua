@@ -25,12 +25,21 @@ assert(main:find('reliable_text_anchor_landing',1,true),"quiet reliable text-anc
 assert(main:find('if same_chapter and text_anchor_attempted and not reliable_text_anchor_landing',1,true),"percent fallback can still override text-anchor landing")
 assert(not main:find('精确章节内位置暂未确认',1,true),"old misleading exact-position warning still present")
 assert(main:find('已定位到云端章节附近',1,true),"real chapter-only fallback warning missing")
-assert(worker:find('local local_position,local_error=estimate_position(book,progress_ratio)',1,true),
- "reading-time report no longer builds a valid Kindle coordinate")
-assert(worker:find('local valid,why=validate_terminal_progress(book,local_position)',1,true),
- "reading-time report lost the terminal-position integrity guard")
-assert(worker:find('position_override.source="kindle_native_time_guard"',1,true),
- "reading-time report lost its authoritative position selection")
+-- 6.2: periodic time compatibility writes replay the first verified Web
+-- position for this reading session; native Kindle position is reserved for
+-- the separate precise progress writer, which retains its terminal guard.
+assert(worker:find('local terminal_ok,terminal_error=validate_terminal_progress(book,position)',1,true),
+    "precise progress report lost its terminal chapter guard")
+assert(worker:find('if time_only ~= true then',1,true),
+    "precise progress position validation no longer separated from pure time")
+assert(worker:find('position_override=normalize_cloud_anchor(saved,{})',1,true),
+    "session Web anchor reuse missing")
+assert(worker:find('refresh_remote_anchor(client,book_id,book)',1,true),
+    "first verified Web position lookup missing")
+assert(worker:find('book.session_time_anchor_session=session_id',1,true),
+    "session identity not bound to the time anchor")
+assert(not worker:find('position_override.source="kindle_native_time_guard"',1,true),
+    "time compatibility mode unexpectedly reintroduced Kindle's changing coordinate")
 
 -- Minimal UTF-8 splitter for Lua 5.1/5.3 test portability.
 local function split_chars(s)
