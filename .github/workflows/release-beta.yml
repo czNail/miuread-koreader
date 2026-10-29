@@ -104,6 +104,7 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_beta_release_workflow.py'
           python3 -m unittest discover -s tools -p 'test_beta11_release_guard.py' 
           python3 -m unittest discover -s tools -p 'test_beta12_release_regression.py'
+          python3 -m unittest discover -s tools -p 'test_620_readtime_contract.py'
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
@@ -326,6 +327,7 @@ jobs:
           lua5.1 tools/test_beta17_transport_cooldown.lua
           lua5.1 tools/test_beta17_sync_contract.lua
           lua5.1 tools/test_beta17_worker_and_comments.lua
+          lua5.1 tools/test_620_readtime_clock.lua
           lua5.1 tools/test_beta18_comment_refresh.lua
           lua5.1 tools/test_beta19_comment_and_abandon.lua
           lua5.1 tools/test_beta15_comment_response.lua

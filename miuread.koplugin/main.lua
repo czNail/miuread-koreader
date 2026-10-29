@@ -1387,6 +1387,12 @@ function Plugin:_apply_interactive_auth(snapshot)
 end
 
 function Plugin:_cancel_interactive_network(reason)
+    local why=tostring(reason or "")
+    if why=="logout" or why=="account changed" or why=="auth refreshed"
+        or why=="exit" or why=="suspend" or why=="KOReader exit"
+        or why=="reader opening" then
+        self:_cancel_comment_range_task(why,true)
+    end
     self._interactive_network_generation=(tonumber(self._interactive_network_generation) or 0)+1
     self._interactive_network_key=nil
     local cancel=self._interactive_network_cancel
@@ -14511,35 +14517,15 @@ function Plugin:_fetch_current_chapter_comments(force,return_to_comments)
         return false
     end
     local old=self.comment_sync:status(scope.book_id,scope.chapter_uid)
-    if old.has_cache and not force and old.status~="partial" and old.status~="error" then
-        return self:_show_current_chapter_comments(scope,return_to_comments)
+    if old.has_cache and not force and (old.status=="cached" or old.status=="empty") then
+        self:toast("本章评论已保存在本地，可在评论菜单查看",2)
+        return true
     end
-    -- Read-only request; no document write, no download job or cloud mutation.
-    self:online("获取本章公开评论",function()
-        local result,err=self.comment_sync:fetch(scope.book_id,scope.chapter_uid,{force=force==true})
-        if not result then
-            local saved=self.comment_sync:status(scope.book_id,scope.chapter_uid)
-            if saved.has_cache and (tonumber(saved.comments) or 0)>0 then
-                UIManager:scheduleIn(.12,function() self:_show_current_chapter_comments(scope,return_to_comments) end)
-            else
-                self:toast("评论暂时无法获取，请检查网络或登录",3)
-            end
-            return
-        end
-        -- Public thoughts are opportunistic; a partial batch does not merit
-        -- a warning dialog and must not hide successfully saved comments.
-        local latest=self.comment_sync:status(scope.book_id,scope.chapter_uid)
-        if latest.has_cache and (tonumber(latest.comments) or 0)>0 then
-            UIManager:scheduleIn(.12,function()
-                self:_show_current_chapter_comments(scope,return_to_comments)
-            end)
-        elseif latest.status=="error" or (not result.cached and result.error_kind=="authentication") then
-            self:toast("评论暂时无法获取，请检查登录和网络",3)
-        end
-        -- Cached rows are now projected onto the open EPUB without rewriting it.
-        UIManager:scheduleIn(.16,function() self:_refresh_current_comment_overlay(true) end)
-    end)
-    return true
+    -- The single-chapter entry uses the very same isolated worker and visible
+    -- progress as a multi-chapter range; never perform network on ReaderUI.
+    local book={bookId=scope.book_id,title=scope.book_title or ""}
+    local row={chapterUid=scope.chapter_uid,title=scope.chapter_title or "当前章节"}
+    return self:_start_comment_range(book,{row},1,1,force==true)
 end
 
 function Plugin:_offer_current_chapter_comments()
@@ -14551,6 +14537,275 @@ function Plugin:_offer_current_chapter_comments()
         text="本章尚未保存公开评论。\n\n是否现在联网获取并永久保存到本机？\n以后可以离线查看，更新评论需要再次主动操作。",
         ok_text="获取本章",cancel_text="暂不获取",
         ok_callback=function() self:_fetch_current_chapter_comments(false) end,
+    })
+    return true
+end
+
+-- 6.2.0-beta.2: bounded reader-initiated comment range acquisition.
+-- Each chapter executes in a separate isolated subprocess and commits through
+-- existing CommentSync/ThoughtDatabase transactions; no network runs on ReaderUI.
+function Plugin:_comment_range_state(runtime,stage,message)
+    if self._comment_range_task~=runtime then return end
+    local current=math.min(runtime.total, runtime.done + (stage=="done" and 0 or 1))
+    local state={kind="comments",stage=stage,current=runtime.done,total=runtime.total,
+        chapter=runtime.rows[runtime.first+current-1] and runtime.rows[runtime.first+current-1].title or "",
+        comments=runtime.comments,failed=runtime.failed,skipped=runtime.skipped,
+        message=message or ""}
+    runtime.last_state=state
+    if runtime.dialog and runtime.dialog:is_shown() then runtime.dialog:set_state(state) end
+end
+
+function Plugin:_cancel_comment_range_task(reason,quiet)
+    local runtime=self._comment_range_task
+    if not runtime then return false end
+    self._comment_range_task=nil
+    if runtime.advance_task then UIManager:unschedule(runtime.advance_task);runtime.advance_task=nil end
+    if runtime.async then runtime.async:cancel(reason or "cancelled") end
+    if runtime.dialog then
+        local dialog=runtime.dialog
+        runtime.dialog=nil
+        dialog:close("cancelled")
+    end
+    if quiet~=true then self:toast("评论获取已停止，已保存章节可继续使用",3) end
+    return true
+end
+
+function Plugin:_show_comment_range_progress(runtime)
+    if self._comment_range_task~=runtime then return false end
+    if runtime.dialog and runtime.dialog:is_shown() then return true end
+    local resuming=runtime.paused==true
+    runtime.paused=false
+    local dialog=DownloadProgress:new{
+        title="正在获取公开评论",cancel_text="取消获取",
+        pause_text="暂停获取",background_text="后台获取",
+        on_pause=function()
+            runtime.paused=true
+            self:_comment_range_state(runtime,"comments","已暂停，可在评论菜单继续")
+        end,
+        on_background=function()
+            if runtime.dialog then runtime.dialog:close("background") end
+        end,
+        on_cancel=function() self:_cancel_comment_range_task("user",false) end,
+        on_close=function(widget)
+            if self._comment_range_task==runtime and runtime.dialog==widget then runtime.dialog=nil end
+        end,
+    }
+    runtime.dialog=dialog
+    if dialog:show() then
+        if runtime.last_state then dialog:set_state(runtime.last_state) end
+        if resuming and not runtime.async:busy() then
+            UIManager:scheduleIn(.05,function() self:_comment_range_next(runtime) end)
+        end
+        return true
+    end
+    runtime.dialog=nil
+    self:toast("评论获取已转入后台",2)
+    return false
+end
+
+function Plugin:_comment_range_next(runtime)
+    if self._comment_range_task~=runtime then return end
+    if runtime.paused==true or runtime.async:busy() then return end
+    if not self:_interactive_network_context_valid(runtime.context) then
+        self:_cancel_comment_range_task("reader changed",true)
+        return
+    end
+    if runtime.done>=runtime.total then
+        self._comment_range_task=nil
+        if runtime.dialog then local d=runtime.dialog; runtime.dialog=nil;d:close("finished") end
+        self:_refresh_current_comment_overlay(true)
+        local msg=(runtime.interrupted and "评论获取已中断：" or "评论获取完成：")..tostring(runtime.done).." 章，保存 "..tostring(runtime.comments).." 条"
+        if runtime.skipped>0 then msg=msg.."，复用缓存 "..tostring(runtime.skipped).." 章" end
+        if runtime.failed>0 then msg=msg.."，失败 "..tostring(runtime.failed).." 章" end
+        self:toast(msg,4)
+        return
+    end
+    local chapter=runtime.rows[runtime.first+runtime.done]
+    local uid=tostring(chapter and (chapter.chapterUid or chapter.uid or chapter.chapter_uid) or "")
+    local title=tostring(chapter and chapter.title or "")
+    if uid=="" then
+        runtime.done=runtime.done+1;runtime.failed=runtime.failed+1
+        self:_comment_range_state(runtime,"comments","章节缺少 UID，已跳过")
+        runtime.advance_task=function() runtime.advance_task=nil;self:_comment_range_next(runtime) end
+        UIManager:scheduleIn(.05,runtime.advance_task)
+        return
+    end
+    local status=self.comment_sync:status(runtime.book_id,uid)
+    if not runtime.force and status.has_cache
+        and (status.status=="cached" or status.status=="empty") then
+        runtime.comments=runtime.comments+(tonumber(status.comments) or 0)
+        runtime.done=runtime.done+1;runtime.skipped=runtime.skipped+1
+        self:_comment_range_state(runtime,"comments","已复用本地缓存")
+        runtime.advance_task=function() runtime.advance_task=nil;self:_comment_range_next(runtime) end
+        UIManager:scheduleIn(.05,runtime.advance_task)
+        return
+    end
+    if not self:is_online() then
+        -- Do not retry indefinitely or make ReaderUI wait for connectivity.
+        local pending=runtime.total-runtime.done
+        runtime.failed=runtime.failed+pending
+        runtime.interrupted=true
+        runtime.done=runtime.total
+        self:_comment_range_state(runtime,"comments","网络中断，剩余章节未获取")
+        self:_comment_range_next(runtime)
+        return
+    end
+    self:_comment_range_state(runtime,"comments","正在获取第 "..tostring(runtime.first+runtime.done).." 章："..title)
+    -- Copy credentials into the worker, never initialize a full Store on the
+    -- reader process or carry its open SQLite connection into the child.
+    local auth=U.copy(self.store:auth())
+    local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
+    local api_mode=require("miuread.api_transport").preference(self.store)
+    local book_id=runtime.book_id
+    local force=runtime.force==true
+    local started,err=runtime.async:run("comment_range_chapter",function()
+        local child_store=interactive_child_store(auth,data_dir,temp_dir,api_mode)
+        child_store.cache_books_dir=data_dir.."/books"
+        function child_store:book_cache_path(id)
+            return self.cache_books_dir.."/"..U.id_name(tostring(id or ""))
+        end
+        function child_store:book_dir(id)
+            local path=self:book_cache_path(id)
+            U.mkdir(path)
+            return path
+        end
+        local child_http=Http:new(child_store)
+        local child_reader=Reader:new(child_http,child_store)
+        local child_api=Api:new(child_http,child_store,child_reader):scope()
+        local child_sync=require("miuread.comment_sync"):new(child_api,child_store)
+        local result,fetch_error=child_sync:fetch(book_id,uid,{force=force})
+        local changed_auth,changed=child_store:snapshot()
+        return {ok=result~=nil,result=result,error=fetch_error,auth=changed_auth,auth_changed=changed}
+    end,function(reply)
+        if self._comment_range_task~=runtime then return end
+        local value=reply and reply.value or nil
+        if reply and reply.ok==true and type(value)=="table" and value.auth_changed==true then
+            self:_apply_interactive_auth({auth=value.auth,changed=true})
+        end
+        local success=reply and reply.ok==true and type(value)=="table" and value.ok==true
+        local updated=self.comment_sync:status(book_id,uid)
+        if success and updated.has_cache then
+            runtime.comments=runtime.comments+(tonumber(updated.comments) or 0)
+            if value.result and value.result.partial then runtime.partial=runtime.partial+1 end
+        else
+            runtime.failed=runtime.failed+1
+            logger.warn("[MiuRead][Comments] range chapter failed","book=",book_id,
+                "chapter=",uid,"error=",U.first_line(tostring((value and value.error) or (reply and reply.error) or "unknown"),140))
+        end
+        runtime.done=runtime.done+1
+        self:_comment_range_state(runtime,"comments",success and "已保存本章评论" or "本章失败，可重新选择范围继续")
+        if not runtime.paused then
+            runtime.advance_task=function()
+                runtime.advance_task=nil
+                self:_comment_range_next(runtime)
+            end
+            -- Batch comments are intentionally rate limited on slow Kindle hardware.
+            local err_text=tostring((value and value.error) or ""):lower()
+            local delay=err_text:find("429",1,true) and 5 or 1
+            UIManager:scheduleIn(delay,runtime.advance_task)
+        end
+    end,180)
+    if not started then
+        logger.warn("[MiuRead][Comments] range worker unavailable",tostring(err))
+        self:_cancel_comment_range_task("worker unavailable",true)
+        self:info("无法启动评论后台任务："..tostring(err))
+    end
+end
+
+function Plugin:_start_comment_range(book,rows,first,last,force)
+    local book_id=tostring(book and (book.bookId or book.book_id) or "")
+    first=math.floor(tonumber(first) or 0)
+    last=math.floor(tonumber(last) or 0)
+    if book_id=="" or first<1 or last<first or last>#rows then
+        self:info("评论章节范围无效，请重新选择。")
+        return false
+    end
+    if self._comment_range_task then
+        self:_show_comment_range_progress(self._comment_range_task)
+        self:toast("已有评论获取任务，请先完成或取消",2)
+        return false
+    end
+    local task={book_id=book_id,rows=rows,first=first,last=last,total=last-first+1,
+        done=0,comments=0,failed=0,partial=0,skipped=0,force=force==true,
+        context=self:_interactive_network_context(),
+        async=Async:new(self.store,{disable_fallback=true,poll_interval=.35})}
+    if not task.async:available() then
+        self:info("当前设备无法启动独立评论 Worker，已拒绝在阅读界面同步下载。")
+        return false
+    end
+    self._comment_range_task=task
+    self:_comment_range_state(task,"comments","准备获取所选章节")
+    self:_show_comment_range_progress(task)
+    self:_comment_range_next(task)
+    return true
+end
+
+function Plugin:_comment_chapter_list_menu(book,rows,title,callback,start)
+    local items={}
+    for i,ch in ipairs(rows or {}) do
+        if i>=(tonumber(start) or 1) then
+            local uid=tostring(ch.chapterUid or ch.uid or ch.chapter_uid or "")
+            if uid~="" then
+                local status=self.comment_sync:status(tostring(book.bookId),uid)
+                local label="第 "..tostring(i).." 章 · "..tostring(ch.title or uid)
+                local hint=status.has_cache and ("缓存 "..tostring(status.comments or 0).." 条") or "未获取"
+                items[#items+1]={text=label,post_text=hint,callback=function() callback(i,ch) end}
+            end
+        end
+    end
+    self:list(title,items,"没有可用的章节目录")
+end
+
+function Plugin:_choose_comment_range(force)
+    local scope=self:_current_thought_favorite_scope()
+    if scope.book_id=="" then
+        self:info("请先打开觅阅书籍，再选择评论章节范围。")
+        return false
+    end
+    local book={bookId=scope.book_id,title=scope.book_title}
+    local context=self:_interactive_network_context()
+    return self:_request_catalog(book,"comment-range",function(rows)
+        rows=type(rows)=="table" and rows or {}
+        if #rows==0 then self:info("暂时没有可用章节目录。") return end
+        self:list("评论获取范围 · "..tostring(book.title or ""),{
+            {text="默认范围：当前章起最多10章",post_text="可在下方自选起止章节",
+                callback=function()
+                    local index=1
+                    for i,ch in ipairs(rows) do
+                        if tostring(ch.chapterUid or ch.uid or ch.chapter_uid or "")==tostring(scope.chapter_uid or "") then
+                            index=i;break
+                        end
+                    end
+                    self:_start_comment_range(book,rows,index,math.min(#rows,index+9),force==true)
+                end},
+            {text="自选起止章节",callback=function()
+                self:_comment_chapter_list_menu(book,rows,"选择评论起始章节",function(first)
+                    self:_comment_chapter_list_menu(book,rows,"选择评论结束章节",function(last)
+                        local function start() self:_start_comment_range(book,rows,first,last,force==true) end
+                        if last-first+1>30 then
+                            UIManager:show(ConfirmBox:new{
+                                text="将获取 "..tostring(last-first+1).." 章的公开评论，可能产生较多请求。是否继续？",
+                                ok_text="开始获取",cancel_text="返回",ok_callback=start,
+                            })
+                        else start() end
+                    end,first)
+                end)
+            end},
+        })
+    end,{context=context,status_text="正在后台读取评论章节目录…"})
+end
+
+function Plugin:_comment_fetch_mode_menu(back_callback)
+    if self._comment_range_task then return self:_show_comment_range_progress(self._comment_range_task) end
+    self:list("获取公开评论",{
+        {text="自选范围（默认）",post_text="选择章节范围，逐章缓存评论",
+            callback=function() self:_choose_comment_range() end},
+        {text="更新指定范围",post_text="忽略已有完成标记，重新从服务器获取",
+            callback=function() self:_choose_comment_range(true) end},
+        {text="当前章节",post_text="仅获取本章评论",
+            callback=function() self:_fetch_current_chapter_comments(false,back_callback) end},
+        {text="更新当前章节",post_text="重新联网获取本章评论",
+            callback=function() self:_fetch_current_chapter_comments(true,back_callback) end},
     })
     return true
 end
@@ -14579,24 +14834,15 @@ function Plugin:_show_reader_comment_center(back_callback)
                 and self.comment_sync:status(scope.book_id,scope.chapter_uid)
                 or {has_cache=false,status="not_fetched",comments=0}
             local can_fetch=scope.book_id~="" and scope.chapter_uid~=""
-            local main_label
-            if (cache.status=="partial" or cache.status=="error") and can_fetch then
-                main_label=cache.has_cache and "继续获取本章评论" or "重试获取本章评论"
-            elseif not cache.has_cache then main_label="获取本章评论"
-            else main_label="查看本章评论" end
             local content_rows={
-                {icon=cache.has_cache and "comment" or "download",label=main_label,
-                    value=self:_reader_comment_status_label(scope),enabled=can_fetch,arrow=true,
-                    callback=function()
-                        if cache.status=="partial" or cache.status=="error" or not cache.has_cache then
-                            self:_fetch_current_chapter_comments(false,reopen)
-                        else self:_show_current_chapter_comments(scope,reopen) end
+                {icon="download",label="获取公开评论",value=self._comment_range_task and "正在获取" or "自选范围 / 当前章节",
+                    enabled=scope.book_id~="",arrow=true,callback=function()
+                        self:_comment_fetch_mode_menu(reopen)
                     end},
+                {icon="comment",label="查看本章评论",value=self:_reader_comment_status_label(scope),
+                    enabled=can_fetch and cache.has_cache,arrow=true,
+                    callback=function() self:_show_current_chapter_comments(scope,reopen) end},
             }
-            if can_fetch and cache.has_cache then
-                content_rows[#content_rows+1]={icon="sync",label="更新本章评论",
-                    value="",arrow=true,callback=function() self:_fetch_current_chapter_comments(true,reopen) end}
-            end
             content_rows[#content_rows+1]={icon="bookmark",label="我的评论收藏",
                 value=tostring(total).." 条",arrow=true,callback=function()
                     self:show_thought_favorites{reader_context=true,scope_label="我的评论收藏",back_callback=reopen}
@@ -27095,7 +27341,7 @@ function Plugin:on_read_report_interval_success(status)
     if status and (status.recovery_probe==true or tonumber(status.elapsed_seconds or 0)<=0) then return end
     if self._time_sync_first_notice_shown==true or not self:_time_first_success_notice_enabled() then return end
     self._time_sync_first_notice_shown=true
-    self:status_toast("阅读时间同步成功","本次阅读时间已开始同步",3)
+    self:toast("本次阅读时间已开始同步",3)
 end
 
 function Plugin:on_read_report_failure(err,kind,book_id)
@@ -32896,6 +33142,7 @@ function Plugin:_schedule_post_reader_work(reason,delay,phase)
 end
 
 function Plugin:onCloseDocument()
+    self:_cancel_comment_range_task("document close",true)
     self:_teardown_comment_overlay()
     if self._bookstore_shelf_auth then require("miuread.bookstore").reset(self) end
     BookExcerptDialog.close("document close")

@@ -29,10 +29,10 @@ jobs:
       MANIFEST_NAME: update.json
 
     steps:
-      - name: Check out main branch
+      - name: Check out source for this release
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
           fetch-depth: 0
 
       - name: Resolve and synchronize stable release identity
@@ -52,11 +52,15 @@ jobs:
             VERSION="${RELEASE_TAG#v}"
             EVENT_SHA="$GITHUB_SHA"
 
-            # Tag push 必须来自 main 当前 HEAD。
-            # 直接使用 GitHub 事件携带的 SHA，避免刚创建 tag 时的可见性竞态。
+            # Immutable Tag release: checkout above selected THIS tag, not main.
+            # Old Tags may be valid even after main has received later commits.
             if [ "$EVENT_SHA" != "$BRANCH_SHA" ]; then
-              echo "::error::Tag $RELEASE_TAG 必须创建在 main 分支最新提交上。"
-              echo "::error::main=$BRANCH_SHA, event_source=$EVENT_SHA"
+              echo "::error::检出的 Tag 源码不匹配触发事件：$RELEASE_TAG"
+              exit 1
+            fi
+            git fetch origin main --quiet
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::正式 Tag 必须指向 main 分支历史中的提交。"
               exit 1
             fi
           fi
@@ -69,18 +73,16 @@ jobs:
 
           git fetch --force --tags origin
 
-          python3 .github/scripts/sync_release_identity.py \
-            --channel stable \
-            --version "$VERSION" \
-            --tag "$RELEASE_TAG"
-
-          # For tag-triggered releases, the tagged source must already have
-          # correct metadata. Never rewrite a published tag or its source.
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && ! git diff --quiet -- \
-              miuread.koplugin/miuread/config.lua \
-              miuread.koplugin/_meta.lua CHANGELOG.md; then
-            echo "::error::Tag 源码版本/CHANGELOG 不一致；请先在 main 准备版本后创建新 Tag。"
-            exit 1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual releases can prepare and commit new stable metadata.
+            python3 .github/scripts/sync_release_identity.py \
+              --channel stable \
+              --version "$VERSION" \
+              --tag "$RELEASE_TAG"
+          else
+            # A tag is immutable: its version/changelog/channel must ALREADY
+            # match. Validation below will reject mismatches without rewriting.
+            echo "Tag $RELEASE_TAG: 仅校验 Tag 对应源码，不自动修改版本文件。"
           fi
 
           RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
@@ -406,11 +408,13 @@ jobs:
         run: |
           set -euo pipefail
           SOURCE_SHA="$(git rev-parse HEAD)"
-          git fetch origin main --quiet
-          REMOTE_MAIN_SHA="$(git rev-parse origin/main)"
-          if [ "$SOURCE_SHA" != "$REMOTE_MAIN_SHA" ]; then
-            echo "::error::main 在本次发布测试期间发生变化；请重新运行。"
-            exit 1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            git fetch origin main --quiet
+            REMOTE_MAIN_SHA="$(git rev-parse origin/main)"
+            if [ "$SOURCE_SHA" != "$REMOTE_MAIN_SHA" ]; then
+              echo "::error::main 在本次发布测试期间发生变化；请重新运行。"
+              exit 1
+            fi
           fi
 
           # Avoid modifying a tag even when the release retry uses an old name.

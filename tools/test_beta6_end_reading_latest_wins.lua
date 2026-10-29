@@ -34,8 +34,8 @@ assert(main:find('verify_only=true',1,true) and main:find('web_only=true',1,true
 assert(main:find('kindle_pending_send_authoritative',1,true),
  "Kindle-first replay no longer bypasses remote timestamp veto")
 assert(main:find('pending_already_saved=true',1,true),"remote-newer state discarded a saved Kindle position")
-assert(service:find('next_due = now + interval',1,true),"reading interval must never send")
-assert(not service:find('next_due = run_report(control, elapsed, false, "interval")',1,true),"periodic report still active")
+assert(service:find('next_due = run_report(control, elapsed, false, "interval")',1,true),"periodic time reporting not restored")
+assert(service:find('local drop_time=false',1,true),"failed SAFE time must survive")
 assert(service:find('local drop_time=false',1,true),"unsubmitted time cannot be dropped on retry exhaustion")
 assert(sync:find('"text_anchor_search_no_match"',1,true),"nil search result classification missing")
 assert(sync:find('selected.selection_reason="latest_cloud_coordinate"',1,true),"source disagreement must choose newer cloud observation")

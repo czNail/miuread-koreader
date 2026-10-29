@@ -258,7 +258,7 @@ local function select_context_chapter(book)
     return Content.first_readable_chapter(chapters)
 end
 
-local function refresh_context(client, book_id, book, force)
+local function refresh_context(client, book_id, book, force, skip_agent_progress)
     book_id = tostring(book_id or "")
     if book_id == "" then
         error("missing book id")
@@ -288,9 +288,12 @@ local function refresh_context(client, book_id, book, force)
         book.catalog_complete = true
     end
 
-    local progress_ok, progress_result = pcall(function()
-        return client:get_progress(book_id)
-    end)
+    local progress_ok, progress_result = false, nil
+    if not skip_agent_progress then
+        progress_ok, progress_result = pcall(function()
+            return client:get_progress(book_id)
+        end)
+    end
     if progress_ok and type(progress_result) == "table" then
         local remote = type(progress_result.book) == "table"
             and progress_result.book or progress_result
@@ -663,6 +666,7 @@ local BOOK_PATCH_KEYS = {
     "catalog_complete", "remote_progress_loaded", "remote_raw_progress",
     "remote_chapter_uid", "remote_chapter_idx", "remote_chapter_offset",
     "app_id", "read_context_updated_at", "read_context_ready", "core_map_hash",
+    "session_time_anchor", "session_time_anchor_session",
 }
 
 local function make_book_patch(book)
@@ -756,7 +760,7 @@ function Worker.run(job)
         book.app_id = book.app_id or WeRead.web_app_id()
     else
         local context_ok, context_or_error, initial_context_changed = pcall(function()
-            return refresh_context(client, book_id, book, job.force_context == true)
+            return refresh_context(client, book_id, book, job.force_context == true, reading_time_compat)
         end)
         if not context_ok then
             local message=tostring(context_or_error)
@@ -791,27 +795,38 @@ function Worker.run(job)
     local protocol_time_only = job.time_only == true and not reading_time_compat
     local position_override
     if reading_time_compat then
-        -- beta.17 user policy: Kindle is the authority for both progress and
-        -- position-bearing time reports. Do not gate time on Web getProgress,
-        -- which currently returns a parameter-format error for some books.
-        -- A time report is a full /web/book/read write, not a harmless timer:
-        -- require an exact native chapter and safe percentage before dispatch.
-        local local_position,local_error=estimate_position(book,progress_ratio)
-        if local_position and local_position.native_offset==true
-            and tostring(local_position.offset_basis or "")=="wr_data_co" then
-            local valid,why=validate_terminal_progress(book,local_position)
-            if valid and local_position.chapter_idx~=nil then
-                position_override=local_position
-                position_override.source="kindle_native_time_guard"
-            else
-                local_error=why or "native chapter index unavailable"
-            end
+        -- The position-bearing time POST uses a single Web wire tuple per
+        -- live reader session. Never use arbitrary Kindle coordinates, an
+        -- Agent gateway tuple, or a previous session's cached position.
+        local session_id=tostring(job.reading_time_session_id or "")
+        local saved=type(book.session_time_anchor)=="table" and book.session_time_anchor or nil
+        if session_id~="" and tostring(book.session_time_anchor_session or "")==session_id
+            and saved then
+            position_override=normalize_cloud_anchor(saved,{})
         end
         if not position_override then
-            return finish(settings,book,{
-                ok=false,error="Kindle reading-time position unavailable: "..tostring(local_error or "invalid native coordinate"),
-                error_kind="context",meta={request_dispatched=false},
-            },context_changed)
+            local refreshed,web_error,web_error_kind=refresh_remote_anchor(client,book_id,book)
+            if refreshed then
+                position_override=normalize_cloud_anchor(nil,book)
+            end
+            if not position_override then
+                return finish(settings,book,{
+                    ok=false,
+                    error="Opening Web position unavailable: "..tostring(web_error or "incomplete Web position"),
+                    error_kind=web_error_kind or "context",
+                    meta={request_dispatched=false},
+                },context_changed)
+            end
+            position_override.source="session_web_time_echo"
+            book.session_time_anchor={
+                chapter_uid=position_override.chapter_uid,
+                chapter_idx=position_override.chapter_idx,
+                chapter_offset=position_override.chapter_offset,
+                protocol_progress=position_override.progress,
+                source="session_web_time_echo",
+            }
+            book.session_time_anchor_session=session_id
+            context_changed=true
         end
     end
     local accepted, result, first_error, first_kind, first_position, first_public, first_meta = attempt_report(

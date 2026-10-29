@@ -112,53 +112,52 @@ function DownloadProgress:init()
     group[#group + 1] = self.status_widget
     group[#group + 1] = VerticalSpan:new{width = Size.padding.large}
 
+    local buttons={{
+        {
+            text = tostring(self.cancel_text or "取消下载"),
+            callback = function()
+                if self.cancelled then return end
+                local accepted=true
+                if self.on_cancel then
+                    local ok,result=pcall(self.on_cancel)
+                    if not ok then logger.warn("[MiuRead][DownloadUI] cancel callback failed",tostring(result))
+                    elseif result==false then accepted=false end
+                end
+                if not accepted then return end
+                self.cancelled=true
+                self.status_widget:setText("正在取消……")
+                self:_redraw()
+            end,
+        },
+    }}
+    if self.hide_pause~=true then
+        buttons[1][#buttons[1]+1]={
+            text=tostring(self.pause_text or "暂停下载"),
+            callback=function()
+                if self.cancelled then return end
+                if self.on_pause then
+                    local ok,result=pcall(self.on_pause)
+                    if not ok then logger.warn("[MiuRead][DownloadUI] pause callback failed",tostring(result))
+                    elseif result==false then return end
+                end
+                self:close("paused")
+            end,
+        }
+    end
+    if self.hide_background~=true then
+        buttons[1][#buttons[1]+1]={
+            text=tostring(self.background_text or "后台下载"),
+            callback=function()
+                if self.cancelled then return end
+                if self.on_background then self.on_background() end
+            end,
+        }
+    end
     self.buttons = ButtonTable:new{
         width = content_width,
         show_parent = self,
         zero_sep = true,
-        buttons = {{
-            {
-                text = tostring(self.cancel_text or "取消下载"),
-                callback = function()
-                    if self.cancelled then return end
-                    local accepted=true
-                    if self.on_cancel then
-                        local ok,result=pcall(self.on_cancel)
-                        if not ok then
-                            logger.warn("[MiuRead][DownloadUI] cancel callback failed",tostring(result))
-                        elseif result==false then
-                            accepted=false
-                        end
-                    end
-                    if not accepted then return end
-                    self.cancelled = true
-                    self.status_widget:setText("正在取消……")
-                    self:_redraw()
-                end,
-            },
-            {
-                text = tostring(self.pause_text or "暂停下载"),
-                callback = function()
-                    if self.cancelled then return end
-                    if self.on_pause then
-                        local ok,result=pcall(self.on_pause)
-                        if not ok then
-                            logger.warn("[MiuRead][DownloadUI] pause callback failed",tostring(result))
-                        elseif result==false then
-                            return
-                        end
-                    end
-                    self:close("paused")
-                end,
-            },
-            {
-                text = tostring(self.background_text or "后台下载"),
-                callback = function()
-                    if self.cancelled then return end
-                    if self.on_background then self.on_background() end
-                end,
-            },
-        }},
+        buttons=buttons,
     }
     group[#group + 1] = self.buttons
 
@@ -223,6 +222,28 @@ end
 
 function DownloadProgress:set_state(state)
     state = state or {}
+    if state.kind=="comments" then
+        local current=math.max(0,tonumber(state.current) or 0)
+        local total=math.max(0,tonumber(state.total) or 0)
+        local percent=total>0 and clamp(current/total,0,1) or 0
+        local rows={"已处理章节 "..tostring(current).." / "..tostring(total),
+            "本地评论 "..tostring(state.comments or 0).." 条",
+            "复用缓存 "..tostring(state.skipped or 0).." 章 · 失败 "..tostring(state.failed or 0).." 章"}
+        if state.chapter and state.chapter~="" and current<total then
+            rows[#rows+1]=clean_status(state.chapter,100)
+        end
+        if state.message and state.message~="" then rows[#rows+1]=clean_status(state.message,110) end
+        local percent_text=tostring(math.floor(percent*100+0.5)).."%"
+        local status_text=table.concat(rows,"\n")
+        local signature=percent_text.."\n"..status_text
+        if signature==self._last_signature then return end
+        self._last_signature=signature
+        self.progress:setPercentage(percent)
+        self.percent_widget:setText(percent_text)
+        self.status_widget:setText(status_text)
+        self:_redraw()
+        return
+    end
     if state.kind=="extension" then
         local bytes=tonumber(state.downloaded_bytes) or 0
         local total=tonumber(state.total_bytes) or 0
