@@ -227,10 +227,10 @@ function Service.run(job)
         if tostring(control.book_id or "")~=tostring(current_job.book_id or "")
             or tostring(control.core_map_hash or "")~=tostring(current_job.core_map_hash or "")
             or tonumber(control.record_generation or -1)~=tonumber(current_job.record_generation or 0)
-            or control.position_safe~=true
-            or tostring(control.local_chapter_uid or "")==""
-            or control.local_native_chapter_offset~=true
-            or tostring(control.local_chapter_offset_basis or "")~="wr_data_co" then
+            or (not time_only and (control.position_safe~=true
+                or tostring(control.local_chapter_uid or "")==""
+                or control.local_native_chapter_offset~=true
+                or tostring(control.local_chapter_offset_basis or "")~="wr_data_co")) then
             sequence=sequence+1
             blocked=true
             write_service_status({
@@ -250,12 +250,15 @@ function Service.run(job)
         -- double-counting risk of replaying an uncertain HTTP write.
         local maximum=math.max(10,tonumber(Config.READ_REPORT_MAX_ELAPSED_SECONDS) or 60)
         local fresh_elapsed=math.max(1,math.floor(tonumber(elapsed) or interval))
-        local safe_carry=math.max(0,math.floor(tonumber(carry_remaining) or 0))
+        -- In best-effort mode, old missing intervals are not a transferable debt.
+        local safe_carry=Config.READ_TIME_BEST_EFFORT==true and 0
+            or math.max(0,math.floor(tonumber(carry_remaining) or 0))
         local available_elapsed=safe_carry+fresh_elapsed
         local report_elapsed=math.max(1,math.min(maximum,available_elapsed))
         local carry_used=math.min(safe_carry,report_elapsed)
         local leftover=math.max(0,available_elapsed-report_elapsed)
         elapsed=report_elapsed
+        if Config.READ_TIME_BEST_EFFORT==true then leftover=0;carry_remaining=0 end
         sequence = sequence + 1
         local report_book=U.copy(book or {})
         report_book.book_id=tostring(current_job.book_id or "")
@@ -277,9 +280,10 @@ function Service.run(job)
             progress_ratio = tonumber(control.progress_ratio) or 0,
             time_only = time_only,
             report_mode = report_mode,
-            -- beta.15: time-only compatibility writes may echo only the most
-            -- recent raw server position. If these fields are absent, pass nil
-            -- so the isolated worker refreshes WeRead before writing.
+            reading_time_session_id=tostring(current_job.reading_time_session_id or ""),
+            -- 6.2.0-beta.3: the normal opening Web read provides one raw
+            -- server tuple for this session. Never initiate a second Legacy
+            -- getProgress from the time worker on the periodic hot path.
             cloud_anchor = time_only and (tostring(control.remote_wire_chapter_uid or "")~=""
                 and tonumber(control.remote_wire_chapter_offset)~=nil
                 and tonumber(control.remote_wire_protocol_progress)~=nil) and {
@@ -289,6 +293,8 @@ function Service.run(job)
                 protocol_progress=control.remote_wire_protocol_progress,
                 raw_progress=control.remote_wire_raw_progress,
                 source=control.remote_wire_source or "remote_wire",
+                fetched_at=control.remote_wire_fetched_at,
+                book_id=current_job.book_id,
             } or nil,
             elapsed_seconds = elapsed,
             cookies = auth.cookies or {},
@@ -321,19 +327,17 @@ function Service.run(job)
         if ok and type(result) == "table" then
             local request_dispatched=result.request_dispatched==true
                 or (type(result.meta)=="table" and result.meta.request_dispatched==true)
-            if request_dispatched then
-                -- The attempted seconds may already be counted by WeRead. Only
-                -- the portion that was not included in this capped request is
-                -- safe to carry forward.
+            if Config.READ_TIME_BEST_EFFORT==true then
+                -- Never accumulate, retry or persist older unsent seconds.
+                carry_remaining=0
+            elseif request_dispatched then
                 carry_remaining=leftover
             else
-                -- Failure happened before /web/book/read was entered. The full
-                -- interval is definitely unsent and can be retried later.
                 carry_remaining=available_elapsed
             end
             -- A candidate context only becomes authoritative after WeRead
             -- accepts this exact book/core-map request.
-            if result.accepted and not time_only and type(result.legacy_context) == "table"
+            if result.accepted and type(result.legacy_context) == "table"
                 and tostring(result.legacy_context.book_id or result.legacy_context.bookId or "")==tostring(current_job.book_id or "")
                 and tostring(result.legacy_context.core_map_hash or "")==tostring(current_job.core_map_hash or "") then
                 book = U.copy(result.legacy_context)
@@ -368,7 +372,8 @@ function Service.run(job)
                 consecutive_unconfirmed = 0
                 blocked = kind == "authentication"
             end
-            local drop_time = false -- beta.6: failed time reports keep provably unsent carry
+            local drop_time = Config.READ_TIME_BEST_EFFORT==true
+                and not result.accepted and not uncertain
             out.generation = generation
             out.seq = sequence
             out.state = drop_time and "dropped" or (result.accepted and "waiting" or (uncertain and "unconfirmed" or "error"))
@@ -421,13 +426,13 @@ function Service.run(job)
         -- Adapter itself failed after invocation. Dispatch state is unknowable;
         -- conservatively treat the attempted portion as dispatched so it is not
         -- replayed. Only the capped overflow was never attempted.
-        carry_remaining=leftover
+        carry_remaining=Config.READ_TIME_BEST_EFFORT==true and 0 or leftover
         consecutive_failures = consecutive_failures + 1
         consecutive_unconfirmed = 0
         local kind=classify_error(nil,result)
         if kind == "transport" then SubprocessHygiene.reset_resolver() end
         blocked = kind == "authentication"
-        local drop_time=false -- never silently discard accumulated time
+        local drop_time=Config.READ_TIME_BEST_EFFORT==true
         local dropped_error=tostring(result or "read report service failed")
         if drop_time then
             carry_remaining=0
@@ -535,7 +540,8 @@ function Service.run(job)
                     local first_delay = math.max(5, math.min(interval, tonumber(loaded.first_delay) or interval))
                     local now = os.time()
                     local loaded_carry=math.max(0,math.floor(tonumber(loaded.carry_elapsed) or 0))
-                    carry_remaining=preserve_clock and math.max(previous_carry,loaded_carry) or loaded_carry
+                    carry_remaining=Config.READ_TIME_BEST_EFFORT==true and 0
+                        or (preserve_clock and math.max(previous_carry,loaded_carry) or loaded_carry)
                     if preserve_clock then
                         -- Authentication/session metadata can refresh while the
                         -- same reading segment is active. Replace credentials,
@@ -669,10 +675,12 @@ function Service.run(job)
                     if busy_until > now then
                         next_due = math.max(next_due, busy_until + 1)
                     elseif idle <= idle_timeout then
-                        -- beta.6: the worker keeps a clock but performs NO
-                        -- position-bearing Web request during active reading.
-                        -- stop_fast() flushes elapsed time after reading ends.
-                        next_due = now + interval
+                        -- 6.2: time is an independent, bounded 15/60-second
+                        -- report; periodic cloud-progress writes remain disabled.
+                        -- The worker obtains the live Web wire position before
+                        -- each time POST. An unsafe/missing anchor fails closed.
+                        local elapsed = math.max(1, now - last_report_at)
+                        next_due = run_report(control, elapsed, false, "interval")
                     else
                         next_due = now + interval
                     end

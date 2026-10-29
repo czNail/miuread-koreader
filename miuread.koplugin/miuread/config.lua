@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "6.1.0",
+    VERSION = "6.2.0-beta.5",
     SCHEMA = 136,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -8,11 +8,11 @@ local C = {
 
     -- 当前安装包自身仍有 stable/beta 身份；用户选择的 OTA 通道独立保存。
     -- beta.20 起所有实时更新清单都由统一仓库 miuread-koreader 提供。
-    UPDATE_CHANNEL = "stable",
-    UPDATE_CHANNEL_LABEL = "正式通道",
-    UPDATE_MANIFEST = "https://github.com/miumiupy98-art/miuread-koreader/releases/download/stable-channel/update.json",
+    UPDATE_CHANNEL = "beta",
+    UPDATE_CHANNEL_LABEL = "内测通道",
+    UPDATE_MANIFEST = "https://github.com/miumiupy98-art/miuread-koreader/releases/download/beta-channel/update-beta.json",
     UPDATE_MANIFESTS = {
-        "https://github.com/miumiupy98-art/miuread-koreader/releases/download/stable-channel/update.json",
+        "https://github.com/miumiupy98-art/miuread-koreader/releases/download/beta-channel/update-beta.json",
     },
     UPDATE_CHANNELS = {
         stable = {
@@ -101,17 +101,16 @@ local C = {
     BACKGROUND_PARK_LOG_INTERVAL = 20,
 
     READ_INTERVAL = 60,
-    -- Service clock starts early, but all Web reading-time writes are deferred
-    -- until the reading-end flush.  This remains a scheduling/health parameter,
-    -- NOT a permission to write during active reading.
+    -- The background timer reports at 15s then every configured interval.
+    -- ReaderUI itself never performs the Web reading-time network write.
     READ_FIRST_DELAY = 15,
     -- beta.24 never replays historical/suspend reading-time debt. Normal
     -- reports stay on the established one-minute cadence and every request is
     -- independently capped, avoiding burst uploads after reconnect/resume.
     READ_REPORT_MAX_ELAPSED_SECONDS = 60,
-    -- beta.6: report only after reading. Only *provably unsent* seconds may be
-    -- persisted and retried after restart; unknown dispatches are NEVER replayed.
-    READ_TIME_BEST_EFFORT = false,
+    -- Reading time is best-effort: never persist/replay historical missed time.
+    -- Progress recovery remains independent and durable.
+    READ_TIME_BEST_EFFORT = true,
     READ_TIME_MAX_ATTEMPTS = 2,
     -- beta.13: progress writes have priority over periodic reading-time writes.
     -- The fence is a soft preemption: an already-dispatched time request is

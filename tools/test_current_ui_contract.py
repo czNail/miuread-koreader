@@ -39,10 +39,10 @@ class UIContract(unittest.TestCase):
 
     def test_comment_display_never_implies_network_fetch(self):
         main=read('main.lua')
-        self.assertIn('main_label="查看本章评论"',main)
+        self.assertIn('label="查看本章评论"',main)
         self.assertIn('label="我的评论收藏"',main)
         self.assertIn('self._opening_cached_comment',main)
-        self.assertIn('label="更新本章评论"',main)
+        self.assertIn('label="更新当前章节"',main)
 
     def test_book_and_download_menu_actions_not_removed(self):
         main=read('main.lua')

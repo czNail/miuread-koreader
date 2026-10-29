@@ -21,7 +21,7 @@ Sync.__index = Sync
 local legacy_daemon_retired = false
 
 local CONTEXT_MAX_AGE = 15 * 60
-local READ_REPORT_SERVICE_VERSION = 30
+local READ_REPORT_SERVICE_VERSION = 32
 local FIRST_REPORT_DELAY = 15
 local FINAL_REPORT_MIN_SECONDS = 10
 local PRECISE_POSITION_LEAD_SECONDS = 12
@@ -2373,6 +2373,7 @@ function Sync:set_remote_wire_anchor(book_id,value,state,write_control)
             remote_wire_source=anchor.source,
             remote_wire_state=anchor.state,
             remote_wire_server_updated=anchor.server_updated,
+            remote_wire_fetched_at=anchor.fetched_at,
         })
     end
     logger.info("[MiuRead][RemoteWireAnchor] updated","book=",book_id,
@@ -2537,8 +2538,11 @@ function Sync:remote(book_id, callback, options)
         -- beta.15: every authoritative server observation refreshes the wire
         -- echo anchor immediately, even when a local pending progress item exists
         -- or this call deliberately disables canonical CloudAnchor updates.
-        if not remote.conflict then
-            self:set_remote_wire_anchor(book_id,remote,"remote_observed_wire",true)
+        -- The time-reporting wire tuple must originate from the actual Web
+        -- response, not from the newer-source reconciliation winner (which
+        -- may be Agent). Store it even if the progress resolver chose Agent.
+        if web and tostring(web.source or "")=="web_cookie" then
+            self:set_remote_wire_anchor(book_id,web,"remote_observed_wire",true)
         end
         if not remote.conflict and options.update_cloud_anchor~=false then
             local current_session=self.store:session(book_id) or {}
@@ -3473,6 +3477,13 @@ end
 
 function Sync:retry_safe_reading_time(book_id,record_override,position_override,callback)
     callback=type(callback)=="function" and callback or function() end
+    -- Older settings may still contain legacy SAFE time debt after OTA.
+    -- Never replay it in the 6.2 best-effort mode; this does not affect the
+    -- independent pending progress recovery system.
+    if Config.READ_TIME_BEST_EFFORT==true then
+        callback(true,"历史阅读时间补报已关闭","best_effort_disabled")
+        return true
+    end
     book_id=tostring(book_id or "")
     local session=book_id~="" and (self.store:session(book_id) or {}) or {}
     local seconds=session.pending_report_safe==true
@@ -4208,41 +4219,26 @@ function Sync:_write_daemon_control(active, immediate, extra)
         local auth=self.store:auth()
         local account=type(auth.account)=="table" and auth.account or {}
         local book_id=tostring(d.book_id or d.final_book_id or "")
-        -- beta.16: the long-lived daemon is permanently time-only and may not
-        -- serialize canonical/pending CloudAnchor coordinates at all. Only the
-        -- dedicated server-wire channel is allowed into daemon control.
+        -- The long-lived daemon is permanently time-only. Only the dedicated
+        -- server-Web wire channel is allowed into its control snapshot.
         local wire_anchor=book_id~="" and self:remote_wire_anchor(book_id) or nil
-        -- beta.17: a position-bearing time report requires the same valid
-        -- Kindle coordinate as a normal progress report. Capture it on the
-        -- foreground reader's control update; the background worker never
-        -- reads a stale server anchor or invents a chapter coordinate.
+        -- 6.2: never compute or invent Kindle ci/co for a time-only report.
+        -- This /web/book/read request is still position-bearing: the worker
+        -- consumes only a fresh opening Web tuple from the same reader session.
+        -- Progress submissions continue to use their separate exact pipeline.
         local position=nil
-        local record=self:record()
-        if record and book_id~="" and tostring(record.book.book_id or "")==book_id then
-            position=position_override or self:_position_for_report(nil,true)
-            if type(position)=="table" and position.safe==true
-                and position.native_offset==true and tostring(position.offset_basis or position.position_basis or "")=="wr_data_co" then
-                self:_save_local_snapshot(book_id,position)
-            else
-                position=nil
+        if not time_only then
+            local record=self:record()
+            if record and book_id~="" and tostring(record.book.book_id or "")==book_id then
+                position=position_override or self:_position_for_report(nil,precise_position)
+                if type(position)=="table" and position.safe==true
+                    and position.native_offset==true
+                    and tostring(position.offset_basis or position.position_basis or "")=="wr_data_co" then
+                    self:_save_local_snapshot(book_id,position)
+                else
+                    position=nil
+                end
             end
-        end
-        local same_context=tostring(existing.book_id or "")==book_id
-            and tostring(existing.core_map_hash or "")==tostring(d.core_map_hash or "")
-            and tonumber(existing.record_generation or -1)==tonumber(d.record_generation or 0)
-        if not position and same_context and existing.position_safe==true
-            and tostring(existing.local_chapter_uid or "")~=""
-            and existing.local_native_chapter_offset==true
-            and tostring(existing.local_chapter_offset_basis or "")=="wr_data_co" then
-            -- Retain only a proven previous Kindle snapshot of the same book,
-            -- same generation and same core catalog.
-            position={chapter_uid=existing.local_chapter_uid,
-                chapter_index=existing.local_chapter_idx,
-                chapter_offset=existing.local_chapter_offset,
-                progress=(tonumber(existing.progress_ratio) or 0)*100,
-                chapter_word_count=existing.local_chapter_word_count,
-                native_offset=true,offset_basis="wr_data_co",safe=true,
-                source="previous_kindle_control"}
         end
         local native_offset_flag=position and position.native_offset==true or false
         local control = {
@@ -4266,7 +4262,7 @@ function Sync:_write_daemon_control(active, immediate, extra)
             position_source = position and position.source or existing.position_source,
             position_basis = position and position.position_basis or existing.position_basis,
             position_precision_ms = position and position.precision_ms or existing.position_precision_ms,
-            position_safe = position~=nil and position.safe==true,
+            position_safe = time_only or (position~=nil and position.safe==true),
             -- beta.15: reading_time_compat consumes only these fresh server-wire
             -- fields. Do not retain an older value when no wire anchor is known;
             -- omission forces the worker to GET the current server position.
@@ -4278,6 +4274,7 @@ function Sync:_write_daemon_control(active, immediate, extra)
             remote_wire_source=wire_anchor and wire_anchor.source or nil,
             remote_wire_state=wire_anchor and wire_anchor.state or nil,
             remote_wire_server_updated=wire_anchor and wire_anchor.server_updated or nil,
+            remote_wire_fetched_at=wire_anchor and wire_anchor.fetched_at or nil,
             last_activity = tonumber(self.last_activity) or os.time(),
             updated_at = os.time(),
         }
@@ -5026,22 +5023,11 @@ function Sync:_start_daemon(reason)
     -- beta.13 restores ONLY provably-unsent reading time. Legacy debt without
     -- `pending_report_safe=true` is discarded because it may already have been
     -- accepted by WeRead and replaying it would double-count reading time.
+    -- 6.2.0-beta.2: time is best-effort; no historical seconds are replayed
+    -- across reader sessions or process restarts. Progress recovery is separate.
     local carry_elapsed=0
-    local journal_pending,journal_authoritative,journal_note=self:_load_readtime_recovery(book_id,core_hash)
-    local saved_pending=math.max(0,math.floor(tonumber(session.pending_report_seconds) or 0))
-    if journal_authoritative then
-        carry_elapsed=math.max(0,math.floor(tonumber(journal_pending) or 0))
-        if tostring(journal_note or "")~="" and tostring(journal_note or "")~="unchanged" then
-            logger.info("[MiuRead][ReadReport] recovery journal authoritative",
-                "book=",book_id,"pending=",tostring(carry_elapsed),"state=",tostring(journal_note))
-        end
-    elseif session.pending_report_safe==true and saved_pending>0 then
-        -- One-time beta.18 migration path: import the old safe session debt into
-        -- the journal, then the journal becomes authoritative for later crashes.
-        carry_elapsed=saved_pending
-    end
-    self.pending_report_elapsed=carry_elapsed
-    self:_save_safe_pending_state(book_id,carry_elapsed,core_hash)
+    self.pending_report_elapsed=0
+    self:_save_safe_pending_state(book_id,0,core_hash)
     local existing_job=read_json_file(daemon.paths.job) or {}
     local same_account=tostring(existing_job.login_session_id or "")==login_session_id
         and math.max(0,tonumber(existing_job.auth_revision or 0) or 0)==auth_revision

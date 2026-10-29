@@ -34,16 +34,26 @@ assert(main:find('verify_only=true',1,true) and main:find('web_only=true',1,true
 assert(main:find('kindle_pending_send_authoritative',1,true),
  "Kindle-first replay no longer bypasses remote timestamp veto")
 assert(main:find('pending_already_saved=true',1,true),"remote-newer state discarded a saved Kindle position")
-assert(service:find('next_due = now + interval',1,true),"reading interval must never send")
-assert(not service:find('next_due = run_report(control, elapsed, false, "interval")',1,true),"periodic report still active")
-assert(service:find('local drop_time=false',1,true),"unsubmitted time cannot be dropped on retry exhaustion")
+assert(service:find('next_due = run_report(control, elapsed, false, "interval")',1,true),"periodic time reporting not restored")
+-- 6.2 best-effort policy: unsafe/failed time attempts must not accumulate a
+-- cross-session replay debt. A dropped time interval must never affect the
+-- independent final precise-progress transaction assertions above/below.
+assert(service:find('local drop_time = Config.READ_TIME_BEST_EFFORT==true',1,true),
+    "6.2 best-effort time failure handling missing")
+assert(service:find('carry_remaining=0',1,true),
+    "failed intervals could accumulate replay debt")
+assert(sync:find('callback(true,"历史阅读时间补报已关闭"',1,true),
+    "old durable SAFE time replay is not disabled")
 assert(sync:find('"text_anchor_search_no_match"',1,true),"nil search result classification missing")
 assert(sync:find('selected.selection_reason="latest_cloud_coordinate"',1,true),"source disagreement must choose newer cloud observation")
 assert(not sync:find('conflict=true,conflict_reason="coordinate_mismatch"',1,true),"dual-source divergence still opens conflict gate")
 assert(main:find('function Plugin:_reading_end_sync(',1,true),"reading-end transaction missing")
 assert(not main:find('UIManager:scheduleIn(.08,function() if self.ui and self.ui.document then self:upload_local_progress(false) end end)',1,true),"book open triggers foreground upload")
 assert(not main:find('deferred_until_reading_end',1,true),"redundant low-level ReaderUI veto reintroduced")
-assert(store:find('preserve SAFE, provably unsent reading-time carry',1,true),"restart loses safe reading seconds")
-assert(config:find('READ_TIME_BEST_EFFORT = false',1,true),"config still clears safe time carry")
-assert(not store:find('pcall(os.remove,data.."/readtime-recovery-v1.json")',1,true),"startup deletes recovery journal")
-print("beta6 latest-wins and end-reading regression: PASS (10 scenarios + 9 contracts)")
+assert(config:find('READ_TIME_BEST_EFFORT = true',1,true),
+    "6.2 best-effort policy unexpectedly disabled")
+assert(sync:find('pcall(os.remove,self:_readtime_recovery_path())',1,true),
+    "stale time journal cannot be retired while preserving progress state")
+assert(store:find('pending_progress',1,true),
+    "progress recovery must remain independent of discarded time debt")
+print("6.2 latest-wins and end-reading regression: PASS (10 scenarios + best-effort time/progress contracts)")

@@ -31,18 +31,19 @@ class Beta17Contracts(unittest.TestCase):
         worker=src('miuread/legacy/read_report_worker.lua')
         self.assertIn('validate_terminal_progress(book,position)',worker)
 
-    def test_time_report_receives_kindle_coordinate(self):
+    def test_time_report_independent_from_kindle_progress(self):
         sync=src('miuread/sync.lua')
         svc=src('miuread/read_report_service.lua')
         worker=src('miuread/legacy/read_report_worker.lua')
         self.assertIn('and options.progress_only~=true then',sync)
-        self.assertIn('position=position_override or self:_position_for_report(nil,true)',sync)
-        self.assertIn('position_safe = position~=nil and position.safe==true',sync)
-        self.assertIn('report_book.local_chapter_uid=control.local_chapter_uid',svc)
-        self.assertIn('progress_ratio = tonumber(control.progress_ratio) or 0',svc)
+        self.assertIn('position_safe = time_only or',sync)
+        self.assertIn('(not time_only and (control.position_safe',svc)
+        self.assertIn('next_due = run_report(control, elapsed, false, "interval")',svc)
         time_block=worker.split('if reading_time_compat then',1)[1].split('local accepted, result',1)[0]
-        self.assertIn('estimate_position(book,progress_ratio)',time_block)
-        self.assertNotIn('refresh_remote_anchor(client, book_id, book)',time_block)
+        self.assertIn('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',time_block)
+        self.assertIn('observed_at>=session_started-2',time_block)
+        self.assertNotIn('refresh_remote_anchor(client,book_id,book)',time_block)
+        self.assertNotIn('estimate_position(book,progress_ratio)',time_block)
         self.assertIn('meta={request_dispatched=false}',time_block)
 
     def test_comments_cross_source_and_retry(self):
@@ -54,9 +55,10 @@ class Beta17Contracts(unittest.TestCase):
         self.assertIn('_miu_uncertain_ranges',api)
         self.assertIn('mark_batch_completed(batch)',parser)
         self.assertIn('ignored malformed/extra entries',parser)
-        self.assertIn('cache.status=="partial" or cache.status=="error"',main)
-        self.assertIn('self:_fetch_current_chapter_comments(false,reopen)',main)
-        self.assertIn('self:_fetch_current_chapter_comments(true,reopen)',main)
+        self.assertIn('status.status=="cached" or status.status=="empty"',main)
+        self.assertIn('function Plugin:_comment_fetch_mode_menu(',main)
+        self.assertIn('self:_fetch_current_chapter_comments(false,back_callback)',main)
+        self.assertIn('self:_fetch_current_chapter_comments(true,back_callback)',main)
 
     def test_other_ux_regressions(self):
         self.assertIn('label:find("插件状态",1,true)',src('miuread/extension_center.lua'))

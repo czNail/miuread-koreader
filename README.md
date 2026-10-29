@@ -1,6 +1,6 @@
 # MiuRead
 
-> **5.9.0-beta.19 · Robust Local Mapping & Quiet Position Sync**
+> **6.2.0-beta.3 · Reading-Time Wire Fix and Comment UI Repair**
 
 5.9.0 开始把“本机/云端冲突需要用户判断”改为无感云端镜像：打开书籍时自动按同步因果和更新时间选择最新阅读状态，在定位完成前短暂保护翻页；精确 `chapter_uid + co` 仍是最终验收依据。账号书架默认使用微信云端顺序，已读完状态与当前位置分离解析，自动云端跳转可以短时撤回。
 
@@ -18,17 +18,39 @@
 
 完整版本记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 
-当前 beta 开发基线：`5.9.0-beta.19`。本版本以 5.8.0-beta.26 为兼容基线，Schema 升至 136；5.9 beta 阶段对新的 `position_state` 与旧进度字段双写，以便继续验证多设备 latest-wins 而不牺牲回退能力。
+当前 beta 开发基线：`6.2.0-beta.3`（基于 `6.1.0-beta.19` 完整源码）。保留原有 Schema 136、账号/下载/评论/多设备进度机制。
 
 
-## 5.9 beta.5 highlights
+## 6.2.0-beta.3 阅读时间修复与评论界面调整
+
+- 修复上一个版本的真实 Kindle 故障：阅读时间 Worker 不再遗漏开书时取得的 Web 位置快照；严格校验会话时间、账户所绑定书籍及章节目录，使用完整 `/web/book/read` 时间协议，不额外调用错误的 Legacy Web GET。
+- 时间上报仍为首次约15秒、后续约60秒，失败时不补传历史时间；后台服务协议升级到 v32。关书时最新 Kindle 原生精确进度与阅读时间继续分开写入。
+- 评论获取入口、范围编辑器和分页章节选择改用完整不透明背景的原生阅读器弹窗；批量下载进度界面也使用完整白底，减少正文穿透、遗留局部覆盖和墨水屏刷新异常。
+- 保留 beta.2 评论下载、暂停继续、断点缓存与完整双 EPUB 机制；当前已完成离线测试，在线记账与真实 Kindle 显示仍待验证。
+
+## 6.2.0-beta.2 阅读时间与评论获取更新
+
+- 阅读时间首次约 15 秒、之后约每 60 秒由独立 Worker 上报。第一次需要取得可信 Web 位置；同一阅读会话后续使用该位置快照，不再每分钟读取云端进度。关书后仍由独立进度流程提交 Kindle 最新精确位置。
+- 阅读时间采用 best-effort：不跨会话补报断网/失败时长，不重复提交无法确认的 POST。旧 Worker 协议升至 v31，登录身份与书籍映射验证保留。首次成功提醒只显示「本次阅读时间已开始同步」。
+- 评论获取菜单默认“自选范围”：当前章起最多十章或自选起止；另保留当前章节、更新指定范围。批量获取使用独立子进程，支持章节级进度、暂停、继续、后台运行和取消；不再自动打开本章评论长列表。
+- 此版本未改变 Schema 136、正文与带评论 EPUB 格式、章节下载、多设备登录、进度确认、OTA 通道与现有发布入口。真实微信读书记账、Kindle UI、GitHub Actions 的线上验证仍需完成。
+
+## 6.2 beta.1 阅读时间与发布修复
+
+- 阅读时间恢复首次约 15 秒、之后约每 60 秒的分段上报；阅读进度仍在结束阅读或手动同步时上传。
+- 兼容时间请求每次必须先读取微信 Web 当前真实位置，然后原样回显给 `/web/book/read`，不使用本地推算章节偏移覆盖云端。
+- Web 位置不可核实时安全阻止时间请求；保留明确未发出的时长，结果未知时不重复提交。
+- 正式版可通过 Actions 手动输入版本号自动维护版本文件；直接 Tag 发布只校验不可变 Tag 自身的正式版本源码。
+- 当前仅完成离线代码与模拟验收；真机和微信读书在线接口仍须测试。
+
+## 历史机制：5.9 beta.5 highlights
 
 - 开书立即恢复本机页面，云端 position metadata 在后台确认；已有精确本地快照时先走轻量 freshness 判断，remote 确认更新后才启动重型定位。
 - 删除“用户已经翻页 → local wins”的旧语义；以可信 verified anchor + 真实阅读事件时间统一判断 `LOCAL_NEWER / REMOTE_NEWER / ALIGNED / CONFLICT`。
 - 新增 progress write fence：remote 未确认、remote newer 或 conflict 时禁止自动本机写回，避免旧 Kindle 位置覆盖更新云端。
 - `raw_percent` 仅保留为诊断字段；canonical progress、finished、CloudAnchor 与 ReadReport 均以精确位置状态为准。
 - exact-co 定位加入已验证 XPointer 缓存和 text-anchor rescue，percent correction 最多一次 bounded fallback。
-- 阅读时间改为 best-effort：运行期最多两次尝试，仍失败静默丢弃，不再跨重启持久 pending 或污染主页总体同步状态。
+- 当时阅读时间采用 best-effort 策略；该规则已被后续版本的 SAFE 时长持久化和 6.2 beta.1 分段上报机制取代。
 - Schema 136 与 beta.4 的 position-state stack overflow StoreRepair 保持不变。
 
 ## Installation

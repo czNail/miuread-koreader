@@ -1,5 +1,6 @@
 local Blitbuffer = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
+local Blitbuffer = require("ffi/blitbuffer")
 local Device = require("device")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
@@ -50,7 +51,8 @@ local Dialog = InputContainer:extend{
     name = "miuread_reader_settings_dialog",
     _miuread_transient = true,
     _miuread_modal_surface = true,
-    -- Captures full-screen input but paints only a partial frame.
+    -- Other settings retain the existing partial frame. Comment acquisition
+    -- explicitly requests an opaque full-screen drawing surface.
     covers_fullscreen = false,
     stop_events_propagation = true,
     opts = nil,
@@ -360,6 +362,10 @@ function Dialog:_build_content()
     self.frame_dimen = Geom:new{x = outer_margin, y = top_inset, w = panel_w, h = self.panel_h}
 
     local root = OverlapGroup:new{dimen = self.dimen:copy(), allow_mirroring = false}
+    if self.opts and self.opts.opaque_fullscreen == true then
+        root[#root + 1] = LineWidget:new{background=Blitbuffer.COLOR_WHITE,
+            dimen=Geom:new{w=sw,h=sh}}
+    end
     root[#root + 1] = OffsetContainer:new{
         x_off = outer_margin,
         y_off = top_inset,
@@ -482,11 +488,13 @@ function Dialog:_rebuild()
             h = math.max(old.y + old.h, self.frame_dimen.y + self.frame_dimen.h) - math.min(old.y, self.frame_dimen.y),
         }
     end
+    if self.covers_fullscreen then dirty=self.dimen end
     UIManager:setDirty(self, function() return "ui", Skin.expand_region(dirty) end)
 end
 
 function Dialog:init()
     self.opts = self.opts or {}
+    self.covers_fullscreen=self.opts.opaque_fullscreen==true
     self:_build_content()
     self.ges_events = {
         TapDismiss = {GestureRange:new{ges = "tap", range = self.dimen}},
@@ -513,10 +521,12 @@ function Dialog:onClose()
     return self:_close(self.opts and self.opts.on_back or nil)
 end
 function Dialog:onShow()
-    UIManager:setDirty(self, function() return "ui", Skin.expand_region(self.frame_dimen) end)
+    local region=self.covers_fullscreen and self.dimen or self.frame_dimen
+    UIManager:setDirty(self, function() return "ui", Skin.expand_region(region) end)
 end
 function Dialog:onCloseWidget()
-    local region = self.frame_dimen and Skin.expand_region(self.frame_dimen) or nil
+    local old_region=self.covers_fullscreen and self.dimen or self.frame_dimen
+    local region = old_region and Skin.expand_region(old_region) or nil
     local action = self.pending_action
     self.pending_action = nil
     self.closed = true
@@ -538,7 +548,7 @@ function M.show(opts)
         return nil, tostring(dialog)
     end
     live_dialog = dialog
-    UIManager:show(dialog, "ui", dialog.frame_dimen)
+    UIManager:show(dialog, "ui", dialog.covers_fullscreen and dialog.dimen or dialog.frame_dimen)
     return dialog
 end
 return M

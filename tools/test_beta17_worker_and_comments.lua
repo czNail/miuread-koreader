@@ -20,10 +20,19 @@ package.preload['miuread.legacy.content']=function()
         fetch_catalog=function() error('catalog fetch should be unnecessary') end}
 end
 local requests={}
+local now=os.time()
+local session='session-'..tostring(now)..'-1-123456'
+local function web_anchor(idx)
+    return {source='web_cookie',book_id='b',fetched_at=now,
+        chapter_uid='20',chapter_idx=idx or 1,chapter_offset=222,protocol_progress=72}
+end
 package.preload['miuread.legacy.client']=function()
     local C={}
     function C:new()return setmetatable({}, {__index=self})end
-    function C:get_web_progress()error('Web getProgress cannot be used as a time prerequisite')end
+    function C:get_web_progress()error('Legacy Web GET must not run for a time report')end
+    function C:parse_web_progress(result,id)
+        return require('miuread.legacy.web_progress_wire').parse(result,id)
+    end
     function C:get_progress()error('agent getProgress unavailable')end
     function C:report_read(payload)
         requests[#requests+1]=payload
@@ -51,27 +60,50 @@ local function book(progress,offset,uid)
         local_chapter_offset_basis='wr_data_co',progress=progress,
         catalog_complete=true,core_map_hash='h'}
 end
+-- Local Kindle differs from the opening Web tuple, which the reader had
+-- already obtained through the primary Web API. Legacy GET is never called.
 local result=Worker.run{book_id='b',book=book(12,81),cookies={k='v'},
     core_map_hash='h',elapsed_seconds=47,progress_ratio=.12,
-    time_only=true,report_mode='reading_time_compat'}
-assert(result.ok==true,'Kindle native time report must no longer fail Web preflight')
-assert(#requests==1 and requests[1].co==81 and requests[1].pr==12
-    and requests[1].rt==47,'time must use a consistent local position + seconds')
-local invalid=Worker.run{book_id='b',book=book(23,82),cookies={k='v'},
-    core_map_hash='h',elapsed_seconds=47,progress_ratio=.23,
-    time_only=true,report_mode='reading_time_compat'}
-assert(invalid.ok==true and #requests==2,'valid progress can advance on Kindle')
-local unsafe_book=book(25,84)
-unsafe_book.local_native_chapter_offset=false
-local unsafe=Worker.run{book_id='b',book=unsafe_book,cookies={k='v'},
-    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat'}
-assert(unsafe.ok==false and unsafe.meta.request_dispatched==false
-    and #requests==2,'unsafe time context must not send a position-bearing write')
+    time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=web_anchor()}
+assert(result.ok==true,'verified opening Web session tuple must be dispatchable: '..tostring(result.error))
+assert(#requests==1 and requests[1].ci==1 and requests[1].co==222
+    and requests[1].pr==72 and requests[1].rt==47,
+    'time must echo the opening Web tuple, not Kindle position')
+
+local no_native=book(23,82)
+no_native.local_native_chapter_offset=false
+local no_native_result=Worker.run{book_id='b',book=no_native,cookies={k='v'},
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=web_anchor()}
+assert(no_native_result.ok==true and #requests==2,
+    'time-only worker must not require native Kindle offset')
+
+local outage=Worker.run{book_id='b',book=book(25,84),cookies={k='v'},
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session}
+assert(outage.ok==false and outage.meta.request_dispatched==false and #requests==2,
+    'missing opening snapshot must fail closed without a Legacy GET')
+
+local mismatch=Worker.run{book_id='b',book=book(25,84),cookies={k='v'},
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=web_anchor(9)}
+assert(mismatch.ok==false and mismatch.meta.request_dispatched==false and #requests==2,
+    'Web chapter-index mismatch must refuse POST')
+
+local expired=web_anchor()
+expired.fetched_at=now-86400
+local stale=Worker.run{book_id='b',book=book(25,84),cookies={k='v'},
+    core_map_hash='h',elapsed_seconds=45,time_only=true,report_mode='reading_time_compat',
+    reading_time_session_id=session,cloud_anchor=expired}
+assert(stale.ok==false and stale.meta.request_dispatched==false,
+    'old cross-session Web tuple must not be used')
+
 local nonterminal=Worker.run{book_id='b',book=book(100,99),cookies={k='v'},
     core_map_hash='h',progress_ratio=1,time_only=false}
 assert(nonterminal.ok==false and #requests==2,
     'a nonfinal chapter must never masquerade as 100% whole-book progress')
-print('PASS beta17: Kindle time without Web GET, no unsafe dispatch, terminal progress protection')
+print('PASS 6.2: Web-position time echo, unsafe Web guard, terminal progress isolation')
 
 package.preload['miuread.codec']=function()return {} end
 package.preload['miuread.protocol']=function()return {} end

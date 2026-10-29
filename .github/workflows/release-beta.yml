@@ -104,6 +104,9 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_beta_release_workflow.py'
           python3 -m unittest discover -s tools -p 'test_beta11_release_guard.py' 
           python3 -m unittest discover -s tools -p 'test_beta12_release_regression.py'
+          python3 -m unittest discover -s tools -p 'test_620_readtime_contract.py'
+          python3 -m unittest discover -s tools -p 'test_623_session_snapshot_and_comment_ui.py'
+          python3 -m unittest discover -s tools -p 'test_625_comment_menu_and_sync_notice.py'
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ -z "${RELEASE_NOTES_INPUT//[[:space:]]/}" ]; then
@@ -326,6 +329,9 @@ jobs:
           lua5.1 tools/test_beta17_transport_cooldown.lua
           lua5.1 tools/test_beta17_sync_contract.lua
           lua5.1 tools/test_beta17_worker_and_comments.lua
+          lua5.1 tools/test_620_readtime_clock.lua
+          lua5.1 tools/test_readtime_recovery.lua
+          lua5.1 tools/test_beta5_sync_contract.lua
           lua5.1 tools/test_beta18_comment_refresh.lua
           lua5.1 tools/test_beta19_comment_and_abandon.lua
           lua5.1 tools/test_beta15_comment_response.lua
@@ -366,6 +372,8 @@ jobs:
           lua5.1 tools/test_beta5_reintegration.lua
           luajit tools/test_beta5_reintegration.lua
           luajit tools/test_beta6_end_reading_latest_wins.lua
+          luajit tools/test_readtime_recovery.lua
+          luajit tools/test_beta5_sync_contract.lua
           lua5.1 tools/test_store_repair.lua
           lua5.1 tools/test_cloud_freshness_contract.lua
           lua5.1 tools/test_beta10_translation_dependency_contract.lua
@@ -378,6 +386,7 @@ jobs:
           luajit tools/test_internal_links.lua
           python3 tools/test_extension_center_ux.py
           python3 tools/verify_600_beta1.py
+          python3 tools/test_624_release_verifier_contract.py
           python3 tools/verify_memory_profile.py
           python3 tools/test_beta11_download_resume.py
           lua5.1 tools/test_beta11_download_resume_policy.lua

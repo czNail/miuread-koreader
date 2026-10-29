@@ -41,12 +41,23 @@ assert(sync:find('lightweight service exited after requested stop',1,true),"requ
 assert(sync:find('if was_active then',1,true),"ReadReport restart not gated by active state")
 
 -- Existing cloud-integrity hard rules remain present.
-assert(worker:find('local local_position,local_error=estimate_position(book,progress_ratio)',1,true),
- "reading-time report no longer builds a valid Kindle coordinate")
-assert(worker:find('local valid,why=validate_terminal_progress(book,local_position)',1,true),
- "reading-time report lost the terminal-position integrity guard")
-assert(worker:find('position_override.source="kindle_native_time_guard"',1,true),
- "reading-time report lost its authoritative position selection")
+-- 6.2: periodic time compatibility writes replay the first verified Web
+-- position for this reading session; native Kindle position is reserved for
+-- the separate precise progress writer, which retains its terminal guard.
+assert(worker:find('local terminal_ok,terminal_error=validate_terminal_progress(book,position)',1,true),
+    "precise progress report lost its terminal chapter guard")
+assert(worker:find('if time_only ~= true then',1,true),
+    "precise progress position validation no longer separated from pure time")
+assert(worker:find('position_override=normalize_cloud_anchor(saved,{})',1,true),
+    "session Web anchor reuse missing")
+assert(worker:find('local anchor=type(job.cloud_anchor)=="table" and job.cloud_anchor or {}',1,true),
+    "the opening Web snapshot is not available to the time writer")
+assert(worker:find('observed_at>=session_started-2',1,true),
+    "the opening Web snapshot is not bound to this reader session")
+assert(worker:find('book.session_time_anchor_session=session_id',1,true),
+    "session identity not bound to the time anchor")
+assert(not worker:find('position_override.source="kindle_native_time_guard"',1,true),
+    "time compatibility mode unexpectedly reintroduced Kindle's changing coordinate")
 assert(main:find('pending_send',1,true),"pending_send recovery contract lost")
 assert(main:find('freshness',1,true),"freshness resolver integration lost")
 
