@@ -1262,6 +1262,31 @@ function Plugin:status_toast(title,text,timeout)
         self:toast(tostring(title or "").." · "..tostring(text or ""):gsub("%s+"," "),timeout or 3)
     end
 end
+-- 6.2.0-beta.5: one-line bottom notices for the reading progress/time
+-- family. Reuse bundled monochrome icon assets; do not use Emoji or a second
+-- InfoMessage surface. Generic application toasts keep their old contract.
+local SYNC_NOTICES = {
+    reading = {icon="refresh", text="正在读取云端进度…", timeout=6},
+    read_ok = {icon="check", text="已读取云端阅读进度", timeout=3},
+    read_failed = {icon="warning", text="云端进度读取失败", timeout=3},
+    uploaded = {icon="upload", text="阅读进度已同步到云端", timeout=3},
+    time_started = {icon="progress", text="本次阅读时间已开始同步", timeout=3},
+    comments_done = {icon="check", text="评论获取完成", timeout=3},
+    comments_failed = {icon="warning", text="评论获取未全部完成", timeout=4},
+}
+function Plugin:_sync_notice(kind, timeout)
+    local notice=SYNC_NOTICES[tostring(kind or "")]
+    if not notice then return false end
+    local ok,err=pcall(StatusToast.show,{
+        title="", text=notice.text, icon_key=notice.icon,
+        single_line=true, timeout=tonumber(timeout) or notice.timeout,
+    })
+    if not ok then
+        logger.warn("[MiuRead][SyncNotice] toast failed",tostring(kind),tostring(err))
+        self:toast(notice.text,tonumber(timeout) or notice.timeout)
+    end
+    return ok
+end
 function Plugin:_original_weread_plugin_present()
     local plugins_root=ROOT:match("^(.*)/[^/]+$") or "."
     return lfs.attributes(plugins_root.."/weread.koplugin","mode")=="directory"
@@ -14617,7 +14642,8 @@ function Plugin:_comment_range_next(runtime)
         local msg=(runtime.interrupted and "评论获取已中断：" or "评论获取完成：")..tostring(runtime.done).." 章，保存 "..tostring(runtime.comments).." 条"
         if runtime.skipped>0 then msg=msg.."，复用缓存 "..tostring(runtime.skipped).." 章" end
         if runtime.failed>0 then msg=msg.."，失败 "..tostring(runtime.failed).." 章" end
-        self:toast(msg,4)
+        logger.info("[MiuRead][Comments] range finished",msg)
+        self:_sync_notice(runtime.failed>0 and "comments_failed" or "comments_done")
         return
     end
     local chapter=runtime.rows[runtime.first+runtime.done]
@@ -14853,12 +14879,12 @@ function Plugin:_comment_fetch_mode_menu(back_callback)
         opaque_fullscreen=true,title="获取公开评论",
         on_back=back_callback or function() self:_show_reader_comment_center() end,
         sections={{title="",rows={
-            {label="自选范围（默认）",arrow=true,callback=function() select_range(false) end},
-            {label="更新指定范围",arrow=true,callback=function() select_range(true) end},
             {label="当前章节",arrow=true,
                 callback=function() self:_fetch_current_chapter_comments(false,back_callback) end},
+            {label="指定章节范围",arrow=true,callback=function() select_range(false) end},
             {label="更新当前章节",arrow=true,
                 callback=function() self:_fetch_current_chapter_comments(true,back_callback) end},
+            {label="更新指定范围",arrow=true,callback=function() select_range(true) end},
         }}}
     }
 end
@@ -24699,7 +24725,7 @@ function Plugin:_show_progress_sync_issue_detail(item)
                 UIManager:show(ConfirmBox:new{text="以本机精确位置为准并上传到微信读书？\n\n这是显式覆盖操作。只有当前保存的 chapter/co 仍属于本 generation 时才会执行。",ok_callback=function()
                     self:status_toast("阅读进度","正在上传本机精确位置",3)
                     self:_force_local_progress_issue(item,function(ok,err)
-                        if ok then self:status_toast("阅读进度同步完成","本机位置已上传并由云端确认",4)
+                        if ok then self:_sync_notice("uploaded")
                         else self:status_toast("阅读进度同步失败",U.first_line(tostring(err or "上传未完成"),60),4) end
                     end)
                 end})
@@ -24736,7 +24762,7 @@ function Plugin:_show_progress_sync_issue_detail(item)
             self:status_toast("阅读进度","正在重新确认《"..U.utf8_truncate(item.title,18,"…").."》",3)
             self:_retry_saved_progress_verification(item,function(ok,err)
                 if ok then
-                    self:status_toast("阅读进度同步完成","云端位置已经确认",3)
+                    self:_sync_notice("uploaded")
                 else
                     self:status_toast("阅读进度同步失败",U.first_line(tostring(err or item.reason),60),3)
                 end
@@ -24749,7 +24775,7 @@ function Plugin:_show_progress_sync_issue_detail(item)
         rows[#rows+1]={text="重新提交进度",post_text="仅在云端位置明确不一致时使用",callback=function()
             self:status_toast("阅读进度","正在重新提交同一精确位置",3)
             self:_resubmit_saved_progress(item,function(ok,err)
-                if ok then self:status_toast("阅读进度同步完成","重新提交的进度已从云端确认",3)
+                if ok then self:_sync_notice("uploaded")
                 else self:status_toast("重新提交暂未完成",U.first_line(tostring(err or "等待后续确认"),60),3) end
             end)
         end}
@@ -25514,8 +25540,14 @@ function Plugin:_open_sync_close(reason, fallback)
         -- of silently closing the reconciliation path.
         if self._open_sync_terminal_notice_shown~=true then
             self._open_sync_terminal_notice_shown=true
-            self:status_toast("阅读位置同步","云端进度检查未完成；当前保持本机位置，未覆盖云端",4)
+            self:_sync_notice("read_failed")
         end
+    elseif reason=="positions aligned" or reason=="local position newer"
+        or reason=="remote position verified" or reason=="remote text anchor located"
+        or reason=="remote chapter resolved; exact co unverified" then
+        -- A successful Web read is independent from whether the reader later
+        -- adopts the remote position. Conflicts have their own warning toast.
+        self:_sync_notice("read_ok")
     end
     logger.info("[MiuRead][OpenSync] surface closed","reason=",tostring(reason or "done"),"fallback=",tostring(fallback==true))
     return true
@@ -25534,7 +25566,7 @@ function Plugin:_open_sync_begin(book_id,title)
     self._open_sync_explicit_reposition=false
     self._open_sync_started_at=monotonic_wall_time()
     local timeout=tonumber(Config.OPEN_SYNC_SOFT_TIMEOUT_SECONDS) or 6
-    self:status_toast("阅读位置同步","正在后台确认云端位置…",math.max(2,math.floor(timeout+.5)))
+    self:_sync_notice("reading",math.max(2,math.floor(timeout+.5)))
     local generation=tonumber(HOME_SESSION.reader_session_generation or 0) or 0
     local task
     task=function()
@@ -25783,12 +25815,13 @@ function Plugin:ensure_read_report_progress(reason,automatic)
         return false
     end
     if self._progress_check_running then
-        if not automatic then self:toast("正在检查阅读位置……",2) end
+        if not automatic then self:_sync_notice("reading") end
         return false
     end
 
     self._progress_check_running=true
     self.sync:begin_progress_sync(reason or "读取云端进度")
+    if automatic~=true then self:_sync_notice("reading") end
     -- Freeze the pre-fetch reconciliation context. A cloud response fetched a
     -- few seconds later is an observation, never the historical common anchor.
     local frozen_context=self:_position_resolution_context(id)
@@ -25888,7 +25921,7 @@ function Plugin:ensure_read_report_progress(reason,automatic)
                 self:_save_progress_state(id,"remote_unavailable","暂时无法读取云端位置",localp,nil)
                 self.sync:end_progress_sync("云端位置暂时不可用")
                 if not automatic then
-                    self:info("暂时无法读取云端位置。\n\n为了避免覆盖其他设备上的位置，阅读时间仍会独立上传。")
+                    self:_sync_notice("read_failed")
                 else
                     self:_open_sync_close("remote unavailable",true)
                     self:_finish_auto_position_check(id,"remote unavailable")
@@ -25926,7 +25959,7 @@ function Plugin:ensure_read_report_progress(reason,automatic)
                 self.sync:end_progress_sync("位置已确认")
                 if automatic then self:_open_sync_close("positions aligned",false) end
                 if not automatic then
-                    self:info("本机位置："..localp.."%\n云端位置："..remotep.."%\n\n章节和章节内位置一致，无需处理。")
+                    self:_sync_notice("read_ok")
                 end
                 return
             end
@@ -26801,7 +26834,7 @@ function Plugin:_use_remote_position(id,localp,remote,options)
                         or (kind=="soft" and "已定位到云端章节，坐标验证待完成" or "云端位置已跳转，但精确位置验证失败"))
                     if not automatic then
                         if reliable then
-                            self:status_toast("阅读进度同步","已同步到云端阅读位置",3)
+                            self:_sync_notice("uploaded")
                         else
                             self:info(kind=="soft" and "已定位到云端章节，但章节内位置仍无法可靠确认。"
                                 or ("已跳到云端位置附近，但暂时无法完成同页级坐标确认。\n\n"..U.first_line(tostring(position_error or "精确位置不可用"),160)))
@@ -26932,7 +26965,7 @@ function Plugin:_use_remote_position(id,localp,remote,options)
                         reliable and "已按云端正文定位" or "已定位到云端章节，但章节内坐标验证未完成",actualp,remotep)
                     self.sync:end_progress_sync(reliable and "已按云端正文定位" or "已定位到云端章节，原生坐标验证待完成")
                     if not automatic then
-                        if reliable then self:status_toast("阅读进度同步","已同步到云端阅读位置",3)
+                        if reliable then self:_sync_notice("uploaded")
                         else self:info("已定位到云端章节，但章节内位置仍无法可靠确认。") end
                     end
                 else
@@ -27041,7 +27074,8 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
         self.sync:mark_verified(id,"positions_aligned",localp,localp,local_position)
         self:_save_progress_state(id,"aligned","本机与云端精确位置一致",localp,localp)
         self.sync:end_progress_sync("位置已确认")
-        if automatic then self:_open_sync_close("positions aligned",false); self:_finish_auto_position_check(id,"positions aligned") end
+        if automatic then self:_open_sync_close("positions aligned",false); self:_finish_auto_position_check(id,"positions aligned")
+        else self:_sync_notice("read_ok") end
         return true
     end
 
@@ -27105,7 +27139,8 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
                     local resolved_local=type(actual_position)=="table" and U.copy(actual_position) or U.copy(local_position)
                     resolved_local.updated_at=tonumber(resolved_remote and (resolved_remote.updated_at or resolved_remote.updated) or 0) or os.time()
                     self:_save_position_resolution(id,"aligned","remote_position_verified",resolved_local,resolved_remote)
-                    if automatic then self:_open_sync_close("remote position verified",false); self:_finish_auto_position_check(id,"remote verified"); self:_show_position_undo(resolved_remote) end
+                    if automatic then self:_open_sync_close("remote position verified",false); self:_finish_auto_position_check(id,"remote verified"); self:_show_position_undo(resolved_remote)
+                    else self:_sync_notice("read_ok") end
                 else
                     local failure_kind=tostring(type(failure_meta)=="table" and failure_meta.kind or "unresolved")
                     if failure_kind=="soft" then
@@ -27182,7 +27217,8 @@ function Plugin:on_remote_progress(id,localp,remote,automatic,local_position)
     self:_clear_progress_write_fence(id,"local_newer:"..reason)
     self:_save_progress_state(id,"local_selected","本机阅读位置较新；结束阅读时自动上传",localp,remotep)
     self.sync:end_progress_sync("本机位置较新，等待结束阅读")
-    if automatic then self:_open_sync_close("local position newer",false); self:_finish_auto_position_check(id,"local newer") end
+    if automatic then self:_open_sync_close("local position newer",false); self:_finish_auto_position_check(id,"local newer")
+    else self:_sync_notice("read_ok") end
     return true
 end
 
@@ -27395,7 +27431,7 @@ function Plugin:on_read_report_interval_success(status)
     if status and (status.recovery_probe==true or tonumber(status.elapsed_seconds or 0)<=0) then return end
     if self._time_sync_first_notice_shown==true or not self:_time_first_success_notice_enabled() then return end
     self._time_sync_first_notice_shown=true
-    self:toast("本次阅读时间已开始同步",3)
+    self:_sync_notice("time_started")
 end
 
 function Plugin:on_read_report_failure(err,kind,book_id)

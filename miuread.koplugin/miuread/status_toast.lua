@@ -8,6 +8,10 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
+local TextWidget = require("ui/widget/textwidget")
+local HorizontalGroup = require("ui/widget/horizontalgroup")
+local HorizontalSpan = require("ui/widget/horizontalspan")
+local Ui = require("miuread.ui_components")
 local UIManager = require("ui/uimanager")
 
 local Screen = Device.screen
@@ -17,6 +21,8 @@ local Toast = InputContainer:extend{
     toast = true,
     _miuread_transient = true,
     text = "",
+    icon_key = nil,
+    single_line = false,
     timeout = 3,
     modal = false,
     _timeout_func = nil,
@@ -64,14 +70,43 @@ function Toast:init()
     local border = math.max(1, tonumber(Size.border.window) or 1)
 
     local max_text_w = math.max(Screen:scaleBySize(180), math.floor(screen_w * 0.82))
-    local label = TextBoxWidget:new{
-        text = toast_text(self.title, self.text),
-        face = Font:getFace("x_smallinfofont"),
-        width = max_text_w,
-        height_adjust = true,
-        height_overflow_show_ellipsis = true,
-        alignment = "center",
-    }
+    local label
+    if self.single_line == true then
+        -- The status family is an actual one-line e-ink toast. A TextWidget
+        -- truncates to one line; a TextBoxWidget can otherwise wrap Chinese
+        -- strings and silently recreate the two-row notification.
+        local icon_size = Screen:scaleBySize(19)
+        local icon_gap = Screen:scaleBySize(7)
+        local icon_key = tostring(self.icon_key or "")
+        local label_width = math.max(Screen:scaleBySize(140),
+            max_text_w - (icon_key ~= "" and icon_size + icon_gap or 0))
+        local caption = TextWidget:new{
+            text = clean_line(self.text),
+            face = Font:getFace("x_smallinfofont"),
+            max_width = label_width,
+            truncate_with_ellipsis = true,
+            fgcolor = Blitbuffer.COLOR_BLACK,
+        }
+        if icon_key ~= "" then
+            label = HorizontalGroup:new{
+                align = "center",
+                Ui.icon(icon_key, icon_size, icon_size, icon_size),
+                HorizontalSpan:new{width = icon_gap},
+                caption,
+            }
+        else
+            label = caption
+        end
+    else
+        label = TextBoxWidget:new{
+            text = toast_text(self.title, self.text),
+            face = Font:getFace("x_smallinfofont"),
+            width = max_text_w,
+            height_adjust = true,
+            height_overflow_show_ellipsis = true,
+            alignment = "center",
+        }
+    end
 
     self.frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
@@ -181,6 +216,8 @@ function M.show(opts)
     local toast
     toast = Toast:new{
         title = opts.title,
+        icon_key = opts.icon_key,
+        single_line = opts.single_line == true,
         text = tostring(opts.text or "")..((opts.action_callback and tostring(opts.action_text or "")~="") and (" · "..tostring(opts.action_text)) or ""),
         timeout = opts.timeout or 3,
         action_callback = opts.action_callback,

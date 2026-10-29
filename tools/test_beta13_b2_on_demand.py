@@ -39,7 +39,9 @@ class CommentB2(unittest.TestCase):
     def test_reader_menu_has_explicit_requests(self):
         main = source('main.lua')
         self.assertIn('self.comment_sync=require("miuread.comment_sync"):new(self.api,self.store,self.annotations)', main)
-        self.assertIn('label="自选范围（默认）"', main)
+        self.assertIn('label="指定章节范围"', main)
+        self.assertIn('label="更新指定范围"', main)
+        self.assertNotIn('label="自选范围（默认）"', main)
         self.assertIn('label="当前章节"', main)
         self.assertIn('label="更新当前章节"', main)
         self.assertIn('label="查看本章评论"', main)
