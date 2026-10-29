@@ -47,8 +47,13 @@ class SnapshotAndUiRegression(unittest.TestCase):
         self.assertIn('self.covers_fullscreen=self.opts.opaque_fullscreen==true', dialog)
         self.assertIn('LineWidget:new{background=Blitbuffer.COLOR_WHITE',dialog)
         self.assertIn('dialog.covers_fullscreen and dialog.dimen or dialog.frame_dimen',dialog)
-        self.assertIn('comment_opaque==true',progress)
-        self.assertIn('comment_opaque=true',main)
+        compact = content('miuread.koplugin/miuread/comment_progress.lua')
+        self.assertIn('local dialog=CommentProgress:new{',main)
+        self.assertIn('self.popup_dimen=Geom:new',compact)
+        self.assertIn('covers_fullscreen=false',compact)
+        self.assertIn('stop_events_propagation=false',compact)
+        self.assertNotIn('LineWidget:new{background=Blitbuffer.COLOR_WHITE',compact)
+        self.assertNotIn('comment_opaque=true',main)
 
     def test_version_and_release_triggers(self):
         config = content('miuread.koplugin/miuread/config.lua')

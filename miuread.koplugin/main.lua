@@ -50,6 +50,7 @@ local LocalAnnotationDatabase=require("miuread.local_annotation_database")
 local AnnotationSync=require("miuread.annotation_sync")
 local Downloader=require("miuread.downloader")
 local DownloadProgress=require("miuread.download_progress")
+local CommentProgress=require("miuread.comment_progress")
 local DownloadTask=require("miuread.download_task")
 local ExtensionTask=require("miuread.extension_job")
 local DownloadResult=require("miuread.download_result")
@@ -14575,7 +14576,7 @@ function Plugin:_comment_range_state(runtime,stage,message)
     local state={kind="comments",stage=stage,current=runtime.done,total=runtime.total,
         chapter=runtime.rows[runtime.first+current-1] and runtime.rows[runtime.first+current-1].title or "",
         comments=runtime.comments,failed=runtime.failed,skipped=runtime.skipped,
-        message=message or ""}
+        message=message or "",paused=runtime.paused==true}
     runtime.last_state=state
     if runtime.dialog and runtime.dialog:is_shown() then runtime.dialog:set_state(state) end
 end
@@ -14598,14 +14599,27 @@ end
 function Plugin:_show_comment_range_progress(runtime)
     if self._comment_range_task~=runtime then return false end
     if runtime.dialog and runtime.dialog:is_shown() then return true end
-    local resuming=runtime.paused==true
-    runtime.paused=false
-    local dialog=DownloadProgress:new{
-        title="正在获取公开评论",comment_opaque=true,cancel_text="取消获取",
-        pause_text="暂停获取",background_text="后台获取",
-        on_pause=function()
-            runtime.paused=true
-            self:_comment_range_state(runtime,"comments","已暂停，可在评论菜单继续")
+    local dialog=CommentProgress:new{
+        paused=runtime.paused==true,
+        on_pause=function(pause)
+            if self._comment_range_task~=runtime then return false end
+            runtime.paused=pause==true
+            self:_comment_range_state(runtime,"comments",runtime.paused and "已暂停" or "继续获取")
+            -- Pausing never kills a currently running chapter transaction; it
+            -- only prevents the next chapter. Resume is EXPLICIT, not tied to
+            -- merely reopening the progress panel.
+            if not runtime.paused and not runtime.async:busy() then
+                if runtime.advance_task then
+                    UIManager:unschedule(runtime.advance_task)
+                    runtime.advance_task=nil
+                end
+                runtime.advance_task=function()
+                    runtime.advance_task=nil
+                    self:_comment_range_next(runtime)
+                end
+                UIManager:scheduleIn(.05,runtime.advance_task)
+            end
+            return true
         end,
         on_background=function()
             if runtime.dialog then runtime.dialog:close("background") end
@@ -14617,14 +14631,14 @@ function Plugin:_show_comment_range_progress(runtime)
     }
     runtime.dialog=dialog
     if dialog:show() then
-        if runtime.last_state then dialog:set_state(runtime.last_state) end
-        if resuming and not runtime.async:busy() then
-            UIManager:scheduleIn(.05,function() self:_comment_range_next(runtime) end)
+        if runtime.last_state then
+            local state=runtime.last_state
+            state.paused=runtime.paused==true
+            dialog:set_state(state)
         end
         return true
     end
     runtime.dialog=nil
-    self:toast("评论获取已转入后台",2)
     return false
 end
 
@@ -14871,21 +14885,28 @@ function Plugin:_choose_comment_range(force,back_callback)
 end
 
 function Plugin:_comment_fetch_mode_menu(back_callback)
-    if self._comment_range_task then return self:_show_comment_range_progress(self._comment_range_task) end
     local function select_range(force)
         return self:_choose_comment_range(force,back_callback)
+    end
+    local rows={
+        {label="当前章节",arrow=true,
+            callback=function() self:_fetch_current_chapter_comments(false,back_callback) end},
+        {label="指定章节范围",arrow=true,callback=function() select_range(false) end},
+        {label="更新当前章节",arrow=true,
+            callback=function() self:_fetch_current_chapter_comments(true,back_callback) end},
+        {label="更新指定范围",arrow=true,callback=function() select_range(true) end},
+    }
+    if self._comment_range_task then
+        table.insert(rows,1,{icon="progress",label="评论获取任务",
+            value=self._comment_range_task.paused and "已暂停" or "后台进行",
+            arrow=true,callback=function()
+                if self._comment_range_task then self:_show_comment_range_progress(self._comment_range_task) end
+            end})
     end
     return ReaderSettingsDialog.show{
         opaque_fullscreen=true,title="获取公开评论",
         on_back=back_callback or function() self:_show_reader_comment_center() end,
-        sections={{title="",rows={
-            {label="当前章节",arrow=true,
-                callback=function() self:_fetch_current_chapter_comments(false,back_callback) end},
-            {label="指定章节范围",arrow=true,callback=function() select_range(false) end},
-            {label="更新当前章节",arrow=true,
-                callback=function() self:_fetch_current_chapter_comments(true,back_callback) end},
-            {label="更新指定范围",arrow=true,callback=function() select_range(true) end},
-        }}}
+        sections={{title="",rows=rows}}
     }
 end
 
@@ -14915,7 +14936,7 @@ function Plugin:_show_reader_comment_center(back_callback)
                 or {has_cache=false,status="not_fetched",comments=0}
             local can_fetch=scope.book_id~="" and scope.chapter_uid~=""
             local content_rows={
-                {icon="download",label="获取公开评论",value=self._comment_range_task and "正在获取" or "自选范围 / 当前章节",
+                {icon="download",label="获取公开评论",value=self._comment_range_task and "任务进行中" or "当前章节 / 指定范围",
                     enabled=scope.book_id~="",arrow=true,callback=function()
                         self:_comment_fetch_mode_menu(reopen)
                     end},
@@ -14923,6 +14944,13 @@ function Plugin:_show_reader_comment_center(back_callback)
                     enabled=can_fetch and cache.has_cache,arrow=true,
                     callback=function() self:_show_current_chapter_comments(scope,reopen) end},
             }
+            if self._comment_range_task then
+                content_rows[#content_rows+1]={icon="progress",label="评论获取任务",
+                    value=self._comment_range_task.paused and "已暂停" or "后台进行",
+                    arrow=true,callback=function()
+                        self:_show_comment_range_progress(self._comment_range_task)
+                    end}
+            end
             content_rows[#content_rows+1]={icon="bookmark",label="我的评论收藏",
                 value=tostring(total).." 条",arrow=true,callback=function()
                     self:show_thought_favorites{reader_context=true,scope_label="我的评论收藏",back_callback=reopen}
