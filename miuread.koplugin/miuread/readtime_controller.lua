@@ -61,7 +61,7 @@ function M:schedule(delay)
         local online=self.host and type(self.host.is_online)=="function" and self.host:is_online()
         if self.active then self:schedule(30)
         elseif summary.pending>0 and online and not summary.blocked and not summary.error
-            and not self.awaiting_authorization and not self.waiting_historical and not self.worker_unavailable then
+            and not self.awaiting_authorization and not self.worker_unavailable then
             self:schedule(math.max(10,(tonumber((summary.control or {}).next_send) or 0)-os.time()))
         end
     end
@@ -70,8 +70,6 @@ function M:schedule(delay)
 end
 function M:start(sync,record,capture_floor)
     self.host,self.sync=sync.host,sync
-    self.reading_open=true
-    self.web_window=nil
     self.suspended=false
     self.worker_unavailable=nil
     local stats=Stats.instance(sync.host)
@@ -169,17 +167,8 @@ function M:collect(close)
     return true
 end
 function M:stop(sync,reason,cancel)
-    if self.sync==sync or cancel or not self:enabled() then
-        self.reading_open=false
-        if cancel or not self:enabled() then self.web_window=nil end
-    end
     if self.active and (self.active.sync==sync or cancel or not self:enabled()) then
-        local active=self.active
-        local sealed=self:collect(true)
-        if sealed and not cancel and self:enabled() and active.vid==account(self.store) then
-            self.web_window={id=active.window.id,vid=active.vid,
-                login_session=tostring((self.store:auth() or {}).login_session_id or "")}
-        end
+        self:collect(true)
     end
     if cancel or not self:enabled() then
         self.suspended=true
@@ -239,6 +228,10 @@ function M:send()
     if not self:enabled() or self.suspended or self.progress_owner or self.worker:busy() or self.worker_unavailable
         or not self.host then return false end
     local host=self.host
+    local live_sync=host.sync or self.sync
+    local daemon=live_sync and live_sync.daemon
+    if daemon and (daemon.active or daemon.final_flush_pending) then return false end
+    if live_sync and live_sync.reading_time_backend=="web" and live_sync.current then return false end
     if host._reading_end_sync_active or host._reading_end_finalizer_active
         or (self.sync and (self.sync.busy or self.sync.progress_write_fence)) then return false end
     if type(host.is_online)~="function" or not host:is_online() then
@@ -254,25 +247,18 @@ function M:send()
         self:log("dispatch","waiting",{reason=summary.blocked}); return false
     end
     if os.time()<(tonumber((summary.control or {}).next_send) or 0) then return false end
-    local auth=self.store:auth()
-    local native_credentials=require("miuread.shelf_client").credentials(auth)
-    local native=native_credentials~=nil and self.store:preferences().api_transport~="web"
-    self.channel=native and "eink" or "web"
-    local Web=not native and require("miuread.web_readtime") or nil
-    -- Preserve beta.8's Web reading-end policy. Native historical uploads carry
-    -- no reading position and may drain while reading; Web compatibility writes
-    -- use only the latest closed, recent window from this login session.
-    if Web and (self.reading_open or self.active) then return false end
-    local closed=self.web_window
-    local window=closed and closed.vid==vid and closed.login_session==login_session and closed.id or nil
+    if require("miuread.api_transport").new(self.store).selected~="eink" then
+        self.awaiting_authorization=true
+        return false
+    end
+    self.channel="eink"
     local now=os.time()
     local batch,err=self.queue:pending(vid,now,function(row)
-        return row.start_time+row.duration<=now and (not Web or Web.eligible(row,now,window))
-    end,Web and 60 or nil)
+        return row.start_time+row.duration<=now
+    end)
     if not batch then self.capture_error=err; return false end
-    self.waiting_historical=Web~=nil and #batch.rows==0 and summary.pending>0
     if #batch.rows==0 then
-        if not Web then self:schedule(60) end -- e.g. timestamps still ahead after a clock correction
+        self:schedule(60) -- e.g. timestamps still ahead after a clock correction
         return false
     end
     local id=tostring(os.time()).."-"..tostring(math.random(100000,999999))
@@ -286,7 +272,7 @@ function M:send()
             -- enters its write. Switching accounts never redirects a batch.
             if account(self.store)~=vid then return false end
             for _,row in ipairs(batch.rows) do
-                if row.start_time+row.duration>os.time() or (Web and not Web.eligible(row,os.time(),window)) then return false end
+                if row.start_time+row.duration>os.time() then return false end
             end
             if type(self.store.read_persisted)=="function" then
                 local saved=self.store:read_persisted("auth")
@@ -297,12 +283,6 @@ function M:send()
             if claimed then self:log("dispatch","start",{batch_id=id,book_id=batch.book_id,
                 seconds=batch.seconds,rows=#batch.rows}) end
             return claimed
-        end
-        if Web then
-            local result=Web.send(auth,batch,claim,self.sync and self.sync.api)
-            result.saved=self.queue:finish(vid,batch,id,result.state,os.time(),result.error)==true
-            if not result.saved then result.state="unknown"; result.error="receipt_persist_failed" end
-            return result
         end
         local Native=require("miuread.eink_client").new(host.http,self.store)
         local Transport=require("miuread.eink_readtime")

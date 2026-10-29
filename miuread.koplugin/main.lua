@@ -23222,7 +23222,16 @@ function Plugin:_sync_user_issue(status, session)
 end
 
 function Plugin:_reading_time_status_label()
-    return self:reading_time_status_label()
+    local prefs=self.store:preferences().sync or {}
+    if prefs.time_enabled~=true then return "已关闭" end
+    local r=self.sync and self.sync:record() or nil
+    if not (r and r.book) then return "等待阅读" end
+    local id=tostring(r.book.book_id or r.book.bookId or "")
+    local session=id~="" and (self.store:session(id) or {}) or {}
+    if tostring(session.report_state or "")=="ok" or (tonumber(self.sync and self.sync.last_upload or 0) or 0)>0 then
+        return "已同步"
+    end
+    return "尽力同步"
 end
 
 function Plugin:_sync_current_book_label()
@@ -25303,6 +25312,8 @@ local function reading_time_duration(seconds)
 end
 function Plugin:reading_time_status_label()
     if (self.store:preferences().sync or {}).time_enabled~=true then return "已关闭" end
+    local backend=self.sync.reading_time_backend or require("miuread.api_transport").new(self.store).selected
+    if backend=="web" then return self:_reading_time_status_label() end
     local controller=self.sync:offline_time_controller()
     local summary=controller and controller:summary() or {}
     if summary.error then return summary.error=="ledger_full" and "本地记录已满" or "本地记录异常" end
@@ -25366,8 +25377,7 @@ function Plugin:reading_time_menu()
     }
     local control=summary.control or {}
     local reasons={authentication="登录或授权需要恢复",network="网络暂不可用",rate_limited="接口限频，正在等待冷却",
-        prepare_failed="上传准备失败，将自动重试",web_position_unavailable="云端位置暂不可用，将自动重试",
-        config_token_missing="服务端未返回签名配置，将自动重试",
+        prepare_failed="上传准备失败，将自动重试",config_token_missing="服务端未返回签名配置，将自动重试",
         signature_token_invalid="服务端签名配置异常，将自动重试",web_request_failed="Web 上传准备失败，将自动重试",
         worker_unavailable="后台任务暂不可用；可稍后点击立即同步重试"}
     if control.reason then rows[#rows+1]={text=reasons[control.reason] or "等待下次同步",enabled=false} end
@@ -25389,7 +25399,7 @@ function Plugin:reading_time_menu()
     elseif control.reason=="authentication" then rows[#rows+1]={text="检查账号与授权",callback=function() self:show_account_status() end} end
     if self.store:preferences().api_transport=="web" then rows[#rows+1]={text="历史时长等待切回自动接口后补传",enabled=false} end
     rows[#rows+1]={text="使用说明",callback=function()
-        self:info("请开启 KOReader 阅读统计。正常读书即可，时长会先保存到本机；E-Ink 授权可用时，联网后自动补传。\n\nWeb 兼容模式在结束阅读后同步本次阅读的近期片段，较早的时长会等待 E-Ink 授权。\n\n待确认记录不会自动重发，可先在微信读书核对后忽略。关闭同步会保留已有队列。")
+        self:info("自动接口且 E-Ink 已授权时，请开启 KOReader 阅读统计；本次阅读时长先保存到本机，联网后经 E-Ink 补传。\n\nWeb 沿用原有在线周期上报与关书尾段流程，不补传离线队列。每次开书固定一种计时来源，修改通道或授权后下次开书生效。\n\n待确认记录不会自动重发，可先在微信读书核对后忽略。关闭同步会保留已有队列。")
     end}
     rows[#rows+1]={text="详细诊断日志",checked_func=function() return (self.store:preferences().sync or {}).time_diagnostics==true end,
         keep_menu_open=true,callback=function()
@@ -25415,9 +25425,9 @@ function Plugin:toggle_time_sync(confirmed)
         self.sync:start("enabled")
         self.sync:wake_offline_reading_time()
         if self:_original_weread_plugin_present() then
-            self:info("阅读时长同步已开启，请保持 KOReader 阅读统计开启。\n\n检测到原作者 WeRead 插件目录（weread.koplugin）。若两边都开启阅读时间同步，可能重复上报；建议只保留一边。")
+            self:info("阅读时长同步已开启，E-Ink 离线记录需要开启 KOReader 阅读统计。\n\n检测到原作者 WeRead 插件目录（weread.koplugin）。若两边都开启阅读时间同步，可能重复上报；建议只保留一边。")
         else
-            self:status_toast("阅读时长同步","已开启 · 本地记录，联网同步",3)
+            self:status_toast("阅读时长同步","已开启",3)
         end
     else
         self.sync:stop("disabled")

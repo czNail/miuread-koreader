@@ -626,7 +626,7 @@ local function build_payload(book_id, elapsed_seconds, book, progress_ratio, tim
     return payload, position, public
 end
 
-local function attempt_report(client, book_id, elapsed_seconds, book, progress_ratio, time_only, position_override, before_dispatch)
+local function attempt_report(client, book_id, elapsed_seconds, book, progress_ratio, time_only, position_override)
     local payload, position_or_error, payload_public = build_payload(
         book_id, elapsed_seconds, book, progress_ratio, time_only, position_override)
     if not payload then
@@ -634,9 +634,6 @@ local function attempt_report(client, book_id, elapsed_seconds, book, progress_r
             {payload_fields_complete=false}, {request_dispatched=false}
     end
     local referer = book.reader_url or WeRead.reader_url(book_id)
-    if before_dispatch and before_dispatch()~=true then
-        return false,nil,"reading-time dispatch cancelled","context",nil,payload_public,{request_dispatched=false}
-    end
     local ok, result, code, headers = pcall(function()
         return client:report_read(payload, referer)
     end)
@@ -835,11 +832,6 @@ function Worker.run(job)
                     break
                 end
             end
-            if idx==nil and catalog_idx~=nil then
-                idx=catalog_idx
-                anchor=deepcopy(anchor)
-                anchor.chapter_idx=idx
-            end
             if session_id~="" and same_book and from_web and fresh and idx~=nil
                 and idx>=0 and idx==math.floor(idx)
                 and catalog_idx~=nil and catalog_idx==idx then
@@ -866,7 +858,7 @@ function Worker.run(job)
         end
     end
     local accepted, result, first_error, first_kind, first_position, first_public, first_meta = attempt_report(
-        client, book_id, elapsed_seconds, book, progress_ratio, protocol_time_only, position_override,job.before_dispatch
+        client, book_id, elapsed_seconds, book, progress_ratio, protocol_time_only, position_override
     )
     first_public = type(first_public) == "table" and first_public or {}
     first_public.report_mode = tostring(job.report_mode or (protocol_time_only and "time_only" or "progress"))

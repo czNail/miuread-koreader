@@ -10,7 +10,7 @@ PLUGIN = ROOT / "miuread.koplugin"
 REQUIRED = {
     "_meta.lua", "main.lua", "miuread/config.lua", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES",
     "miuread/readtime_controller.lua", "miuread/readtime_outbox.lua", "miuread/readtime_stats.lua",
-    "miuread/readtime_protocol.lua", "miuread/eink_readtime.lua", "miuread/web_readtime.lua",
+    "miuread/readtime_protocol.lua", "miuread/eink_readtime.lua",
     "miuread/readtime_clock.lua", "miuread/readtime_metadata.lua",
     "licenses/weread-omni-MIT.txt", "licenses/moon-GPL-3.0.txt",
 }

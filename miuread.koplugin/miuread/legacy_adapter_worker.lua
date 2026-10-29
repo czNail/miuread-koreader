@@ -126,7 +126,6 @@ function Adapter.run(job)
         cloud_anchor = copy(job.cloud_anchor or {}),
         force_context = job.force_context == true,
         context_only = job.context_only == true,
-        before_dispatch = job.before_dispatch,
     }
     local result = Legacy.run(legacy_job)
     local context = merge(legacy_job.book, result.book_patch)

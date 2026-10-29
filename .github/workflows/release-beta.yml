@@ -534,7 +534,6 @@ jobs:
               "miuread.koplugin/miuread/readtime_metadata.lua",
               "miuread.koplugin/miuread/readtime_protocol.lua",
               "miuread.koplugin/miuread/eink_readtime.lua",
-              "miuread.koplugin/miuread/web_readtime.lua",
               "miuread.koplugin/licenses/weread-omni-MIT.txt",
               "miuread.koplugin/licenses/moon-GPL-3.0.txt",
           }

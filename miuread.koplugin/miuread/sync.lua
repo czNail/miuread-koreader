@@ -3475,7 +3475,7 @@ function Sync:upload(elapsed, callback, options)
     return true
 end
 
-function Sync:retry_safe_reading_time(book_id,record_override,position_override,callback,reading_time_granted)
+function Sync:retry_safe_reading_time(book_id,record_override,position_override,callback)
     callback=type(callback)=="function" and callback or function() end
     -- Older settings may still contain legacy SAFE time debt after OTA.
     -- Never replay it in the 6.2 best-effort mode; this does not affect the
@@ -3497,19 +3497,6 @@ function Sync:retry_safe_reading_time(book_id,record_override,position_override,
     if not position or position.safe~=true or tonumber(position.progress)==nil
         or tostring(position.chapter_uid or position.chapterUid or "")=="" then
         callback(false,"缺少安全的位置锚点，不能重传阅读时间","context"); return false
-    end
-    -- Older versions may still have provably unsent carry without historical
-    -- timestamps. Keep its existing recovery path, serialized with the new
-    -- statistics outbox; never invent timestamps or copy it into that ledger.
-    if self.offline_time and reading_time_granted~=true then
-        local controller=self.offline_time
-        return controller:yield_to_progress(self,function(granted)
-            if not granted then callback(false,"阅读时长同步任务繁忙，请稍后重试","busy");return end
-            self:retry_safe_reading_time(book_id,record_override,position_override,function(...)
-                controller:release_progress(self)
-                callback(...)
-            end,true)
-        end)
     end
     local anchor=self:remote_wire_anchor(book_id)
     if not anchor then
@@ -5002,10 +4989,10 @@ function Sync:_start_daemon(reason)
         self.last_stage = "当前文件未启用阅读时间同步"
         return false, "当前文件未启用阅读时间同步"
     end
-    -- Stale service callbacks may still request a restart after an auth refresh.
-    -- All new intervals belong to the statistics/outbox controller.
-    local controller=self:offline_time_controller()
-    if controller then
+    -- A session has exactly one clock owner. Keep the upstream Web service
+    -- unchanged; only Native sessions use the historical statistics outbox.
+    if self.reading_time_backend=="eink" then
+        local controller=self:offline_time_controller()
         if self.suspended or not controller:enabled() then return false end
         return controller:start(self,record)
     end
@@ -5452,9 +5439,12 @@ function Sync:start(reason)
             "book=",tostring(record.book and record.book.book_id or ""))
         return false,"当前文件未启用阅读时间同步"
     end
-    if enabled then
-        -- One source for both online and offline intervals. Never run the
-        -- legacy wall-clock reporter alongside KOReader statistics capture.
+    if not self.reading_time_backend then
+        self.reading_time_backend=require("miuread.api_transport").new(self.store).selected
+    end
+    if self.reading_time_backend=="eink" then
+        -- Pin the clock owner until the next document session. Auth/settings
+        -- changes cannot count an existing Native interval again through Web.
         if self.suspended then return false,"设备已休眠" end
         if self.daemon and self.daemon.active then self:_stop_daemon("statistics_time_mode",true,0) end
         local ok,err=self:offline_time_controller():start(self,record)
@@ -5700,6 +5690,14 @@ function Sync:on_reader_ready()
         return true
     end
     local ready_record=self:record()
+    local native_active=self.offline_time and self.offline_time.active
+    if self.reading_time_backend=="eink" and native_active and native_active.sync==self and ready_record
+        and native_active.book_id==tostring(ready_record.book.book_id or "")
+        and tostring(native_active.record.path or "")==tostring(ready_record.path or "") then
+        self.current=ready_record
+        self.suspended=false
+        return
+    end
     local ready_job=self.daemon and read_json_file(self.daemon.paths.job) or {}
     if self.daemon and self.daemon.active and ready_record
         and tostring(self.daemon.book_id or "")==tostring(ready_record.book.book_id or "")
@@ -5725,6 +5723,7 @@ function Sync:on_reader_ready()
     self.last_activity = 0
     self.last_page = nil
     self.session_started_at = os.time()
+    self.reading_time_backend=nil
     self:_ensure_reading_time_ids(true,true)
     self.resume_after_finalizer=false
     self.first_success_notified = false
